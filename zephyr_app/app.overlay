@@ -1,0 +1,33 @@
+#include <zephyr/dt-bindings/dt-util.h>
+
+&bootrom {
+	status = "disabled";
+};
+
+&imem {
+	status = "okay";
+	reg = <0x0 DT_SIZE_K(64)>;
+};
+
+&dmem {
+	status = "okay";
+	reg = <0x80000000 DT_SIZE_K(64)>;
+};
+
+&clint {
+	status = "okay";
+};
+
+&mtimer {
+	status = "okay";
+};
+
+&uart0 {
+	status = "okay";
+	current-speed = <19200>;
+};
+
+&gpio {
+	status = "okay";
+	ngpios = <8>;
+};
