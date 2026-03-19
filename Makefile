@@ -2,7 +2,7 @@ NEORV32_HOME = ./neorv32
 GHDL_FLAGS   = --std=08
 
 CORE_SOURCES = $(wildcard $(NEORV32_HOME)/rtl/core/*.vhd)
-SIM_SOURCES  = $(NEORV32_HOME)/sim/sim_uart_rx.vhd
+SIM_SOURCES  = sim/sim_uart_rx.vhd
 SIM_TIME    ?= 500us
 
 # Override IMEM image (analyzed after core to shadow the default).
@@ -35,14 +35,18 @@ endif
 	@echo "=== Analyzing sim helpers ==="
 	ghdl -i $(GHDL_FLAGS) --work=work $(SIM_SOURCES)
 	@echo "=== Analyzing wrapper & testbench ==="
-	ghdl -i $(GHDL_FLAGS) --work=work neorv32_wrapper.vhd neorv32_tb.vhd
+	ghdl -i $(GHDL_FLAGS) --work=work rtl/neorv32_wrapper.vhd sim/neorv32_tb.vhd
+
+WAVE ?=
 
 simulate:
 	@echo "=== Elaborating ==="
 	ghdl -m $(GHDL_FLAGS) --work=work neorv32_tb
 	@echo "=== Running simulation ($(SIM_TIME)) ==="
 	ghdl -r $(GHDL_FLAGS) --work=work neorv32_tb \
-		--wave=output.ghw --stop-time=$(SIM_TIME) \
+		$(if $(WAVE),--wave=output.ghw) \
+		--stop-time=$(SIM_TIME) \
+		--ieee-asserts=disable \
 		--assert-level=error
 
 # ---------- software build ------------------------------------------------
