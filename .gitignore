@@ -13,6 +13,10 @@ zephyr_imem_image.vhd
 
 # Zephyr build output
 build_zephyr/
+build_zephyr_fpga/
+
+# Vivado build output
+build/
 
 # SW build artifacts
 sw/test_gpio_uart/*.elf
