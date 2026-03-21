@@ -32,7 +32,7 @@ LOG_MODULE_REGISTER(i2c_neorv32);
 #include <zephyr/drivers/syscon.h>
 #include <zephyr/sys/sys_io.h>
 
-#include <soc.h>
+#include "../neorv32_regs.h"
 
 /* Register offsets */
 #define NEORV32_TWI_CTRL 0x00U
@@ -54,12 +54,7 @@ LOG_MODULE_REGISTER(i2c_neorv32);
 #define TWI_CMD_STOP      0x2U
 #define TWI_CMD_RTX       0x3U
 
-/*
- * Maximum poll iterations before returning -ETIMEDOUT.
- * At 100 MHz each iteration is ~10 ns; 1 M iterations ≈ 10 ms, which is
- * well above any legitimate I2C transaction time at 100 kHz (standard mode).
- */
-#define TWI_POLL_RETRIES 1000000U
+#define TWI_POLL_RETRIES NEORV32_POLL_RETRIES
 
 /* NEORV32 clock prescaler LUT: index -> divisor */
 static const uint16_t twi_prsc_lut[8] = {2, 4, 8, 64, 128, 1024, 2048, 4096};
@@ -69,22 +64,25 @@ struct neorv32_i2c_config {
 	const struct device *syscon;
 };
 
-static inline uint32_t neorv32_i2c_reg_read(const struct neorv32_i2c_config *cfg, uint32_t reg)
+static inline uint32_t neorv32_i2c_reg_read(const struct device *dev, uint32_t reg)
 {
+	const struct neorv32_i2c_config *cfg = dev->config;
+
 	return sys_read32(cfg->base + reg);
 }
 
-static inline void neorv32_i2c_reg_write(const struct neorv32_i2c_config *cfg, uint32_t reg,
-					  uint32_t val)
+static inline void neorv32_i2c_reg_write(const struct device *dev, uint32_t reg, uint32_t val)
 {
+	const struct neorv32_i2c_config *cfg = dev->config;
+
 	sys_write32(val, cfg->base + reg);
 }
 
 /* Blocks until TX FIFO has at least one free slot. Returns -ETIMEDOUT on hang. */
-static int twi_wait_tx(const struct neorv32_i2c_config *cfg)
+static int twi_wait_tx(const struct device *dev)
 {
 	for (uint32_t i = 0U; i < TWI_POLL_RETRIES; i++) {
-		if (!(neorv32_i2c_reg_read(cfg, NEORV32_TWI_CTRL) & TWI_CTRL_TX_FULL)) {
+		if (!(neorv32_i2c_reg_read(dev, NEORV32_TWI_CTRL) & TWI_CTRL_TX_FULL)) {
 			return 0;
 		}
 	}
@@ -93,10 +91,10 @@ static int twi_wait_tx(const struct neorv32_i2c_config *cfg)
 }
 
 /* Blocks until bus engine is idle (TX FIFO drained and bus quiet). Returns -ETIMEDOUT on hang. */
-static int twi_wait_idle(const struct neorv32_i2c_config *cfg)
+static int twi_wait_idle(const struct device *dev)
 {
 	for (uint32_t i = 0U; i < TWI_POLL_RETRIES; i++) {
-		if (!(neorv32_i2c_reg_read(cfg, NEORV32_TWI_CTRL) & TWI_CTRL_BUSY)) {
+		if (!(neorv32_i2c_reg_read(dev, NEORV32_TWI_CTRL) & TWI_CTRL_BUSY)) {
 			return 0;
 		}
 	}
@@ -105,11 +103,11 @@ static int twi_wait_idle(const struct neorv32_i2c_config *cfg)
 }
 
 /* Blocks until an RX FIFO entry is available, then returns it via *val. Returns -ETIMEDOUT. */
-static int twi_wait_rx(const struct neorv32_i2c_config *cfg, uint32_t *val)
+static int twi_wait_rx(const struct device *dev, uint32_t *val)
 {
 	for (uint32_t i = 0U; i < TWI_POLL_RETRIES; i++) {
-		if (neorv32_i2c_reg_read(cfg, NEORV32_TWI_CTRL) & TWI_CTRL_RX_AVAIL) {
-			*val = neorv32_i2c_reg_read(cfg, NEORV32_TWI_DCMD);
+		if (neorv32_i2c_reg_read(dev, NEORV32_TWI_CTRL) & TWI_CTRL_RX_AVAIL) {
+			*val = neorv32_i2c_reg_read(dev, NEORV32_TWI_DCMD);
 			return 0;
 		}
 	}
@@ -118,29 +116,29 @@ static int twi_wait_rx(const struct neorv32_i2c_config *cfg, uint32_t *val)
 }
 
 /* Issues a START (or REPEATED-START) condition and waits for completion. */
-static int twi_start(const struct neorv32_i2c_config *cfg)
+static int twi_start(const struct device *dev)
 {
 	int err;
 
-	err = twi_wait_tx(cfg);
+	err = twi_wait_tx(dev);
 	if (err < 0) {
 		return err;
 	}
-	neorv32_i2c_reg_write(cfg, NEORV32_TWI_DCMD, TWI_CMD_START << TWI_DCMD_CMD_SHIFT);
-	return twi_wait_idle(cfg);
+	neorv32_i2c_reg_write(dev, NEORV32_TWI_DCMD, TWI_CMD_START << TWI_DCMD_CMD_SHIFT);
+	return twi_wait_idle(dev);
 }
 
 /* Issues a STOP condition and waits for completion. */
-static int twi_stop(const struct neorv32_i2c_config *cfg)
+static int twi_stop(const struct device *dev)
 {
 	int err;
 
-	err = twi_wait_tx(cfg);
+	err = twi_wait_tx(dev);
 	if (err < 0) {
 		return err;
 	}
-	neorv32_i2c_reg_write(cfg, NEORV32_TWI_DCMD, TWI_CMD_STOP << TWI_DCMD_CMD_SHIFT);
-	return twi_wait_idle(cfg);
+	neorv32_i2c_reg_write(dev, NEORV32_TWI_DCMD, TWI_CMD_STOP << TWI_DCMD_CMD_SHIFT);
+	return twi_wait_idle(dev);
 }
 
 /*
@@ -149,7 +147,7 @@ static int twi_stop(const struct neorv32_i2c_config *cfg)
  * For all read bytes except the last: mack=true (master ACK).
  * For the last read byte: mack=false (master NACK to signal end of read).
  */
-static int twi_rtx(const struct neorv32_i2c_config *cfg, uint8_t data, bool mack, uint32_t *result)
+static int twi_rtx(const struct device *dev, uint8_t data, bool mack, uint32_t *result)
 {
 	uint32_t cmd = (uint32_t)data | (TWI_CMD_RTX << TWI_DCMD_CMD_SHIFT);
 	int err;
@@ -158,12 +156,12 @@ static int twi_rtx(const struct neorv32_i2c_config *cfg, uint8_t data, bool mack
 		cmd |= TWI_DCMD_ACK;
 	}
 
-	err = twi_wait_tx(cfg);
+	err = twi_wait_tx(dev);
 	if (err < 0) {
 		return err;
 	}
-	neorv32_i2c_reg_write(cfg, NEORV32_TWI_DCMD, cmd);
-	return twi_wait_rx(cfg, result);
+	neorv32_i2c_reg_write(dev, NEORV32_TWI_DCMD, cmd);
+	return twi_wait_rx(dev, result);
 }
 
 static int neorv32_i2c_configure(const struct device *dev, uint32_t dev_config)
@@ -232,8 +230,8 @@ static int neorv32_i2c_configure(const struct device *dev, uint32_t dev_config)
 			((best_prsc & 0x7U) << 1U) |
 			((best_cdiv & 0xFU) << 4U);
 
-	neorv32_i2c_reg_write(cfg, NEORV32_TWI_CTRL, 0U);
-	neorv32_i2c_reg_write(cfg, NEORV32_TWI_CTRL, ctrl);
+	neorv32_i2c_reg_write(dev, NEORV32_TWI_CTRL, 0U);
+	neorv32_i2c_reg_write(dev, NEORV32_TWI_CTRL, ctrl);
 
 	return 0;
 }
@@ -241,7 +239,6 @@ static int neorv32_i2c_configure(const struct device *dev, uint32_t dev_config)
 static int neorv32_i2c_transfer(const struct device *dev, struct i2c_msg *msgs, uint8_t num_msgs,
 				 uint16_t addr)
 {
-	const struct neorv32_i2c_config *cfg = dev->config;
 	int ret = 0;
 	int err;
 	bool stop_issued = false;
@@ -263,7 +260,7 @@ static int neorv32_i2c_transfer(const struct device *dev, struct i2c_msg *msgs, 
 		 * The NEORV32 TWI hardware generates a REPEATED START if the bus
 		 * is already active (no STOP has been issued since the last START).
 		 */
-		err = twi_start(cfg);
+		err = twi_start(dev);
 		if (err < 0) {
 			ret = err;
 			goto done;
@@ -274,7 +271,7 @@ static int neorv32_i2c_transfer(const struct device *dev, struct i2c_msg *msgs, 
 		uint8_t addr_byte = (uint8_t)((addr << 1U) | (is_read ? 1U : 0U));
 		uint32_t rx_val;
 
-		err = twi_rtx(cfg, addr_byte, false, &rx_val);
+		err = twi_rtx(dev, addr_byte, false, &rx_val);
 		if (err < 0) {
 			ret = err;
 			goto done;
@@ -289,7 +286,7 @@ static int neorv32_i2c_transfer(const struct device *dev, struct i2c_msg *msgs, 
 		if (!is_read) {
 			/* Write data bytes */
 			for (uint32_t j = 0U; j < msgs[i].len; j++) {
-				err = twi_rtx(cfg, msgs[i].buf[j], false, &rx_val);
+				err = twi_rtx(dev, msgs[i].buf[j], false, &rx_val);
 				if (err < 0) {
 					ret = err;
 					goto done;
@@ -305,7 +302,7 @@ static int neorv32_i2c_transfer(const struct device *dev, struct i2c_msg *msgs, 
 			for (uint32_t j = 0U; j < msgs[i].len; j++) {
 				bool mack = (j < msgs[i].len - 1U);
 
-				err = twi_rtx(cfg, 0xFFU, mack, &rx_val);
+				err = twi_rtx(dev, 0xFFU, mack, &rx_val);
 				if (err < 0) {
 					ret = err;
 					goto done;
@@ -320,7 +317,7 @@ static int neorv32_i2c_transfer(const struct device *dev, struct i2c_msg *msgs, 
 		 * wants to release the bus before issuing a fresh START).
 		 */
 		if (msgs[i].flags & I2C_MSG_STOP) {
-			err = twi_stop(cfg);
+			err = twi_stop(dev);
 			stop_issued = true;
 			if (err < 0) {
 				ret = err;
@@ -332,7 +329,7 @@ static int neorv32_i2c_transfer(const struct device *dev, struct i2c_msg *msgs, 
 done:
 	/* Always release the bus with a STOP unless one was already issued. */
 	if (!stop_issued) {
-		(void)twi_stop(cfg);
+		(void)twi_stop(dev);
 	}
 done_no_stop:
 	return ret;
@@ -361,7 +358,7 @@ static int neorv32_i2c_init(const struct device *dev)
 	}
 
 	/* Disable peripheral; configure call will enable with proper speed */
-	neorv32_i2c_reg_write(cfg, NEORV32_TWI_CTRL, 0U);
+	neorv32_i2c_reg_write(dev, NEORV32_TWI_CTRL, 0U);
 
 	/* Default: standard-speed master */
 	return neorv32_i2c_configure(dev, I2C_MODE_CONTROLLER | I2C_SPEED_SET(I2C_SPEED_STANDARD));

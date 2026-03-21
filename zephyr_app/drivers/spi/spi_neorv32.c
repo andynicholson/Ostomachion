@@ -19,9 +19,9 @@ LOG_MODULE_REGISTER(spi_neorv32);
 #include <zephyr/drivers/syscon.h>
 #include <zephyr/sys/sys_io.h>
 
-#include <soc.h>
-
 #include "spi_context.h"
+
+#include "../neorv32_regs.h"
 
 /* Register map (see NEORV32 sw/lib/include/neorv32_spi.h) */
 #define NEORV32_SPI_CTRL 0x00U
@@ -35,12 +35,7 @@ LOG_MODULE_REGISTER(spi_neorv32);
 #define SPI_DATA_CMD       BIT(31)
 #define SPI_DATA_CSEN      BIT(3)
 
-/*
- * Maximum poll iterations before returning -ETIMEDOUT.
- * At 100 MHz each iteration is ~10 ns; 1 M iterations ≈ 10 ms — well above
- * any legitimate SPI transaction time at the minimum supported clock rate.
- */
-#define SPI_POLL_RETRIES 1000000U
+#define SPI_POLL_RETRIES NEORV32_POLL_RETRIES
 
 /* NEORV32 SPI supports up to 8 hardware chip-select lines (CS0..CS7). */
 #define SPI_MAX_CS 7U
