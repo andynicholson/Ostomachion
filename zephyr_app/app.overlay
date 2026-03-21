@@ -31,3 +31,17 @@
 	status = "okay";
 	ngpios = <8>;
 };
+
+/ {
+	soc {
+		spi0: spi@fff80000 {
+			compatible = "neorv32,spi";
+			reg = <0xfff80000 0x10000>;
+			status = "okay";
+			interrupts = <6>;
+			syscon = <&sysinfo>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
+	};
+};

@@ -1,0 +1,11 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: Apache-2.0
+
+config SPI_NEORV32
+	bool "NEORV32 SPI driver"
+	default y
+	depends on SPI
+	depends on DT_HAS_NEORV32_SPI_ENABLED
+	depends on SYSCON
+	help
+	  Enable NEORV32 SPI master driver (blocking/polling).

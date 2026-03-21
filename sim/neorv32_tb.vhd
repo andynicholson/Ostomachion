@@ -15,10 +15,24 @@ architecture sim of neorv32_tb is
   signal uart_tx  : std_logic;
   signal uart_rx  : std_logic := '1';
 
+  signal spi_clk   : std_logic;
+  signal spi_mosi  : std_logic;
+  signal spi_miso  : std_logic;
+  signal spi_csn   : std_logic_vector(7 downto 0);
+
   signal gpio_prev       : std_logic_vector(7 downto 0) := (others => '0');
   signal gpio_toggle_cnt : natural := 0;
 
+  -- SPI monitor: shift MOSI on SPI clock rising edges while CS active
+  signal spi_clk_d   : std_logic := '0';
+  signal csn_prev    : std_logic_vector(7 downto 0) := (others => '1');
+  signal spi_bit_cnt : natural range 0 to 8 := 0;
+  signal spi_shift   : std_logic_vector(7 downto 0) := (others => '0');
+
 begin
+
+  -- MOSI -> MISO loopback (peripheral would drive MISO; here we echo MOSI)
+  spi_miso <= spi_mosi;
 
   -- Clock generator --------------------------------------------------------
   clk <= not clk after CLK_PERIOD / 2;
@@ -40,14 +54,14 @@ begin
     rstn_i      => rstn,
     gpio_o      => gpio,
     uart0_txd_o => uart_tx,
-    uart0_rxd_i => uart_rx
+    uart0_rxd_i => uart_rx,
+    spi_clk_o   => spi_clk,
+    spi_dat_o   => spi_mosi,
+    spi_dat_i   => spi_miso,
+    spi_csn_o   => spi_csn
   );
 
   -- UART RX monitor --------------------------------------------------------
-  -- Captures serial TX from the DUT on the physical line.
-  -- Active when firmware uses real baud-rate mode (e.g. Zephyr).
-  -- In sim-mode the UART core prints directly to the console,
-  -- so this monitor will be quiet — that is expected.
   uart_mon: entity work.sim_uart_rx
   generic map (
     NAME => "UART0",
@@ -73,6 +87,44 @@ begin
           end if;
         end if;
         gpio_prev <= gpio;
+      end if;
+    end if;
+  end process;
+
+  -- SPI bus monitor: sample MOSI on rising SPI clock while any CS low -------
+  spi_monitor: process(clk)
+    variable csn_v : std_logic_vector(7 downto 0);
+  begin
+    if rising_edge(clk) then
+      if rstn = '0' then
+        spi_clk_d   <= '0';
+        csn_prev    <= (others => '1');
+        spi_bit_cnt <= 0;
+        spi_shift   <= (others => '0');
+      else
+        spi_clk_d <= spi_clk;
+        csn_v     := spi_csn;
+
+        -- New CS assertion: clear shift register
+        if csn_prev = x"FF" and csn_v /= x"FF" then
+          spi_bit_cnt <= 0;
+          spi_shift   <= (others => '0');
+        end if;
+
+        -- CS released: report one transferred byte
+        if csn_prev /= x"FF" and csn_v = x"FF" and spi_bit_cnt = 8 then
+          report "[TB] SPI byte (MOSI): 0x" & to_hstring(unsigned(spi_shift))
+            severity note;
+        end if;
+
+        if (csn_v /= x"FF") and spi_clk = '1' and spi_clk_d = '0' then
+          if spi_bit_cnt < 8 then
+            spi_shift   <= spi_shift(6 downto 0) & spi_mosi;
+            spi_bit_cnt <= spi_bit_cnt + 1;
+          end if;
+        end if;
+
+        csn_prev <= csn_v;
       end if;
     end if;
   end process;

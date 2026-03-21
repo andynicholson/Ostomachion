@@ -1,0 +1,6 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: Apache-2.0
+
+menu "NEORV32 out-of-tree drivers"
+rsource "spi/Kconfig"
+endmenu

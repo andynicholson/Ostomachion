@@ -71,7 +71,7 @@ zephyr:
 	cp $(ZEPHYR_BUILD_DIR)/zephyr/zephyr.vhd zephyr_imem_image.vhd
 
 test-zephyr: zephyr clean-ghdl
-	$(MAKE) IMEM_IMAGE=zephyr_imem_image.vhd SIM_TIME=80ms all
+	$(MAKE) IMEM_IMAGE=zephyr_imem_image.vhd SIM_TIME=200ms all
 
 clean-ghdl:
 	@echo "=== Cleaning GHDL artifacts ==="
