@@ -1,0 +1,11 @@
+/* Ostomachion — FPGA (Arty A7) DTS overlay
+ *
+ * Applied on top of app.overlay when building the FPGA firmware target.
+ * The SPI/I2C MMIO addresses and interrupt numbers are identical between
+ * simulation and FPGA; only the UART baud rate differs (the simulation uses
+ * 19200 to keep simulation time short; the FPGA target uses 115200).
+ */
+
+&uart0 {
+	current-speed = <115200>;
+};

@@ -44,12 +44,14 @@ disturbing what already works.
   └────────────────────────┬─────────────────────────────────────────┘
                            │  MMIO reads/writes via sys_read32/write32
   ┌────────────────────────▼─────────────────────────────────────────┐
-  │  FPGA RTL (NEORV32 v1.11.6 + neorv32_wrapper.vhd)               │
+  │  FPGA RTL  (NEORV32 v1.11.6)                                     │
   │  RISC-V RV32IMAC soft-core, SPI master, TWI master, GPIO, UART  │
+  │  Simulation: rtl/neorv32_wrapper.vhd                             │
+  │  Arty A7:    fpga/arty_a7/arty_a7_top.vhd  (BUFG, IOBUF, OCD)  │
   └────────────────────────┬─────────────────────────────────────────┘
-                           │  (physical I/O pins on FPGA target)
+                           │  (physical I/O pins / GHDL stimulus)
   ┌────────────────────────▼─────────────────────────────────────────┐
-  │  Hardware  /  GHDL Simulation  (sim/neorv32_tb.vhd)              │
+  │  Hardware (Arty A7) / GHDL Simulation  (sim/neorv32_tb.vhd)      │
   │  SPI loopback, I2C slave model, UART monitor, watchdog           │
   └──────────────────────────────────────────────────────────────────┘
 ```
@@ -62,7 +64,13 @@ disturbing what already works.
 .
 ├── Makefile                          # Top-level build orchestration
 ├── rtl/
-│   └── neorv32_wrapper.vhd           # Thin wrapper around neorv32_top
+│   └── neorv32_wrapper.vhd           # Simulation wrapper around neorv32_top
+├── fpga/
+│   └── arty_a7/
+│       ├── arty_a7_top.vhd           # Arty A7 board top (BUFG, IOBUF, OCD)
+│       ├── arty_a7.xdc               # Vivado pin constraints
+│       ├── build.tcl                 # Non-interactive Vivado batch script
+│       └── openocd.cfg               # JTAG bitstream programming (OpenOCD)
 ├── sim/
 │   ├── neorv32_tb.vhd                # GHDL testbench (clock, reset, bus monitors)
 │   └── sim_uart_rx.vhd               # UART character decoder
@@ -70,8 +78,10 @@ disturbing what already works.
 ├── sw/test_gpio_uart/                # Bare-metal smoke-test firmware (C)
 ├── zephyr_app/
 │   ├── CMakeLists.txt                # Zephyr app build (project: ostomachion)
-│   ├── prj.conf                      # Kconfig — peripherals, C++20, ztest
-│   ├── app.overlay                   # Device Tree — spi0, i2c0 nodes
+│   ├── prj.conf                      # Kconfig — simulation target (polling drivers)
+│   ├── prj_fpga.conf                 # Kconfig overlay — FPGA target (IRQ drivers)
+│   ├── app.overlay                   # Device Tree — spi0, i2c0 nodes (simulation)
+│   ├── app_fpga.overlay              # Device Tree overlay — 115200 baud (FPGA)
 │   ├── zephyr/module.yml             # Out-of-tree module descriptor
 │   ├── include/
 │   │   └── ostomachion/hal/
@@ -85,10 +95,10 @@ disturbing what already works.
 │   │   └── test_i2c.cpp              # ZTEST_SUITE ostomachion_i2c (3 tests)
 │   └── drivers/
 │       ├── neorv32_regs.h            # Shared poll budget + soc.h re-export
-│       ├── spi/spi_neorv32.c         # Polling SPI master driver
-│       ├── spi/Kconfig
-│       ├── i2c/i2c_neorv32.c         # Polling TWI/I2C master driver
-│       ├── i2c/Kconfig
+│       ├── spi/spi_neorv32.c         # SPI driver (polling + IRQ paths, Kconfig-gated)
+│       ├── spi/Kconfig               # CONFIG_SPI_NEORV32 / CONFIG_SPI_NEORV32_INTERRUPT
+│       ├── i2c/i2c_neorv32.c         # I2C driver (polling + IRQ paths, Kconfig-gated)
+│       ├── i2c/Kconfig               # CONFIG_I2C_NEORV32 / CONFIG_I2C_NEORV32_INTERRUPT
 │       ├── Kconfig
 │       └── CMakeLists.txt
 ├── dts/bindings/
@@ -101,16 +111,21 @@ disturbing what already works.
 
 ## Peripheral map
 
-| NEORV32 Generic    | Value | MMIO Base    | FIRQ | Zephyr compatible  | DT node |
-|--------------------|-------|--------------|------|--------------------|---------|
-| `IO_GPIO_NUM`      | 8     | `0xFFFFFFC0` | —    | `neorv32,gpio`     | (board) |
-| `IO_UART0_EN`      | true  | `0xFFFFFFE0` | 2    | `neorv32,uart`     | (board) |
-| `IO_SPI_EN`        | true  | `0xFFF80000` | 6    | `neorv32,spi`      | `spi0`  |
-| `IO_TWI_EN`        | true  | `0xFFF90000` | 7    | `neorv32,twi`      | `i2c0`  |
-| `IO_CLINT_EN`      | true  | `0xF0000000` | —    | `neorv32,clint`    | (board) |
-| `BOOT_MODE_SELECT` | 2     | —            | —    | Boot from IMEM     | —       |
-| `IMEM_SIZE`        | 64 KB | —            | —    | Instruction memory | —       |
-| `DMEM_SIZE`        | 64 KB | —            | —    | Data memory        | —       |
+| NEORV32 Generic    | Simulation | Arty A7 FPGA | MMIO Base    | FIRQ | Zephyr compatible  | DT node |
+|--------------------|------------|--------------|--------------|------|--------------------|---------|
+| `IO_GPIO_NUM`      | 8          | 4            | `0xFFFFFFC0` | —    | `neorv32,gpio`     | (board) |
+| `IO_UART0_EN`      | true       | true         | `0xFFFFFFE0` | 2    | `neorv32,uart`     | (board) |
+| `IO_SPI_EN`        | true       | true         | `0xFFF80000` | 6    | `neorv32,spi`      | `spi0`  |
+| `IO_TWI_EN`        | true       | true         | `0xFFF90000` | 7    | `neorv32,twi`      | `i2c0`  |
+| `IO_CLINT_EN`      | true       | true         | `0xF0000000` | —    | `neorv32,clint`    | (board) |
+| `IO_SPI_FIFO`      | 4          | 32           | —            | —    | FIFO depth         | —       |
+| `IO_TWI_FIFO`      | 4          | 32           | —            | —    | FIFO depth         | —       |
+| `IO_UART0_TX_FIFO` | 1          | 32           | —            | —    | TX FIFO depth      | —       |
+| `BOOT_MODE_SELECT` | 2 (IMEM)   | 0 (bootloader)| —           | —    | Boot mode          | —       |
+| `OCD_EN`           | false      | true         | —            | —    | On-chip debugger   | —       |
+| `IO_WDT_EN`        | false      | true         | —            | —    | Watchdog           | —       |
+| `IMEM_SIZE`        | 64 KB      | 64 KB        | —            | —    | Instruction memory | —       |
+| `DMEM_SIZE`        | 64 KB      | 64 KB        | —            | —    | Data memory        | —       |
 
 ---
 
@@ -320,31 +335,44 @@ make test-zephyr SIM_TIME=300ms   # more LED blink cycles for watchdog
 
 ## Design decisions
 
-**Polling drivers, not interrupt-driven.**
-Simulation is the primary target.  Polling keeps the driver logic simple and
-avoids the need to verify FIRQ routing in the testbench.  The poll retry
-budget (`NEORV32_POLL_RETRIES = 1 000 000`) is shared via
-`drivers/neorv32_regs.h` and sized for 100 MHz operation with a 10 ms
-worst-case timeout.  Interrupt-driven drivers are the natural next step for
-physical FPGA targets.
+**Two build targets, one codebase.**
+The project is designed for deployment on real FPGA hardware (Arty A7) with
+GHDL simulation as a fast development and regression tool.  The same Zephyr
+firmware, out-of-tree drivers, and C++20 HAL compile for both targets.
+Target-specific differences are isolated to a VHDL top-level file, a DTS
+overlay, and a Kconfig fragment — nothing in the shared application layer
+knows which environment it is running in.
 
-**19200 baud UART.**
-At 100 MHz simulation speed, GHDL evaluates the RTL cycle-by-cycle.  19200
-baud requires ~5200 clock cycles per character — fast enough to avoid
-truncating test output during a 200 ms simulation, yet low enough that the
-baud rate generator rounds cleanly.  Change `CONFIG_UART_BAUDRATE` and
-`BAUD` generic together if you need a different rate.
+**Interrupt-driven drivers on hardware, polling available for simulation.**
+The production driver path (`CONFIG_SPI_NEORV32_INTERRUPT=y`,
+`CONFIG_I2C_NEORV32_INTERRUPT=y`, enabled by `prj_fpga.conf`) uses FIRQ 6
+and 7 to yield the Zephyr thread between bytes, allowing other threads to
+run while the bus hardware clocks data.  The polling fallback
+(default in `prj.conf`) is retained for simulation convenience — it avoids
+FIRQ timing dependencies in the testbench and keeps the simulation fast.
+Both paths are compiled from the same source files, gated by `#ifdef`.
 
-**`BOOT_MODE_SELECT = 2` (boot from IMEM).**
-The NEORV32 bootloader negotiates over UART, which adds seconds to every
-simulation run.  Setting mode 2 skips the bootloader and jumps directly to
-the IMEM image.  In a physical design, set this to 1 (flash) or 0 (OCD) as
-appropriate.
+**19200 baud for simulation, 115200 for the FPGA application.**
+GHDL evaluates the RTL cycle-by-cycle at ~200 kHz wall-clock speed.  19200
+baud requires ~5200 simulated clock cycles per character — a practical
+trade-off that keeps the 200 ms simulation window usable.  The FPGA
+application overrides this to 115200 baud via `app_fpga.overlay`.  Note that
+the NEORV32 BROM bootloader always runs at 19200 baud and cannot be changed
+without recompiling the bootloader image.
 
-**No PLL, no I/O buffer primitives.**
-The VHDL is intentionally technology-neutral.  Adding a PLL or `IBUFDS`
-primitive would tie the project to a specific FPGA vendor.  Route these
-through VHDL generics or separate wrapper layers when targeting a real part.
+**`BOOT_MODE_SELECT = 2` for simulation, `0` for FPGA.**
+Mode 2 (boot from pre-initialised IMEM) skips the UART bootloader entirely,
+avoiding a multi-second UART negotiation on every GHDL run.  On the Arty A7,
+mode 0 (internal BROM bootloader) is used so firmware can be uploaded over
+UART without re-synthesising — only `make fpga-fw` is needed for each
+firmware iteration after the initial `make fpga-synth` + `make fpga-program`.
+
+**BUFG and IOBUF in the FPGA top, not the simulation wrapper.**
+`fpga/arty_a7/arty_a7_top.vhd` instantiates Xilinx `BUFG` (clock buffer)
+and `IOBUF` (open-drain I2C) primitives directly.
+`rtl/neorv32_wrapper.vhd` remains technology-neutral for simulation.
+This separation means the NEORV32 core RTL is never touched for
+board-specific concerns; each target has its own thin board-level wrapper.
 
 **`std::span` + `std::byte` in the HAL.**
 `std::byte` (C++17) is the standard type for uninterpreted binary data.
@@ -364,12 +392,16 @@ immediately compatible with the standard Zephyr CI infrastructure.
 
 | Item | Status |
 |------|--------|
-| Interrupt-driven SPI/I2C drivers | Roadmap — requires FIRQ handler wiring in testbench |
-| Physical FPGA target (e.g. Arty A7) | Roadmap — needs PLL, constraint file, I/O buffers |
+| Interrupt-driven SPI/I2C drivers | **Done** — `CONFIG_SPI_NEORV32_INTERRUPT` / `CONFIG_I2C_NEORV32_INTERRUPT`; enabled by `prj_fpga.conf` |
+| Physical FPGA target (Arty A7) | **Done** — `fpga/arty_a7/` with VHDL top, XDC, Vivado TCL, OpenOCD config |
+| UART bootloader firmware upload | **Done** — `make fpga-fw` via `neorv32_upload.py` |
+| JTAG on-chip debug | **Done** — `OCD_EN=true` in FPGA top, `openocd.cfg` + NEORV32 OCD config |
 | `GpioInput` HAL class | Roadmap — trivial to add alongside `GpioOutput` |
+| `twister` integration | Roadmap — add `testcase.yaml` and board YAML for Zephyr CI |
+| SPI flash boot (`BOOT_MODE_SELECT=1`) | Roadmap — requires SPI flash programming flow |
 | DMA support | Not planned — NEORV32 v1.11.6 has no DMA engine |
 | 10-bit I2C addressing | Not supported — NEORV32 TWI is 7-bit only |
-| `twister` integration | Roadmap — add `testcase.yaml` and board YAML |
+| Second FPGA board target | Roadmap — parameterised `fpga/` layout supports additional boards |
 
 ---
 
@@ -428,11 +460,135 @@ cat neorv32_tb.UART0_rx.out
   (19200) matches the firmware's configured baud rate.
 
 **`CONFIG_UART_INTERRUPT_DRIVEN` causes hangs**
-: The application uses polling mode (`CONFIG_UART_INTERRUPT_DRIVEN=n`).
+: The application uses polling UART mode (`CONFIG_UART_INTERRUPT_DRIVEN=n`).
   Interrupt-driven TX can hang in simulation if the FIRQ routing is not
-  fully exercised.
+  fully exercised.  The SPI and I2C drivers have their own independent
+  interrupt paths gated by `CONFIG_SPI_NEORV32_INTERRUPT` and
+  `CONFIG_I2C_NEORV32_INTERRUPT` (see `prj_fpga.conf`).
 
 **ztest reports `PROJECT EXECUTION FAILED`**
 : Check the `FAIL -` lines in the UART log for the specific assertion that
   fired.  The most common cause is the testbench I2C slave timing out if
   `SIM_TIME` is too short — try `SIM_TIME=300ms`.
+
+---
+
+## Deploying to Arty A7
+
+The FPGA build targets the Digilent Arty A7-35T (XC7A35T, CSG324 package).
+All required files live in `fpga/arty_a7/`.
+
+### Prerequisites
+
+| Tool | Minimum version | Notes |
+|------|----------------|-------|
+| Vivado | 2020.1 | Any edition; add to `PATH` or set `VIVADO=` |
+| OpenOCD | 0.12.0 | Must include `cpld/xilinx-xc7.cfg` |
+| West / Zephyr SDK | current | Same environment as simulation build |
+| Python 3 | 3.8+ | For `neorv32_upload.py` (UART bootloader) |
+
+### Pin map
+
+| Signal | Arty A7 pin | Connector / function |
+|--------|-------------|----------------------|
+| `sys_clk` | E3 | 100 MHz LVCMOS33 oscillator |
+| `ck_rst` | C2 | BTN RESET (active-low) |
+| `uart_txd_out` | D10 | USB-UART TX (FTDI FT2232HQ) |
+| `uart_rxd_in` | A9 | USB-UART RX |
+| `led[0..3]` | H5/J5/T9/T10 | On-board green LEDs LD0–LD3 |
+| `spi_clk_o` | G13 | Pmod JA pin 1 (SCK) |
+| `spi_dat_o` | B11 | Pmod JA pin 2 (MOSI) |
+| `spi_dat_i` | A11 | Pmod JA pin 3 (MISO) |
+| `spi_csn_o` | D12 | Pmod JA pin 4 (CS0) |
+| `twi_sda` | E15 | Pmod JB pin 1 — **needs 4.7 kΩ pull-up to 3V3** |
+| `twi_scl` | E16 | Pmod JB pin 2 — **needs 4.7 kΩ pull-up to 3V3** |
+| `jtag_tck_i` | K17 | Pmod JC pin 1 |
+| `jtag_tdi_i` | M18 | Pmod JC pin 2 |
+| `jtag_tdo_o` | N17 | Pmod JC pin 3 |
+| `jtag_tms_i` | P18 | Pmod JC pin 4 |
+
+### One-time bitstream build
+
+Synthesise, implement, and generate the bitstream:
+
+```bash
+make fpga-synth
+# equivalent to: vivado -mode batch -source fpga/arty_a7/build.tcl
+# output: build/arty_a7/ostomachion_arty_a7.bit
+```
+
+Build time is typically 10–20 minutes on a modern workstation.
+
+### Program the FPGA
+
+Load the bitstream into the FPGA's SRAM via JTAG (volatile — erased on power-cycle):
+
+```bash
+make fpga-program
+# equivalent to: openocd -f fpga/arty_a7/openocd.cfg \
+#                        -c "pld load 0 build/arty_a7/ostomachion_arty_a7.bit" -c shutdown
+```
+
+For persistent storage, use Vivado's `write_cfgmem` to generate an SPI flash image and program the on-board Quad-SPI flash.
+
+### Iterating on firmware (no re-synthesis)
+
+After the bitstream is loaded, the NEORV32 BROM bootloader runs at **19200 baud**
+and waits for an executable image.  Upload via:
+
+```bash
+make fpga-fw          # builds FPGA Zephyr image, then uploads
+# or manually:
+make zephyr-fpga      # builds to build_zephyr_fpga/
+python3 neorv32/sw/bootloader/neorv32_upload.py --port /dev/ttyUSB1 \
+    build_zephyr_fpga/zephyr/zephyr.bin
+```
+
+Subsequent firmware iterations only require `make fpga-fw` — no Vivado run.
+
+### Baud rate note
+
+| Context | UART baud | Set by |
+|---------|-----------|--------|
+| Simulation | 19200 | `app.overlay` (`current-speed = <19200>`) — keeps sim time short |
+| NEORV32 bootloader | 19200 | BROM fixed — cannot be changed without modifying the bootloader |
+| Application (FPGA) | 115200 | `app_fpga.overlay` (`current-speed = <115200>`) |
+
+The application baud rate takes effect only after the bootloader hands control to
+the Zephyr image.
+
+### Interrupt vs. polling drivers
+
+The SPI and I2C drivers support two transfer modes, selected by Kconfig:
+
+| Mode | Kconfig symbol | Default | Used for |
+|------|---------------|---------|----------|
+| Polling | `CONFIG_SPI_NEORV32_INTERRUPT=n` | `prj.conf` | Simulation — simpler, no IRQ timing dependency |
+| Interrupt-driven | `CONFIG_SPI_NEORV32_INTERRUPT=y` | `prj_fpga.conf` | Production FPGA — yields CPU between bytes |
+
+Polling mode spins on `SPI_CTRL_BUSY`/`TWI_CTRL_RX_AVAIL`, blocking the Zephyr
+scheduler for the duration of the transfer (~200 cycles/byte at 1 MHz SPI,
+~10 000 cycles/byte at 100 kHz I2C on a 100 MHz CPU).
+
+Interrupt-driven mode (enabled by `prj_fpga.conf`) uses:
+- **SPI**: `SPI_CTRL_IRQ_RX_AVAIL` (CTRL bit 20, FIRQ 6) — fires once per received byte.
+- **I2C**: TWI FIRQ 7 — fires unconditionally whenever `TWI_CTRL_RX_AVAIL` is set (once per RTX command completion).
+
+Both paths are exercised in simulation when `prj_fpga.conf` is applied.
+
+### JTAG debug
+
+After the bitstream is loaded and firmware is running, attach GDB via the NEORV32
+on-chip debugger (OCD) on Pmod JC:
+
+```bash
+# Terminal 1 — OpenOCD server
+openocd -f fpga/arty_a7/openocd.cfg \
+        -f neorv32/sw/openocd/openocd_neorv32.cfg
+
+# Terminal 2 — GDB client
+riscv32-unknown-elf-gdb build_zephyr_fpga/zephyr/zephyr.elf \
+    -ex "target extended-remote localhost:3333" \
+    -ex "monitor reset halt"
+```
+

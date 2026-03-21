@@ -8,4 +8,19 @@ config I2C_NEORV32
 	depends on DT_HAS_NEORV32_TWI_ENABLED
 	depends on SYSCON
 	help
-	  Enable NEORV32 TWI master driver (blocking/polling).
+	  Enable NEORV32 TWI master driver.  Defaults to a polling (blocking)
+	  implementation compatible with simulation.  Select
+	  I2C_NEORV32_INTERRUPT for the interrupt-driven production path.
+
+config I2C_NEORV32_INTERRUPT
+	bool "NEORV32 TWI interrupt-driven transfers"
+	depends on I2C_NEORV32
+	default n
+	help
+	  When enabled the driver uses a state machine driven by the TWI FIRQ
+	  (FIRQ 7) to transfer data asynchronously.  The calling thread is
+	  suspended on a semaphore while the hardware runs, allowing other
+	  Zephyr threads to execute concurrently.
+	  Requires the interrupts property in the DTS TWI node (already present
+	  in app.overlay).  Set to y in prj_fpga.conf for production hardware;
+	  leave at n for simulation where polling is simpler and faster.

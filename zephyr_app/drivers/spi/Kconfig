@@ -8,4 +8,17 @@ config SPI_NEORV32
 	depends on DT_HAS_NEORV32_SPI_ENABLED
 	depends on SYSCON
 	help
-	  Enable NEORV32 SPI master driver (blocking/polling).
+	  Enable NEORV32 SPI master driver.  Defaults to a polling (blocking)
+	  implementation compatible with simulation.  Select
+	  SPI_NEORV32_INTERRUPT for the interrupt-driven production path.
+
+config SPI_NEORV32_INTERRUPT
+	bool "NEORV32 SPI interrupt-driven transfers"
+	depends on SPI_NEORV32
+	default n
+	help
+	  When enabled the driver suspends the calling thread while the SPI
+	  engine runs, allowing other Zephyr threads to execute concurrently.
+	  Requires the interrupts property in the DTS SPI node (already present
+	  in app.overlay).  Set to y in prj_fpga.conf for production hardware;
+	  leave at n for simulation where polling is simpler and faster.
