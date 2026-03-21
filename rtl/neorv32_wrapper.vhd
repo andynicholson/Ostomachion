@@ -44,6 +44,8 @@ begin
   neorv32_inst: entity neorv32.neorv32_top
   generic map (
     CLOCK_FREQUENCY   => 100_000_000,
+    -- BOOT_MODE_SELECT=2: execute from IMEM (must be pre-initialised via
+    -- neorv32_application_image.vhd before elaboration).
     BOOT_MODE_SELECT  => 2,
     RISCV_ISA_C       => true,
     RISCV_ISA_M       => true,

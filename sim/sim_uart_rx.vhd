@@ -58,6 +58,11 @@ begin
 
           if (bitcnt = 0) then
             busy <= '0';
+            -- sreg(0) is the stop-bit sample; it must be '1' for a valid frame.
+            if (sync(4) /= '1') then
+              report NAME & ": framing error (stop bit sampled as 0 - baud-rate mismatch?)"
+                severity warning;
+            end if;
             c := to_integer(unsigned(sreg(8 downto 1)));
 
             if (c = 10) then

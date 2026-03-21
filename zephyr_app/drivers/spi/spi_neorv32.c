@@ -35,6 +35,16 @@ LOG_MODULE_REGISTER(spi_neorv32);
 #define SPI_DATA_CMD       BIT(31)
 #define SPI_DATA_CSEN      BIT(3)
 
+/*
+ * Maximum poll iterations before returning -ETIMEDOUT.
+ * At 100 MHz each iteration is ~10 ns; 1 M iterations ≈ 10 ms — well above
+ * any legitimate SPI transaction time at the minimum supported clock rate.
+ */
+#define SPI_POLL_RETRIES 1000000U
+
+/* NEORV32 SPI supports up to 8 hardware chip-select lines (CS0..CS7). */
+#define SPI_MAX_CS 7U
+
 struct neorv32_spi_config {
 	mm_reg_t base;
 	const struct device *syscon;
@@ -119,6 +129,7 @@ static int neorv32_spi_compute_ctrl(const struct device *dev, uint32_t frequency
 		}
 	}
 
+	/* High-speed mode: bypass prescaler (effective divisor = 2*(1+cdiv)) */
 	for (uint32_t cdiv = 0U; cdiv < 16U; cdiv++) {
 		uint32_t div = 2U * 1U * (1U + cdiv);
 		uint32_t f = clk_hz / div;
@@ -139,7 +150,7 @@ static int neorv32_spi_compute_ctrl(const struct device *dev, uint32_t frequency
 		return -EINVAL;
 	}
 
-	*ctrl_out = (1U << 0);
+	*ctrl_out = SPI_CTRL_EN;
 	if ((operation & SPI_MODE_CPHA) != 0U) {
 		*ctrl_out |= SPI_CTRL_CPHA;
 	}
@@ -158,44 +169,86 @@ static int neorv32_spi_compute_ctrl(const struct device *dev, uint32_t frequency
 	return 0;
 }
 
-static void neorv32_spi_cs_assert(const struct device *dev, uint8_t cs)
+/* Returns 0 on success, -ETIMEDOUT if the TX FIFO stays full too long. */
+static int neorv32_spi_wait_tx_ready(const struct device *dev)
+{
+	for (uint32_t i = 0U; i < SPI_POLL_RETRIES; i++) {
+		if (!(neorv32_spi_reg_read(dev, NEORV32_SPI_CTRL) & SPI_CTRL_TX_FULL)) {
+			return 0;
+		}
+	}
+	LOG_ERR("SPI TX FIFO full timeout");
+	return -ETIMEDOUT;
+}
+
+/* Returns 0 on success, -ETIMEDOUT if the peripheral stays busy too long. */
+static int neorv32_spi_wait_idle(const struct device *dev)
+{
+	for (uint32_t i = 0U; i < SPI_POLL_RETRIES; i++) {
+		if (!(neorv32_spi_reg_read(dev, NEORV32_SPI_CTRL) & SPI_CTRL_BUSY)) {
+			return 0;
+		}
+	}
+	LOG_ERR("SPI BUSY timeout");
+	return -ETIMEDOUT;
+}
+
+static int neorv32_spi_cs_assert(const struct device *dev, uint8_t cs)
 {
 	uint32_t cmd = SPI_DATA_CMD | SPI_DATA_CSEN | (uint32_t)(cs & 0x7U);
+	int err;
 
-	while (neorv32_spi_reg_read(dev, NEORV32_SPI_CTRL) & SPI_CTRL_TX_FULL) {
-		;
+	err = neorv32_spi_wait_tx_ready(dev);
+	if (err < 0) {
+		return err;
 	}
 	neorv32_spi_reg_write(dev, NEORV32_SPI_DATA, cmd);
+	return 0;
 }
 
-static void neorv32_spi_cs_deassert(const struct device *dev)
+static int neorv32_spi_cs_deassert(const struct device *dev)
 {
-	while (neorv32_spi_reg_read(dev, NEORV32_SPI_CTRL) & SPI_CTRL_TX_FULL) {
-		;
+	int err;
+
+	err = neorv32_spi_wait_tx_ready(dev);
+	if (err < 0) {
+		return err;
 	}
 	neorv32_spi_reg_write(dev, NEORV32_SPI_DATA, SPI_DATA_CMD);
+	return 0;
 }
 
-static uint8_t neorv32_spi_transfer_byte(const struct device *dev, uint8_t txd)
+/* Sends txd and returns the received byte via *rxd. */
+static int neorv32_spi_transfer_byte(const struct device *dev, uint8_t txd, uint8_t *rxd)
 {
-	while (neorv32_spi_reg_read(dev, NEORV32_SPI_CTRL) & SPI_CTRL_TX_FULL) {
-		;
+	int err;
+
+	err = neorv32_spi_wait_tx_ready(dev);
+	if (err < 0) {
+		return err;
 	}
 	neorv32_spi_reg_write(dev, NEORV32_SPI_DATA, txd);
 
-	while (neorv32_spi_reg_read(dev, NEORV32_SPI_CTRL) & SPI_CTRL_BUSY) {
-		;
+	err = neorv32_spi_wait_idle(dev);
+	if (err < 0) {
+		return err;
 	}
 
-	return (uint8_t)(neorv32_spi_reg_read(dev, NEORV32_SPI_DATA) & 0xFFU);
+	*rxd = (uint8_t)(neorv32_spi_reg_read(dev, NEORV32_SPI_DATA) & 0xFFU);
+	return 0;
 }
 
-static void neorv32_spi_xfer(const struct device *dev, const struct spi_config *spi_cfg)
+static int neorv32_spi_xfer(const struct device *dev, const struct spi_config *spi_cfg)
 {
 	struct neorv32_spi_data *data = dev->data;
 	struct spi_context *ctx = &data->ctx;
+	int err;
 
-	neorv32_spi_cs_assert(dev, (uint8_t)spi_cfg->slave);
+	err = neorv32_spi_cs_assert(dev, (uint8_t)spi_cfg->slave);
+	if (err < 0) {
+		spi_context_complete(ctx, dev, err);
+		return err;
+	}
 
 	while (spi_context_tx_on(ctx) || spi_context_rx_on(ctx)) {
 		uint8_t txd = 0U;
@@ -205,7 +258,10 @@ static void neorv32_spi_xfer(const struct device *dev, const struct spi_config *
 			txd = *(const uint8_t *)ctx->tx_buf;
 		}
 
-		rxd = neorv32_spi_transfer_byte(dev, txd);
+		err = neorv32_spi_transfer_byte(dev, txd, &rxd);
+		if (err < 0) {
+			goto xfer_done;
+		}
 
 		if (spi_context_rx_buf_on(ctx)) {
 			*(uint8_t *)ctx->rx_buf = rxd;
@@ -215,13 +271,23 @@ static void neorv32_spi_xfer(const struct device *dev, const struct spi_config *
 		spi_context_update_rx(ctx, 1, 1);
 	}
 
-	neorv32_spi_cs_deassert(dev);
+	/* Deassert CS unless the caller is holding it across calls. */
+	if (!(spi_cfg->operation & SPI_HOLD_ON_CS)) {
+		int deassert_err = neorv32_spi_cs_deassert(dev);
 
-	while (neorv32_spi_reg_read(dev, NEORV32_SPI_CTRL) & SPI_CTRL_BUSY) {
-		;
+		if (err == 0) {
+			err = deassert_err;
+		}
+
+		/* Wait for the final CS-deassert command to complete. */
+		if (err == 0) {
+			err = neorv32_spi_wait_idle(dev);
+		}
 	}
 
-	spi_context_complete(ctx, dev, 0);
+xfer_done:
+	spi_context_complete(ctx, dev, err);
+	return err;
 }
 
 static int neorv32_spi_transceive(const struct device *dev, const struct spi_config *spi_cfg,
@@ -230,6 +296,11 @@ static int neorv32_spi_transceive(const struct device *dev, const struct spi_con
 	struct neorv32_spi_data *data = dev->data;
 	uint32_t ctrl = 0U;
 	int err;
+
+	if (spi_cfg->slave > SPI_MAX_CS) {
+		LOG_ERR("slave index %u exceeds maximum %u", spi_cfg->slave, SPI_MAX_CS);
+		return -EINVAL;
+	}
 
 	spi_context_lock(&data->ctx, false, NULL, NULL, spi_cfg);
 
@@ -246,9 +317,8 @@ static int neorv32_spi_transceive(const struct device *dev, const struct spi_con
 
 	spi_context_buffers_setup(&data->ctx, tx_bufs, rx_bufs, 1);
 
-	neorv32_spi_xfer(dev, spi_cfg);
-
-	err = spi_context_wait_for_completion(&data->ctx);
+	/* neorv32_spi_xfer is synchronous: it calls spi_context_complete before returning. */
+	err = neorv32_spi_xfer(dev, spi_cfg);
 
 	spi_context_release(&data->ctx, err);
 

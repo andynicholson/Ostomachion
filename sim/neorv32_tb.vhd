@@ -28,7 +28,7 @@ architecture sim of neorv32_tb is
   -- SPI monitor state
   signal spi_clk_d   : std_logic := '0';
   signal csn_prev    : std_logic_vector(7 downto 0) := (others => '1');
-  signal spi_bit_cnt : natural range 0 to 8 := 0;
+  signal spi_bit_cnt : natural range 0 to 7 := 0;
   signal spi_shift   : std_logic_vector(7 downto 0) := (others => '0');
 
   -- TWI (I2C) open-drain bus
@@ -41,8 +41,9 @@ architecture sim of neorv32_tb is
 
   -- I2C slave model state machine
   -- Slave responds at 7-bit address 0x50
-  -- Write: ACKs address + data bytes, logs each data byte
-  -- Read:  ACKs address, returns I2C_RD_BYTE (0x5A)
+  -- Write: ACKs address + all data bytes, logs each
+  -- Read:  ACKs address, returns I2C_RD_BYTE (0x5A) per byte;
+  --        continues sending bytes as long as master sends ACK
   type i2c_sl_t is (SL_IDLE, SL_ADDR, SL_ACK_ADDR,
                     SL_WR_DATA, SL_ACK_WR,
                     SL_RD_DATA, SL_ACK_RD);
@@ -130,7 +131,10 @@ begin
     end if;
   end process;
 
-  -- SPI bus monitor: sample MOSI on rising SPI clock while any CS low ----------
+  -- SPI bus monitor ------------------------------------------------------------
+  -- Samples MOSI on every rising SPI clock edge while any CS is active.
+  -- Reports a complete byte immediately at each 8-bit boundary (not just on CS
+  -- deassert), so multi-byte transfers under a single CS assertion are visible.
   spi_monitor: process(clk)
     variable csn_v : std_logic_vector(7 downto 0);
   begin
@@ -144,20 +148,36 @@ begin
         spi_clk_d <= spi_clk;
         csn_v     := spi_csn;
 
+        -- CS assertion: reset byte accumulator for fresh transfer
         if csn_prev = x"FF" and csn_v /= x"FF" then
           spi_bit_cnt <= 0;
           spi_shift   <= (others => '0');
+          report "[TB] SPI CS asserted" severity note;
         end if;
 
-        if csn_prev /= x"FF" and csn_v = x"FF" and spi_bit_cnt = 8 then
-          report "[TB] SPI byte (MOSI): 0x" & to_hstring(unsigned(spi_shift))
-            severity note;
+        -- CS deassert: warn if partial byte remains (misaligned transfer)
+        if csn_prev /= x"FF" and csn_v = x"FF" then
+          if spi_bit_cnt /= 0 then
+            report "[TB] SPI CS deasserted with partial byte (" &
+                   natural'image(spi_bit_cnt) & " bits)" severity warning;
+          else
+            report "[TB] SPI CS deasserted" severity note;
+          end if;
         end if;
 
+        -- Sample MOSI on rising SPI clock edge while CS is active
         if (csn_v /= x"FF") and spi_clk = '1' and spi_clk_d = '0' then
-          if spi_bit_cnt < 8 then
+          if spi_bit_cnt < 7 then
+            -- Accumulate bit, MSB-first
             spi_shift   <= spi_shift(6 downto 0) & spi_mosi;
             spi_bit_cnt <= spi_bit_cnt + 1;
+          else
+            -- 8th bit completes the byte: report immediately and reset
+            report "[TB] SPI byte (MOSI): 0x" &
+                   to_hstring(unsigned(spi_shift(6 downto 0) & spi_mosi))
+              severity note;
+            spi_shift   <= (others => '0');
+            spi_bit_cnt <= 0;
           end if;
         end if;
 
@@ -168,7 +188,9 @@ begin
 
   -- I2C bus monitor + slave model at address 0x50 ------------------------------
   -- Detects START/STOP, ACKs the address, ACKs write data, returns I2C_RD_BYTE
-  -- on reads.  Uses clocked edge-detection on the resolved twi_sda / twi_scl.
+  -- on reads.  Handles multi-byte writes and multi-byte reads: for reads, the
+  -- slave continues sending I2C_RD_BYTE as long as the master sends ACK; it
+  -- releases the bus when the master sends NACK (end of read).
   i2c_slave: process(clk)
     variable scl_rise  : boolean;
     variable scl_fall  : boolean;
@@ -273,7 +295,9 @@ begin
               end if;
 
             -- ---------------------------------------------------------------
-            -- Receive 8 write-data bits on SCL rising edges, then ACK
+            -- Receive 8 write-data bits on SCL rising edges, then ACK.
+            -- Loops back to SL_WR_DATA after each byte so multi-byte writes
+            -- are handled transparently; STOP from the master exits this loop.
             when SL_WR_DATA =>
               if scl_rise then
                 i2c_sl_sr <= i2c_sl_sr(6 downto 0) & twi_sda;
@@ -300,13 +324,14 @@ begin
                   twi_sda_s <= '1';
                   i2c_sl_bc <= 0;
                   i2c_sl_sr <= (others => '0');
-                  i2c_sl_st <= SL_WR_DATA; -- expect more (STOP overrides above)
+                  i2c_sl_st <= SL_WR_DATA; -- expect more bytes (STOP overrides)
                 end if;
               end if;
 
             -- ---------------------------------------------------------------
-            -- Drive 8 bits of I2C_RD_BYTE on SCL falling edges (MSB first)
-            -- Bit 7 was already placed by SL_ACK_ADDR; here bits 6..0
+            -- Drive bits of I2C_RD_BYTE on SCL falling edges (MSB first).
+            -- Bit 7 was placed on entry to this state (from SL_ACK_ADDR or
+            -- after a master ACK in SL_ACK_RD); subsequent bits 6..0 here.
             when SL_RD_DATA =>
               if scl_fall then
                 twi_sda_s <= I2C_RD_BYTE(i2c_sl_rdc);
@@ -319,22 +344,31 @@ begin
               end if;
 
             -- ---------------------------------------------------------------
-            -- Wait for master's ACK/NACK after read byte:
-            --   fall #0 (after last data bit's SCL rise): release SDA
-            --   SCL rise with akf=1: sample master ACK/NACK, report, go IDLE
+            -- Wait for master's ACK/NACK after each read byte:
+            --   fall #0: release SDA so master can drive ACK or NACK
+            --   rise #1: sample master ACK/NACK
+            --     ACK  -> start driving the next byte (bit 7 on next fall)
+            --     NACK -> go idle (master is done reading)
             when SL_ACK_RD =>
               if scl_fall and i2c_sl_akf = 0 then
                 twi_sda_s  <= '1'; -- release for master to drive ACK/NACK
                 i2c_sl_akf <= 1;
               elsif scl_rise and i2c_sl_akf = 1 then
                 if twi_sda = '0' then
+                  -- Master ACK: send another byte
                   report "[TB] I2C RD byte 0x" & to_hstring(unsigned(I2C_RD_BYTE)) &
-                         " master=ACK" severity note;
+                         " master=ACK (continuing)" severity note;
+                  -- Drive bit 7 on the next SCL fall (SL_RD_DATA handles it)
+                  i2c_sl_rdc <= 7;
+                  i2c_sl_st  <= SL_RD_DATA;
+                  twi_sda_s  <= '1'; -- SL_RD_DATA will drive on next fall
                 else
+                  -- Master NACK: read transaction complete
                   report "[TB] I2C RD byte 0x" & to_hstring(unsigned(I2C_RD_BYTE)) &
                          " master=NACK" severity note;
+                  twi_sda_s <= '1';
+                  i2c_sl_st <= SL_IDLE; -- STOP expected next
                 end if;
-                i2c_sl_st <= SL_IDLE; -- STOP expected next
               end if;
 
           end case;
@@ -345,6 +379,21 @@ begin
         sda_d <= twi_sda;
       end if;
     end if;
+  end process;
+
+  -- Simulation watchdog --------------------------------------------------------
+  -- If GPIO pin 0 has not toggled at least once by 190 ms the firmware likely
+  -- hung before reaching the LED blink loop.  Asserting failure here causes
+  -- GHDL to exit with a non-zero status, which CI scripts can detect.
+  watchdog: process
+  begin
+    wait for 190 ms;
+    report "[TB] Watchdog: 190 ms elapsed; gpio_toggle_cnt=" &
+           natural'image(gpio_toggle_cnt) severity note;
+    if gpio_toggle_cnt < 1 then
+      report "[TB] WATCHDOG: GPIO pin 0 never toggled - firmware may have hung!" severity failure;
+    end if;
+    wait;
   end process;
 
 end architecture;

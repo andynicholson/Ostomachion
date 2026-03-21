@@ -36,7 +36,7 @@
 	soc {
 		spi0: spi@fff80000 {
 			compatible = "neorv32,spi";
-			reg = <0xfff80000 0x10000>;
+			reg = <0xfff80000 0x08>; /* two 32-bit registers: CTRL + DATA */
 			status = "okay";
 			interrupts = <6>;
 			syscon = <&sysinfo>;
@@ -46,7 +46,7 @@
 
 		i2c0: i2c@fff90000 {
 			compatible = "neorv32,twi";
-			reg = <0xfff90000 0x10000>;
+			reg = <0xfff90000 0x08>; /* two 32-bit registers: CTRL + DCMD */
 			status = "okay";
 			interrupts = <7>;
 			syscon = <&sysinfo>;

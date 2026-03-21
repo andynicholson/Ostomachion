@@ -126,8 +126,19 @@ Expected output highlights:
 [NEORV32] Processor Configuration: ... SPI TWI SYSINFO
 [TB] Reset released.
 UART0: *** Booting Zephyr OS build v4.3.0-... ***
+[TB] SPI CS asserted
+[TB] SPI byte (MOSI): 0x00
+[TB] SPI CS deasserted
+UART0: [PASS] SPI loopback byte 0x00
+[TB] SPI byte (MOSI): 0xFF
+UART0: [PASS] SPI loopback byte 0xff
 [TB] SPI byte (MOSI): 0xA5
-UART0: [PASS] SPI loopback: sent 0xa5, received 0xa5
+UART0: [PASS] SPI loopback byte 0xa5
+[TB] SPI byte (MOSI): 0x11
+[TB] SPI byte (MOSI): 0x22
+[TB] SPI byte (MOSI): 0x33
+[TB] SPI byte (MOSI): 0x44
+UART0: [PASS] SPI multi-byte loopback (4 bytes)
 [TB] I2C START
 [TB] I2C ACK addr 0x50 R/W=W
 [TB] I2C WR data 0x42
@@ -136,7 +147,19 @@ UART0: [PASS] SPI loopback: sent 0xa5, received 0xa5
 [TB] I2C ACK addr 0x50 R/W=R
 [TB] I2C RD byte 0x5A master=NACK
 [TB] I2C STOP
-UART0: [PASS] I2C loopback: wrote 0x42, received 0x5a
+UART0: [PASS] I2C write-read: wrote 0x42, received 0x5a
+[TB] I2C ACK addr 0x50 R/W=W
+[TB] I2C WR data 0x01
+[TB] I2C WR data 0x02
+[TB] I2C WR data 0x03
+[TB] I2C STOP
+UART0: [PASS] I2C 3-byte write acknowledged
+[TB] I2C ACK addr 0x50 R/W=R
+[TB] I2C RD byte 0x5A master=ACK (continuing)
+[TB] I2C RD byte 0x5A master=NACK
+[TB] I2C STOP
+UART0: [PASS] I2C 2-byte read: 0x5a 0x5a
+UART0: [SUMMARY] ALL 7 TESTS PASSED
 UART0: NEORV32 + Zephyr + C++20 Booted!
 ```
 
@@ -184,7 +207,7 @@ make IMEM_IMAGE=zephyr_imem_image.vhd SIM_TIME=200ms clean-ghdl all
 
 ### UART log file
 
-The UART monitor writes decoded characters to `UART0.log` (in addition to
+The UART monitor writes decoded characters to `neorv32_tb.UART0_rx.out` (in addition to
 the console). You can concatenate the characters after a run:
 
 ```bash

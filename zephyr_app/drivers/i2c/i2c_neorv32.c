@@ -54,6 +54,13 @@ LOG_MODULE_REGISTER(i2c_neorv32);
 #define TWI_CMD_STOP      0x2U
 #define TWI_CMD_RTX       0x3U
 
+/*
+ * Maximum poll iterations before returning -ETIMEDOUT.
+ * At 100 MHz each iteration is ~10 ns; 1 M iterations ≈ 10 ms, which is
+ * well above any legitimate I2C transaction time at 100 kHz (standard mode).
+ */
+#define TWI_POLL_RETRIES 1000000U
+
 /* NEORV32 clock prescaler LUT: index -> divisor */
 static const uint16_t twi_prsc_lut[8] = {2, 4, 8, 64, 128, 1024, 2048, 4096};
 
@@ -73,63 +80,90 @@ static inline void neorv32_i2c_reg_write(const struct neorv32_i2c_config *cfg, u
 	sys_write32(val, cfg->base + reg);
 }
 
-/* Wait until TX FIFO has at least one free slot */
-static inline void twi_wait_tx(const struct neorv32_i2c_config *cfg)
+/* Blocks until TX FIFO has at least one free slot. Returns -ETIMEDOUT on hang. */
+static int twi_wait_tx(const struct neorv32_i2c_config *cfg)
 {
-	while (neorv32_i2c_reg_read(cfg, NEORV32_TWI_CTRL) & TWI_CTRL_TX_FULL) {
-		;
+	for (uint32_t i = 0U; i < TWI_POLL_RETRIES; i++) {
+		if (!(neorv32_i2c_reg_read(cfg, NEORV32_TWI_CTRL) & TWI_CTRL_TX_FULL)) {
+			return 0;
+		}
 	}
+	LOG_ERR("TWI TX FIFO full timeout");
+	return -ETIMEDOUT;
 }
 
-/* Wait until bus engine is idle and TX FIFO is empty */
-static inline void twi_wait_idle(const struct neorv32_i2c_config *cfg)
+/* Blocks until bus engine is idle (TX FIFO drained and bus quiet). Returns -ETIMEDOUT on hang. */
+static int twi_wait_idle(const struct neorv32_i2c_config *cfg)
 {
-	while (neorv32_i2c_reg_read(cfg, NEORV32_TWI_CTRL) & TWI_CTRL_BUSY) {
-		;
+	for (uint32_t i = 0U; i < TWI_POLL_RETRIES; i++) {
+		if (!(neorv32_i2c_reg_read(cfg, NEORV32_TWI_CTRL) & TWI_CTRL_BUSY)) {
+			return 0;
+		}
 	}
+	LOG_ERR("TWI bus busy timeout");
+	return -ETIMEDOUT;
 }
 
-/* Wait for an RX FIFO entry and return it; returns -1 if no entry (poll) */
-static inline uint32_t twi_wait_rx(const struct neorv32_i2c_config *cfg)
+/* Blocks until an RX FIFO entry is available, then returns it via *val. Returns -ETIMEDOUT. */
+static int twi_wait_rx(const struct neorv32_i2c_config *cfg, uint32_t *val)
 {
-	while (!(neorv32_i2c_reg_read(cfg, NEORV32_TWI_CTRL) & TWI_CTRL_RX_AVAIL)) {
-		;
+	for (uint32_t i = 0U; i < TWI_POLL_RETRIES; i++) {
+		if (neorv32_i2c_reg_read(cfg, NEORV32_TWI_CTRL) & TWI_CTRL_RX_AVAIL) {
+			*val = neorv32_i2c_reg_read(cfg, NEORV32_TWI_DCMD);
+			return 0;
+		}
 	}
-	return neorv32_i2c_reg_read(cfg, NEORV32_TWI_DCMD);
+	LOG_ERR("TWI RX FIFO empty timeout");
+	return -ETIMEDOUT;
 }
 
-/* Issue START (or REPEATED-START) condition and wait for completion */
-static void twi_start(const struct neorv32_i2c_config *cfg)
+/* Issues a START (or REPEATED-START) condition and waits for completion. */
+static int twi_start(const struct neorv32_i2c_config *cfg)
 {
-	twi_wait_tx(cfg);
+	int err;
+
+	err = twi_wait_tx(cfg);
+	if (err < 0) {
+		return err;
+	}
 	neorv32_i2c_reg_write(cfg, NEORV32_TWI_DCMD, TWI_CMD_START << TWI_DCMD_CMD_SHIFT);
-	twi_wait_idle(cfg);
+	return twi_wait_idle(cfg);
 }
 
-/* Issue STOP condition and wait for completion */
-static void twi_stop(const struct neorv32_i2c_config *cfg)
+/* Issues a STOP condition and waits for completion. */
+static int twi_stop(const struct neorv32_i2c_config *cfg)
 {
-	twi_wait_tx(cfg);
+	int err;
+
+	err = twi_wait_tx(cfg);
+	if (err < 0) {
+		return err;
+	}
 	neorv32_i2c_reg_write(cfg, NEORV32_TWI_DCMD, TWI_CMD_STOP << TWI_DCMD_CMD_SHIFT);
-	twi_wait_idle(cfg);
+	return twi_wait_idle(cfg);
 }
 
 /*
- * Send one byte via RTX and return the DCMD read value.
- * For address/write bytes: mack=0.  For read bytes except last: mack=1.
- * For last read byte (master NACK): mack=0.
+ * Sends one byte via RTX and returns the DCMD read value via *result.
+ * For address/write bytes: mack=false.
+ * For all read bytes except the last: mack=true (master ACK).
+ * For the last read byte: mack=false (master NACK to signal end of read).
  */
-static uint32_t twi_rtx(const struct neorv32_i2c_config *cfg, uint8_t data, bool mack)
+static int twi_rtx(const struct neorv32_i2c_config *cfg, uint8_t data, bool mack, uint32_t *result)
 {
 	uint32_t cmd = (uint32_t)data | (TWI_CMD_RTX << TWI_DCMD_CMD_SHIFT);
+	int err;
 
 	if (mack) {
 		cmd |= TWI_DCMD_ACK;
 	}
 
-	twi_wait_tx(cfg);
+	err = twi_wait_tx(cfg);
+	if (err < 0) {
+		return err;
+	}
 	neorv32_i2c_reg_write(cfg, NEORV32_TWI_DCMD, cmd);
-	return twi_wait_rx(cfg);
+	return twi_wait_rx(cfg, result);
 }
 
 static int neorv32_i2c_configure(const struct device *dev, uint32_t dev_config)
@@ -169,6 +203,11 @@ static int neorv32_i2c_configure(const struct device *dev, uint32_t dev_config)
 		return err;
 	}
 
+	if (clk_hz == 0U) {
+		LOG_ERR("SYSINFO reports zero CPU clock — SYSINFO may be uninitialised");
+		return -EINVAL;
+	}
+
 	/* f_twi = f_cpu / (4 * PRSC * (1 + CDIV)) – find closest without exceeding speed_hz */
 	for (uint32_t p = 0U; p < 8U; p++) {
 		for (uint32_t d = 0U; d < 16U; d++) {
@@ -204,22 +243,43 @@ static int neorv32_i2c_transfer(const struct device *dev, struct i2c_msg *msgs, 
 {
 	const struct neorv32_i2c_config *cfg = dev->config;
 	int ret = 0;
+	int err;
+	bool stop_issued = false;
 
 	if (num_msgs == 0U) {
 		return 0;
 	}
 
 	for (uint8_t i = 0U; i < num_msgs; i++) {
+		/* Skip zero-length messages without disturbing the bus. */
+		if (msgs[i].len == 0U) {
+			continue;
+		}
+
 		bool is_read = (msgs[i].flags & I2C_MSG_READ) != 0U;
 
-		/* START before first message; RESTART before subsequent messages */
-		twi_start(cfg);
+		/*
+		 * Issue START or REPEATED START before each message.
+		 * The NEORV32 TWI hardware generates a REPEATED START if the bus
+		 * is already active (no STOP has been issued since the last START).
+		 */
+		err = twi_start(cfg);
+		if (err < 0) {
+			ret = err;
+			goto done;
+		}
+		stop_issued = false;
 
 		/* Address phase: send addr+R/W, check slave ACK */
 		uint8_t addr_byte = (uint8_t)((addr << 1U) | (is_read ? 1U : 0U));
-		uint32_t rx = twi_rtx(cfg, addr_byte, false);
+		uint32_t rx_val;
 
-		if (rx & TWI_DCMD_ACK) {
+		err = twi_rtx(cfg, addr_byte, false, &rx_val);
+		if (err < 0) {
+			ret = err;
+			goto done;
+		}
+		if (rx_val & TWI_DCMD_ACK) {
 			/* Slave NACK'd the address */
 			LOG_DBG("NACK on address 0x%02x", addr);
 			ret = -ENXIO;
@@ -229,26 +289,52 @@ static int neorv32_i2c_transfer(const struct device *dev, struct i2c_msg *msgs, 
 		if (!is_read) {
 			/* Write data bytes */
 			for (uint32_t j = 0U; j < msgs[i].len; j++) {
-				rx = twi_rtx(cfg, msgs[i].buf[j], false);
-				if (rx & TWI_DCMD_ACK) {
+				err = twi_rtx(cfg, msgs[i].buf[j], false, &rx_val);
+				if (err < 0) {
+					ret = err;
+					goto done;
+				}
+				if (rx_val & TWI_DCMD_ACK) {
 					LOG_DBG("NACK on write byte %u", j);
 					ret = -EIO;
 					goto done;
 				}
 			}
 		} else {
-			/* Read data bytes */
+			/* Read data bytes: MACK for all except the final byte. */
 			for (uint32_t j = 0U; j < msgs[i].len; j++) {
 				bool mack = (j < msgs[i].len - 1U);
 
-				rx = twi_rtx(cfg, 0xFFU, mack);
-				msgs[i].buf[j] = (uint8_t)(rx & 0xFFU);
+				err = twi_rtx(cfg, 0xFFU, mack, &rx_val);
+				if (err < 0) {
+					ret = err;
+					goto done;
+				}
+				msgs[i].buf[j] = (uint8_t)(rx_val & 0xFFU);
+			}
+		}
+
+		/*
+		 * Emit STOP if this message explicitly requests it (e.g. the last
+		 * segment of an i2c_write_read, or any message where the caller
+		 * wants to release the bus before issuing a fresh START).
+		 */
+		if (msgs[i].flags & I2C_MSG_STOP) {
+			err = twi_stop(cfg);
+			stop_issued = true;
+			if (err < 0) {
+				ret = err;
+				goto done_no_stop;
 			}
 		}
 	}
 
 done:
-	twi_stop(cfg);
+	/* Always release the bus with a STOP unless one was already issued. */
+	if (!stop_issued) {
+		(void)twi_stop(cfg);
+	}
+done_no_stop:
 	return ret;
 }
 
