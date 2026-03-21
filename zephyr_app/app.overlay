@@ -43,5 +43,15 @@
 			#address-cells = <1>;
 			#size-cells = <0>;
 		};
+
+		i2c0: i2c@fff90000 {
+			compatible = "neorv32,twi";
+			reg = <0xfff90000 0x10000>;
+			status = "okay";
+			interrupts = <7>;
+			syscon = <&sysinfo>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+		};
 	};
 };

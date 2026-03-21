@@ -5,6 +5,7 @@
 
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/spi.h>
 #include <zephyr/kernel.h>
 
@@ -65,6 +66,42 @@ int run_spi_loopback_test()
 	return -1;
 }
 
+/*
+ * I2C write-read test against the GHDL testbench slave at address 0x50.
+ * Write 1 byte (0x42), then read 1 byte and expect 0x5A (I2C_RD_BYTE in TB).
+ */
+int run_i2c_loopback_test()
+{
+	const struct device *i2c = DEVICE_DT_GET(DT_NODELABEL(i2c0));
+
+	if (!device_is_ready(i2c)) {
+		printk("[FAIL] I2C device not ready\n");
+		return -1;
+	}
+
+	static const uint16_t slave_addr = 0x50U;
+
+	uint8_t tx_data = 0x42U;
+	uint8_t rx_data = 0x00U;
+
+	int ret = i2c_write_read(i2c, slave_addr, &tx_data, sizeof(tx_data), &rx_data,
+				 sizeof(rx_data));
+
+	if (ret != 0) {
+		printk("[FAIL] I2C write_read: err=%d\n", ret);
+		return ret;
+	}
+
+	if (rx_data == 0x5AU) {
+		printk("[PASS] I2C loopback: wrote 0x%02x, received 0x%02x\n", tx_data, rx_data);
+		return 0;
+	}
+
+	printk("[FAIL] I2C loopback: wrote 0x%02x, received 0x%02x (want 0x5a)\n", tx_data,
+	       rx_data);
+	return -1;
+}
+
 } // namespace
 
 int main()
@@ -74,6 +111,7 @@ int main()
 	LedController led(led0);
 
 	(void)run_spi_loopback_test();
+	(void)run_i2c_loopback_test();
 
 	printk("NEORV32 + Zephyr + C++20 Booted!\n");
 

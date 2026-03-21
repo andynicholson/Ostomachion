@@ -1,0 +1,11 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: Apache-2.0
+
+config I2C_NEORV32
+	bool "NEORV32 TWI (I2C) driver"
+	default y
+	depends on I2C
+	depends on DT_HAS_NEORV32_TWI_ENABLED
+	depends on SYSCON
+	help
+	  Enable NEORV32 TWI master driver (blocking/polling).

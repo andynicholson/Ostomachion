@@ -37,15 +37,20 @@ The hardware wrapper (`neorv32_wrapper.vhd`) instantiates `neorv32_top` with:
 | `IO_CLINT_EN`        | true        | Machine timer (required by Zephyr) |
 | `IO_GPIO_NUM`        | 8           | 8-bit GPIO output                |
 | `IO_UART0_EN`        | true        | UART0 serial console             |
+| `IO_SPI_EN`          | true        | SPI master — base `0xFFF80000`, FIRQ 6 |
+| `IO_SPI_FIFO`        | 4           | SPI TX/RX FIFO depth             |
+| `IO_TWI_EN`          | true        | I2C/TWI master — base `0xFFF90000`, FIRQ 7 |
+| `IO_TWI_FIFO`        | 4           | TWI TX/RX FIFO depth             |
 | `RISCV_ISA_C`        | true        | Compressed instructions          |
 | `RISCV_ISA_M`        | true        | Hardware multiply/divide         |
 
 The testbench (`neorv32_tb.vhd`) provides:
 - 100 MHz clock generator
 - Reset release after 100 ns
-- **UART RX monitor** — decodes serial output at 19200 baud and prints
-  each character to the console
+- **UART RX monitor** — decodes serial output at 19200 baud
 - **GPIO change monitor** — reports every GPIO transition with timestamp
+- **SPI bus monitor** — shifts MOSI on SCK rising edges, reports each byte on CS deassert; MISO loopbacks MOSI for loopback testing
+- **I2C slave model** — responds at 7-bit address **0x50**; ACKs write data (logging each byte), returns **0x5A** on read; simulates open-drain bus (`'0'` wins, `'1'` = pull-up high)
 
 Simulation duration is controlled entirely by GHDL's `--stop-time` flag,
 passed through the Makefile's `SIM_TIME` variable.
@@ -114,23 +119,25 @@ export ZEPHYR_BASE=~/src/zephyrproject/zephyr
 make test-zephyr
 ```
 
-This takes approximately 15 minutes of wall time for the 80 ms simulation.
-Expected output (one character per line from the UART monitor):
+This takes approximately 25 minutes of wall time for the 200 ms simulation.
+Expected output highlights:
 
 ```
+[NEORV32] Processor Configuration: ... SPI TWI SYSINFO
 [TB] Reset released.
-UART0.rx: *
-UART0.rx: *
-UART0.rx: *
-UART0.rx:
-UART0.rx: B
-...                        ← "*** Booting Zephyr OS build v4.3.0-... ***"
-UART0.rx: N
-UART0.rx: E
-UART0.rx: O
-...                        ← "NEORV32 + Zephyr + C++20 Booted!"
-[TB] GPIO changed: 0x01   ← LED configured
-[TB] GPIO changed: 0x00   ← first toggle()
+UART0: *** Booting Zephyr OS build v4.3.0-... ***
+[TB] SPI byte (MOSI): 0xA5
+UART0: [PASS] SPI loopback: sent 0xa5, received 0xa5
+[TB] I2C START
+[TB] I2C ACK addr 0x50 R/W=W
+[TB] I2C WR data 0x42
+[TB] I2C STOP
+[TB] I2C START
+[TB] I2C ACK addr 0x50 R/W=R
+[TB] I2C RD byte 0x5A master=NACK
+[TB] I2C STOP
+UART0: [PASS] I2C loopback: wrote 0x42, received 0x5a
+UART0: NEORV32 + Zephyr + C++20 Booted!
 ```
 
 ### Default image test
@@ -244,8 +251,9 @@ compatible with the current Zephyr board support.
 : Ensure the venv is activated and `ZEPHYR_BASE` is set before running.
 
 **Simulation takes very long**
-: GHDL interprets the RTL cycle-by-cycle. 80 ms at 100 MHz = 8 million
-  clock cycles. Reduce `SIM_TIME` for faster iteration.
+: GHDL interprets the RTL cycle-by-cycle. 200 ms at 100 MHz = 20 million
+  clock cycles. Reduce `SIM_TIME` for faster iteration; the SPI and I2C
+  tests complete within the first ~100 ms of simulated time.
 
 **No UART output in simulation**
 : The bare-metal test uses UART sim-mode (characters printed directly to
