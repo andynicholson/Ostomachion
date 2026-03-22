@@ -106,7 +106,7 @@ begin
   generic map (
     NAME => "UART0",
     FCLK => 100.0e6,
-    BAUD => 19200.0
+    BAUD => 115200.0
   )
   port map (
     clk => std_ulogic(clk),
@@ -382,13 +382,13 @@ begin
   end process;
 
   -- Simulation watchdog --------------------------------------------------------
-  -- If GPIO pin 0 has not toggled at least once by 190 ms the firmware likely
+  -- If GPIO pin 0 has not toggled at least once by 390 ms the firmware likely
   -- hung before reaching the LED blink loop.  Asserting failure here causes
   -- GHDL to exit with a non-zero status, which CI scripts can detect.
   watchdog: process
   begin
-    wait for 190 ms;
-    report "[TB] Watchdog: 190 ms elapsed; gpio_toggle_cnt=" &
+    wait for 390 ms;
+    report "[TB] Watchdog: 390 ms elapsed; gpio_toggle_cnt=" &
            natural'image(gpio_toggle_cnt) severity note;
     if gpio_toggle_cnt < 1 then
       report "[TB] WATCHDOG: GPIO pin 0 never toggled - firmware may have hung!" severity failure;

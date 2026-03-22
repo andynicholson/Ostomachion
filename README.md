@@ -550,12 +550,13 @@ Subsequent firmware iterations only require `make fpga-fw` — no Vivado run.
 
 | Context | UART baud | Set by |
 |---------|-----------|--------|
-| Simulation | 19200 | `app.overlay` (`current-speed = <19200>`) — keeps sim time short |
+| Simulation | 115200 | `app.overlay` (`current-speed = <115200>`) |
 | NEORV32 bootloader | 19200 | BROM fixed — cannot be changed without modifying the bootloader |
 | Application (FPGA) | 115200 | `app_fpga.overlay` (`current-speed = <115200>`) |
 
-The application baud rate takes effect only after the bootloader hands control to
-the Zephyr image.
+Both simulation and the FPGA application run at 115200 baud, giving a uniform
+development experience.  The NEORV32 bootloader (BROM) always runs at 19200 baud
+before handing off to the application; this is a fixed hardware constraint.
 
 ### Interrupt vs. polling drivers
 
@@ -590,5 +591,86 @@ openocd -f fpga/arty_a7/openocd.cfg \
 riscv32-unknown-elf-gdb build_zephyr_fpga/zephyr/zephyr.elf \
     -ex "target extended-remote localhost:3333" \
     -ex "monitor reset halt"
+```
+
+### Hardware test setup
+
+`make test-hw` builds a dedicated test image (verbose ztest output, per-subsystem
+logging, 115200 baud) and uploads it via the UART bootloader.  The full test suite
+covers SPI, I2C, and GPIO.
+
+#### 1. SPI loopback jumper
+
+Fit a jumper between **Pmod JA pin 2** (MOSI, FPGA net `B11`) and **pin 3** (MISO,
+`A11`).  This is the same loopback used for production SPI bringup.
+
+```
+Pmod JA header (looking at the board)
+ pin 1  pin 2  pin 3  pin 4
+  VCC   MOSI   MISO   SCK   ...
+          └──── jumper ───┘
+```
+
+Without the jumper the SPI loopback tests fail with mismatched RX data.
+
+#### 2. I2C slave (optional)
+
+No external device is needed for the baseline I2C tests — NACK detection and the
+bus scan run on bare hardware.  To enable the slave write/read tests, set
+`CONFIG_TEST_I2C_SLAVE_ADDR` to the 7-bit address of your device:
+
+```bash
+# example: device at 0x48 (e.g. TMP102 temperature sensor)
+make test-hw EXTRA_CONF="CONFIG_TEST_I2C_SLAVE_ADDR=72"
+```
+
+Or create a one-off fragment and add it to the `OVERLAY_CONFIG` list in the
+`test-hw` Makefile target.
+
+#### 3. Run the hardware tests
+
+```bash
+# Prerequisites: bitstream programmed (make fpga-program), board reset
+make test-hw UART_DEVICE=/dev/ttyUSB1
+```
+
+This:
+1. Builds `build_zephyr_hw_test/` from `prj.conf + prj_fpga.conf + prj_hw_test.conf`
+2. Uploads the binary via the NEORV32 UART bootloader at 19200 baud
+3. The application starts and runs all ztest suites at 115200 baud
+
+#### 4. Reading test output
+
+```bash
+minicom -D /dev/ttyUSB1 -b 115200 --noinit
+# or
+screen /dev/ttyUSB1 115200
+```
+
+Expected output (all tests passing):
+
+```
+Running TESTSUITE ostomachion_spi
+===================================================================
+START - test_device_ready
+ PASS - test_device_ready in 0 ms
+START - test_loopback_boundary
+ PASS - test_loopback_boundary in 1 ms
+...
+TESTSUITE ostomachion_spi succeeded
+
+Running TESTSUITE ostomachion_i2c
+...
+START - test_nack_nonexistent
+ PASS - test_nack_nonexistent in 2 ms
+START - test_bus_scan
+[I2C scan] complete: 0 device(s) found
+ PASS - test_bus_scan in 45 ms
+...
+TESTSUITE ostomachion_i2c succeeded
+
+Running TESTSUITE ostomachion_gpio
+...
+TESTSUITE ostomachion_gpio succeeded
 ```
 

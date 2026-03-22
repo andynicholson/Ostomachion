@@ -14,4 +14,5 @@ target_sources(app PRIVATE
     src/main.cpp
     tests/test_spi.cpp
     tests/test_i2c.cpp
+    tests/test_gpio.cpp
 )

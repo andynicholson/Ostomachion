@@ -24,12 +24,13 @@ VIVADO      ?= vivado
 OPENOCD     ?= openocd
 UART_DEVICE ?= /dev/ttyUSB1
 
-FPGA_DIR          = fpga/arty_a7
-ZEPHYR_BUILD_FPGA = build_zephyr_fpga
-BIT_FILE          = build/arty_a7/ostomachion_arty_a7.bit
+FPGA_DIR             = fpga/arty_a7
+ZEPHYR_BUILD_FPGA    = build_zephyr_fpga
+ZEPHYR_BUILD_HW_TEST = build_zephyr_hw_test
+BIT_FILE             = build/arty_a7/ostomachion_arty_a7.bit
 
 .PHONY: all analyze simulate clean sw test-baremetal test-default test-zephyr zephyr \
-        zephyr-fpga fpga-synth fpga-program fpga-fw fpga-check
+        zephyr-fpga fpga-synth fpga-program fpga-fw fpga-check test-hw
 
 # ---------- default flow (uses the image baked into neorv32/rtl/core) ------
 all: analyze simulate
@@ -82,7 +83,7 @@ zephyr:
 	cp $(ZEPHYR_BUILD_DIR)/zephyr/zephyr.vhd zephyr_imem_image.vhd
 
 test-zephyr: zephyr clean-ghdl
-	$(MAKE) IMEM_IMAGE=zephyr_imem_image.vhd SIM_TIME=200ms all
+	$(MAKE) IMEM_IMAGE=zephyr_imem_image.vhd SIM_TIME=400ms all
 
 clean-ghdl:
 	@echo "=== Cleaning GHDL artifacts ==="
@@ -94,7 +95,7 @@ clean: clean-ghdl
 	@echo "=== Cleaning SW build ==="
 	$(MAKE) -C $(SW_DIR) RISCV_PREFIX=$(RISCV_PREFIX) clean 2>/dev/null || true
 	rm -f test_imem_image.vhd zephyr_imem_image.vhd
-	rm -rf $(ZEPHYR_BUILD_DIR) $(ZEPHYR_BUILD_FPGA)
+	rm -rf $(ZEPHYR_BUILD_DIR) $(ZEPHYR_BUILD_FPGA) $(ZEPHYR_BUILD_HW_TEST)
 
 # ---------- FPGA targets (Arty A7) -------------------------------------------
 
@@ -145,3 +146,25 @@ fpga-check:
 	@echo "=== Running FPGA build quality checks ==="
 	$(VIVADO) -mode batch -source $(FPGA_DIR)/check_build.tcl
 	@echo "=== Quality check complete ==="
+
+## Build hardware test firmware and upload to the Arty A7 via UART bootloader.
+## Combines prj.conf + prj_fpga.conf + prj_hw_test.conf (verbose output, logs,
+## no I2C slave by default).  Override UART_DEVICE if your board is on a
+## different port.  Bitstream must already be programmed via fpga-program.
+##
+## Hardware test setup:
+##   SPI loopback : jumper Pmod JA pin 2 (MOSI, B11) → pin 3 (MISO, A11)
+##   I2C slave    : add CONFIG_TEST_I2C_SLAVE_ADDR=<addr> to skip gracefully
+##   UART output  : minicom -D $(UART_DEVICE) -b 115200
+test-hw:
+	@echo "=== Building Zephyr hardware test firmware ==="
+	west build -b $(ZEPHYR_BOARD) $(ZEPHYR_APP_DIR) \
+		-d $(ZEPHYR_BUILD_HW_TEST) --pristine=auto \
+		-- -DCMAKE_PROGRAM_PATH=$(IMAGE_GEN_DIR) \
+		   -DDTC_OVERLAY_FILE="$(CURDIR)/$(ZEPHYR_APP_DIR)/app.overlay;$(CURDIR)/$(ZEPHYR_APP_DIR)/app_fpga.overlay" \
+		   -DOVERLAY_CONFIG="$(CURDIR)/$(ZEPHYR_APP_DIR)/prj.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_fpga.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_hw_test.conf"
+	@echo "=== Uploading hardware test firmware via UART bootloader ==="
+	python3 $(NEORV32_HOME)/sw/bootloader/neorv32_upload.py \
+		--port $(UART_DEVICE) \
+		$(ZEPHYR_BUILD_HW_TEST)/zephyr/zephyr.bin
+	@echo "=== Firmware uploaded — connect a terminal at 115200 baud to see results ==="

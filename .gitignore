@@ -14,6 +14,7 @@ zephyr_imem_image.vhd
 # Zephyr build output
 build_zephyr/
 build_zephyr_fpga/
+build_zephyr_hw_test/
 
 # Vivado build output
 build/
