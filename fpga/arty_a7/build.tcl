@@ -149,4 +149,77 @@ set bit_dst "$build_dir/ostomachion_arty_a7.bit"
 file copy -force $bit_src $bit_dst
 
 puts "INFO: Bitstream written to $bit_dst"
-puts "INFO: Build complete."
+
+# ---------------------------------------------------------------------------
+# Post-build quality gates
+#
+# These run inside the completed implementation to verify the build meets
+# production quality requirements.  Any failure exits non-zero so that
+# make fpga-synth returns an error to the calling shell / CI system.
+# ---------------------------------------------------------------------------
+puts "INFO: Running post-build quality checks..."
+
+open_run impl_1
+
+# --- 1. Timing closure -------------------------------------------------------
+# get_timing_paths works on an open_run (STATS.* properties do not).
+set setup_path [get_timing_paths -max_paths 1 -nworst 1 -setup -quiet]
+set hold_path  [get_timing_paths -max_paths 1 -nworst 1 -hold  -quiet]
+set wns ""
+set whs ""
+if {$setup_path ne ""} { set wns [get_property SLACK $setup_path] }
+if {$hold_path  ne ""} { set whs [get_property SLACK $hold_path]  }
+
+puts "INFO: Timing — WNS = $wns ns  WHS = $whs ns"
+
+set timing_ok 1
+if {$wns eq "" || [expr {$wns < 0}]} {
+    puts "ERROR: Setup timing VIOLATED — WNS = $wns ns (must be >= 0)"
+    set timing_ok 0
+}
+if {$whs eq "" || [expr {$whs < 0}]} {
+    puts "ERROR: Hold timing VIOLATED — WHS = $whs ns (must be >= 0)"
+    set timing_ok 0
+}
+
+# --- 2. Resource headroom ----------------------------------------------------
+proc parse_util_pct {rpt keyword} {
+    foreach line [split $rpt "\n"] {
+        if {[string match "*${keyword}*" $line]} {
+            if {[regexp {\|\s*([\d.]+)\s*\|[^|]*\|[^|]*\|\s*([\d.]+)\s*\|\s*([\d.]+)\s*\|} $line -> used avail pct]} {
+                return $pct
+            }
+        }
+    }
+    return "?"
+}
+
+set util_rpt  [report_utilization -return_string -quiet]
+set pct_luts  [parse_util_pct $util_rpt "Slice LUTs"]
+set pct_brams [parse_util_pct $util_rpt "Block RAM Tile"]
+
+puts "INFO: Utilisation — LUTs ${pct_luts}%  BRAMs ${pct_brams}%"
+
+foreach {res pct limit} [list "LUT" $pct_luts 80  "BRAM" $pct_brams 85] {
+    if {$pct ne "?" && $pct > $limit} {
+        puts "WARNING: $res utilisation ${pct}% exceeds ${limit}% threshold — routing congestion risk"
+    }
+}
+
+# --- 3. Summary --------------------------------------------------------------
+set pass 1
+if {!$timing_ok} { set pass 0 }
+
+if {$pass} {
+    puts "INFO: ============================================"
+    puts "INFO:  BUILD QUALITY GATES PASSED"
+    puts "INFO:  WNS=+${wns}ns  WHS=+${whs}ns  LUTs=${pct_luts}%  BRAMs=${pct_brams}%"
+    puts "INFO: ============================================"
+    puts "INFO: Build complete."
+} else {
+    puts "ERROR: ============================================"
+    puts "ERROR:  BUILD QUALITY GATES FAILED"
+    if {!$timing_ok} { puts "ERROR:  - Timing not met: WNS=$wns ns  WHS=$whs ns" }
+    puts "ERROR: ============================================"
+    exit 1
+}

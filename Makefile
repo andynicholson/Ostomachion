@@ -29,7 +29,7 @@ ZEPHYR_BUILD_FPGA = build_zephyr_fpga
 BIT_FILE          = build/arty_a7/ostomachion_arty_a7.bit
 
 .PHONY: all analyze simulate clean sw test-baremetal test-default test-zephyr zephyr \
-        zephyr-fpga fpga-synth fpga-program fpga-fw
+        zephyr-fpga fpga-synth fpga-program fpga-fw fpga-check
 
 # ---------- default flow (uses the image baked into neorv32/rtl/core) ------
 all: analyze simulate
@@ -137,3 +137,11 @@ fpga-fw: zephyr-fpga
 		--port $(UART_DEVICE) \
 		$(ZEPHYR_BUILD_FPGA)/zephyr/zephyr.bin
 	@echo "=== Firmware upload complete ==="
+
+## Run post-build quality gates against an existing built project.
+## Checks: timing closure (WNS/WHS >= 0), DRC errors, resource headroom.
+## Does NOT re-synthesise — must run after fpga-synth.
+fpga-check:
+	@echo "=== Running FPGA build quality checks ==="
+	$(VIVADO) -mode batch -source $(FPGA_DIR)/check_build.tcl
+	@echo "=== Quality check complete ==="
