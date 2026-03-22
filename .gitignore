@@ -15,9 +15,18 @@ zephyr_imem_image.vhd
 build_zephyr/
 build_zephyr_fpga/
 build_zephyr_hw_test/
+build_zephyr_accel_test/
+build_zephyr_shell/
+
+# Miscellaneous build artifacts
+build_vivado.log
+nohup.out
+clockInfo.txt
+.Xil/
 
 # Vivado build output
 build/
+vivado*
 
 # SW build artifacts
 sw/test_gpio_uart/*.elf

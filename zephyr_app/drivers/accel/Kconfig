@@ -1,0 +1,19 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: Apache-2.0
+
+config FFT_ACCEL
+	bool "Ostomachion FFT accelerator driver"
+	depends on DT_HAS_OSTOMACHION_FFT_ACCEL_ENABLED
+	help
+	  Enables the Zephyr MISC driver for the memory-mapped FFT hardware
+	  accelerator.  Requires the matching DTS node (compatible =
+	  "ostomachion,fft-accel") and the AXI DMA + BRAM peripherals to be
+	  present in the design.
+
+if FFT_ACCEL
+
+module = FFT_ACCEL
+module-str = fft_accel
+source "subsys/logging/Kconfig.template.log_config"
+
+endif # FFT_ACCEL

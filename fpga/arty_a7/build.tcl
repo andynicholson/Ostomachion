@@ -25,7 +25,7 @@ puts "INFO: Build output : $build_dir"
 # Create Vivado project
 # ---------------------------------------------------------------------------
 create_project ostomachion_arty_a7 "$build_dir/vivado_project" \
-    -part xc7a35tcsg324-1 -force
+    -part xc7a100tcsg324-1 -force
 
 set_property TARGET_LANGUAGE VHDL [current_project]
 
@@ -90,10 +90,33 @@ foreach f $soc_files {
 }
 
 # ---------------------------------------------------------------------------
-# Add board-level top (library work)
+# Add custom RTL: XBUS bridge (library work)
+# Instantiated by arty_a7_top.vhd — not referenced inside the block design.
+# The BD contains only Xilinx IP; NEORV32 and the bridge live in arty_a7_top.
+# The FFT is provided by the Xilinx xfft IP instantiated in the BD; no
+# custom FFT VHDL files are needed.
+# ---------------------------------------------------------------------------
+set accel_rtl "$proj_root/rtl"
+
+add_files -fileset sources_1 [list \
+    "$accel_rtl/xbus_axi4lite_bridge.vhd" \
+]
+
+# ---------------------------------------------------------------------------
+# Add board-level top (library work) — thin IO primitives wrapper
 # ---------------------------------------------------------------------------
 add_files -fileset sources_1 "$fpga_dir/arty_a7_top.vhd"
 set_property TOP arty_a7_top [get_filesets sources_1]
+
+# ---------------------------------------------------------------------------
+# Create the IP Integrator block design
+# This sources ostomachion_bd.tcl which instantiates all IPs, connects
+# clocks/resets, wires up the AXI fabric, and calls make_wrapper.
+# The resulting ostomachion_bd_wrapper.vhd is added to sources_1 by the
+# BD script; arty_a7_top remains the synthesis top.
+# ---------------------------------------------------------------------------
+puts "INFO: Creating IP Integrator block design..."
+source "$fpga_dir/ostomachion_bd.tcl"
 
 # ---------------------------------------------------------------------------
 # Add XDC constraints
@@ -101,68 +124,93 @@ set_property TOP arty_a7_top [get_filesets sources_1]
 add_files -fileset constrs_1 "$fpga_dir/arty_a7.xdc"
 
 # ---------------------------------------------------------------------------
-# Set VHDL language standard to 2008 for all sources
+# Set VHDL-2008 only for NEORV32 core files and our custom RTL.
+# DO NOT apply to Xilinx IP-generated files — they use VHDL-93/2000 and
+# setting VHDL-2008 on them breaks synthesis (FILE_TYPE mismatch).
 # ---------------------------------------------------------------------------
-set_property FILE_TYPE {VHDL 2008} [get_files *.vhd]
+set rtl_vhdl2008_files [concat $soc_files [list \
+    "$accel_rtl/xbus_axi4lite_bridge.vhd" \
+    "$fpga_dir/arty_a7_top.vhd"           \
+]]
+foreach f $rtl_vhdl2008_files {
+    set_property FILE_TYPE {VHDL 2008} [get_files $f]
+}
 
 # ---------------------------------------------------------------------------
 # Synthesis
+# launch_runs synth_1 handles the OOC dependency chain automatically:
+#   – synthesises each BD sub-IP as an OOC checkpoint
+#   – then synthesises the BD wrapper and the top-level design
+# Verbose mode is enabled on the synthesis run step so detailed messages
+# appear in the run log ($build_dir/vivado_project/.../synth_1/runme.log).
 # ---------------------------------------------------------------------------
-puts "INFO: Starting synthesis..."
+## Synthesis verbose output goes to synth_1/runme.log in the project run dir.
+## The direct implementation commands below use -verbose for console output.
+
+puts "INFO: ── Synthesis (launch_runs) ───────────────────────────────────────"
 launch_runs synth_1 -jobs 4
 wait_on_run synth_1
 
 if {[get_property PROGRESS [get_runs synth_1]] ne "100%"} {
-    puts "ERROR: Synthesis failed!"
+    puts "ERROR: Synthesis failed — see:"
+    puts "  $build_dir/vivado_project/ostomachion_arty_a7.runs/synth_1/runme.log"
     exit 1
 }
 puts "INFO: Synthesis complete."
 
-# ---------------------------------------------------------------------------
-# Implementation
-# ---------------------------------------------------------------------------
-puts "INFO: Starting implementation..."
-launch_runs impl_1 -jobs 4
-wait_on_run impl_1
-
-if {[get_property PROGRESS [get_runs impl_1]] ne "100%"} {
-    puts "ERROR: Implementation failed!"
-    exit 1
-}
-puts "INFO: Implementation complete."
+# Open the synthesised checkpoint so implementation commands work in-memory.
+open_run synth_1 -name synth_1
 
 # ---------------------------------------------------------------------------
-# Bitstream generation
+# Implementation — direct commands with -verbose for real-time diagnostics
 # ---------------------------------------------------------------------------
-puts "INFO: Generating bitstream..."
-launch_runs impl_1 -to_step write_bitstream -jobs 4
-wait_on_run impl_1
+puts "INFO: ── Optimisation ───────────────────────────────────────────────────"
+opt_design -verbose
 
-if {[get_property PROGRESS [get_runs impl_1]] ne "100%"} {
-    puts "ERROR: Bitstream generation failed!"
-    exit 1
-}
+puts "INFO: ── Placement ──────────────────────────────────────────────────────"
+place_design -verbose
 
-# Copy bitstream to a well-known location at the project root
-set bit_src "$build_dir/vivado_project/ostomachion_arty_a7.runs/impl_1/arty_a7_top.bit"
-set bit_dst "$build_dir/ostomachion_arty_a7.bit"
-file copy -force $bit_src $bit_dst
+puts "INFO: ── Physical optimisation (post-place) ─────────────────────────────"
+phys_opt_design -verbose
 
-puts "INFO: Bitstream written to $bit_dst"
+puts "INFO: ── Routing ────────────────────────────────────────────────────────"
+route_design -verbose
+
+puts "INFO: ── Save implementation checkpoint ────────────────────────────────"
+write_checkpoint -force "$build_dir/impl_final.dcp"
+puts "INFO: Checkpoint saved to $build_dir/impl_final.dcp"
 
 # ---------------------------------------------------------------------------
-# Post-build quality gates
-#
-# These run inside the completed implementation to verify the build meets
-# production quality requirements.  Any failure exits non-zero so that
-# make fpga-synth returns an error to the calling shell / CI system.
+# Reports
+# ---------------------------------------------------------------------------
+report_timing_summary \
+    -max_paths 10 \
+    -report_unconstrained \
+    -file "$build_dir/timing_summary.rpt" \
+    -warn_on_violation
+
+report_utilization \
+    -file "$build_dir/utilization.rpt"
+
+report_drc \
+    -file "$build_dir/drc.rpt"
+
+# ---------------------------------------------------------------------------
+# Bitstream
+# ---------------------------------------------------------------------------
+puts "INFO: ── Bitstream ──────────────────────────────────────────────────────"
+write_bitstream \
+    -force \
+    -verbose \
+    "$build_dir/ostomachion_arty_a7.bit"
+
+puts "INFO: Bitstream written to $build_dir/ostomachion_arty_a7.bit"
+
+# ---------------------------------------------------------------------------
+# Post-build quality gates (timing closure check)
 # ---------------------------------------------------------------------------
 puts "INFO: Running post-build quality checks..."
 
-open_run impl_1
-
-# --- 1. Timing closure -------------------------------------------------------
-# get_timing_paths works on an open_run (STATS.* properties do not).
 set setup_path [get_timing_paths -max_paths 1 -nworst 1 -setup -quiet]
 set hold_path  [get_timing_paths -max_paths 1 -nworst 1 -hold  -quiet]
 set wns ""
@@ -182,7 +230,7 @@ if {$whs eq "" || [expr {$whs < 0}]} {
     set timing_ok 0
 }
 
-# --- 2. Resource headroom ----------------------------------------------------
+# --- Resource headroom -------------------------------------------------------
 proc parse_util_pct {rpt keyword} {
     foreach line [split $rpt "\n"] {
         if {[string match "*${keyword}*" $line]} {
@@ -194,23 +242,20 @@ proc parse_util_pct {rpt keyword} {
     return "?"
 }
 
-set util_rpt  [report_utilization -return_string -quiet]
-set pct_luts  [parse_util_pct $util_rpt "Slice LUTs"]
-set pct_brams [parse_util_pct $util_rpt "Block RAM Tile"]
+set util_str  [report_utilization -return_string -quiet]
+set pct_luts  [parse_util_pct $util_str "Slice LUTs"]
+set pct_brams [parse_util_pct $util_str "Block RAM Tile"]
 
 puts "INFO: Utilisation — LUTs ${pct_luts}%  BRAMs ${pct_brams}%"
 
 foreach {res pct limit} [list "LUT" $pct_luts 80  "BRAM" $pct_brams 85] {
-    if {$pct ne "?" && $pct > $limit} {
-        puts "WARNING: $res utilisation ${pct}% exceeds ${limit}% threshold — routing congestion risk"
+    if {$pct ne "?" && [expr {$pct > $limit}]} {
+        puts "WARNING: $res utilisation ${pct}% exceeds ${limit}% — routing congestion risk"
     }
 }
 
-# --- 3. Summary --------------------------------------------------------------
-set pass 1
-if {!$timing_ok} { set pass 0 }
-
-if {$pass} {
+# --- Summary -----------------------------------------------------------------
+if {$timing_ok} {
     puts "INFO: ============================================"
     puts "INFO:  BUILD QUALITY GATES PASSED"
     puts "INFO:  WNS=+${wns}ns  WHS=+${whs}ns  LUTs=${pct_luts}%  BRAMs=${pct_brams}%"
@@ -218,8 +263,8 @@ if {$pass} {
     puts "INFO: Build complete."
 } else {
     puts "ERROR: ============================================"
-    puts "ERROR:  BUILD QUALITY GATES FAILED"
-    if {!$timing_ok} { puts "ERROR:  - Timing not met: WNS=$wns ns  WHS=$whs ns" }
+    puts "ERROR:  BUILD QUALITY GATES FAILED — timing not met"
+    puts "ERROR:  WNS=${wns}ns  WHS=${whs}ns"
     puts "ERROR: ============================================"
     exit 1
 }

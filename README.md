@@ -25,33 +25,44 @@ disturbing what already works.
 ```
   ┌──────────────────────────────────────────────────────────────────┐
   │  Application / ztest Suites                                      │
-  │  (tests/test_spi.cpp, tests/test_i2c.cpp)                        │
+  │  (tests/test_spi.cpp, tests/test_i2c.cpp,                        │
+  │   tests/test_gpio.cpp, tests/test_fft_accel.cpp)                 │
   └────────────────────────┬─────────────────────────────────────────┘
                            │  ostomachion::hal::SpiDevice
                            │  ostomachion::hal::I2cBus
                            │  ostomachion::hal::GpioOutput
+                           │  ostomachion::FftAccel
   ┌────────────────────────▼─────────────────────────────────────────┐
   │  C++20 HAL  (zephyr_app/include/ostomachion/hal/)                │
   │  Zero-overhead wrappers — std::span, [[nodiscard]], noexcept     │
   └────────────────────────┬─────────────────────────────────────────┘
-                           │  spi_transceive(), i2c_write_read(), …
+                           │  spi_transceive(), i2c_write_read(),
+                           │  fft_accel_transform(), …
   ┌────────────────────────▼─────────────────────────────────────────┐
   │  Zephyr BSP Layer                                                │
-  │  • Out-of-tree drivers  (drivers/spi/, drivers/i2c/)             │
-  │  • Device Tree overlay  (app.overlay)                            │
+  │  • Out-of-tree drivers  (drivers/spi/, drivers/i2c/,            │
+  │                          drivers/accel/)                          │
+  │  • Device Tree overlays (app.overlay, app_accel.overlay)         │
   │  • DTS bindings         (dts/bindings/)                          │
-  │  • Kconfig              (prj.conf)                               │
+  │  • Kconfig              (prj.conf, prj_accel.conf)               │
   └────────────────────────┬─────────────────────────────────────────┘
                            │  MMIO reads/writes via sys_read32/write32
   ┌────────────────────────▼─────────────────────────────────────────┐
-  │  FPGA RTL  (NEORV32 v1.11.6)                                     │
+  │  FPGA RTL  (NEORV32 v1.11.6  +  XBUS→AXI4-Lite bridge)          │
   │  RISC-V RV32IMAC soft-core, SPI master, TWI master, GPIO, UART  │
-  │  Simulation: rtl/neorv32_wrapper.vhd                             │
-  │  Arty A7:    fpga/arty_a7/arty_a7_top.vhd  (BUFG, IOBUF, OCD)  │
+  │  Arty A7: fpga/arty_a7/arty_a7_top.vhd  (BUFG, IOBUF, OCD)     │
+  └────────────────────────┬─────────────────────────────────────────┘
+                           │  AXI4-Lite  (rtl/xbus_axi4lite_bridge.vhd)
+  ┌────────────────────────▼─────────────────────────────────────────┐
+  │  Xilinx IP Subsystem  (fpga/arty_a7/ostomachion_bd.tcl)          │
+  │  • AXI SmartConnect + AXI DMA                                    │
+  │  • TX BRAM (0x41000000) ── xfft IP (64-pt, 16-bit) ── RX BRAM   │
+  │  • TX BRAM (0x41004000)                                          │
+  │  • MMCM clocking, proc_sys_reset                                 │
   └────────────────────────┬─────────────────────────────────────────┘
                            │  (physical I/O pins / GHDL stimulus)
   ┌────────────────────────▼─────────────────────────────────────────┐
-  │  Hardware (Arty A7) / GHDL Simulation  (sim/neorv32_tb.vhd)      │
+  │  Hardware (Arty A7-100T) / GHDL Simulation  (sim/neorv32_tb.vhd) │
   │  SPI loopback, I2C slave model, UART monitor, watchdog           │
   └──────────────────────────────────────────────────────────────────┘
 ```
@@ -63,13 +74,18 @@ disturbing what already works.
 ```
 .
 ├── Makefile                          # Top-level build orchestration
+├── scripts/
+│   └── bin2vhd.py                   # ELF binary → VHDL IMEM image
 ├── rtl/
-│   └── neorv32_wrapper.vhd           # Simulation wrapper around neorv32_top
+│   ├── neorv32_wrapper.vhd           # Simulation wrapper around neorv32_top
+│   └── xbus_axi4lite_bridge.vhd      # XBUS (Wishbone) → AXI4-Lite master bridge
 ├── fpga/
 │   └── arty_a7/
-│       ├── arty_a7_top.vhd           # Arty A7 board top (BUFG, IOBUF, OCD)
-│       ├── arty_a7.xdc               # Vivado pin constraints
+│       ├── arty_a7_top.vhd           # Arty A7-100T board top (NEORV32 + bridge + BD)
+│       ├── arty_a7.xdc               # Vivado pin + timing constraints
 │       ├── build.tcl                 # Non-interactive Vivado batch script
+│       ├── ostomachion_bd.tcl        # IP Integrator block design (AXI DMA, xfft, BRAMs)
+│       ├── check_build.tcl           # Post-build quality gates (timing, DRC)
 │       └── openocd.cfg               # JTAG bitstream programming (OpenOCD)
 ├── sim/
 │   ├── neorv32_tb.vhd                # GHDL testbench (clock, reset, bus monitors)
@@ -80,52 +96,68 @@ disturbing what already works.
 │   ├── CMakeLists.txt                # Zephyr app build (project: ostomachion)
 │   ├── prj.conf                      # Kconfig — simulation target (polling drivers)
 │   ├── prj_fpga.conf                 # Kconfig overlay — FPGA target (IRQ drivers)
+│   ├── prj_accel.conf                # Kconfig overlay — FFT accelerator (CONFIG_FFT_ACCEL=y)
+│   ├── prj_shell.conf                # Kconfig overlay — interactive shell image
 │   ├── app.overlay                   # Device Tree — spi0, i2c0 nodes (simulation)
 │   ├── app_fpga.overlay              # Device Tree overlay — 115200 baud (FPGA)
+│   ├── app_accel.overlay             # Device Tree overlay — fft_accel node (FPGA)
 │   ├── zephyr/module.yml             # Out-of-tree module descriptor
 │   ├── include/
+│   │   ├── zephyr/drivers/misc/
+│   │   │   └── fft_accel.h           # Public C API: fft_accel_transform()
 │   │   └── ostomachion/hal/
 │   │       ├── gpio.hpp              # GpioOutput
 │   │       ├── spi.hpp               # SpiDevice (std::span API)
-│   │       └── i2c.hpp               # I2cBus   (std::span API)
+│   │       ├── i2c.hpp               # I2cBus   (std::span API)
+│   │       └── fft_accel.hpp         # FftAccel (C++20 RAII wrapper)
 │   ├── src/
-│   │   └── main.cpp                  # LED heartbeat thread (K_THREAD_DEFINE)
+│   │   ├── main.cpp                  # LED heartbeat thread (K_THREAD_DEFINE)
+│   │   ├── fft_shell.c               # "fft" shell commands (CONFIG_FFT_ACCEL guard)
+│   │   └── test_runner.c             # "test run" shell command (peripheral test suites)
 │   ├── tests/
-│   │   ├── test_spi.cpp              # ZTEST_SUITE ostomachion_spi (4 tests)
-│   │   └── test_i2c.cpp              # ZTEST_SUITE ostomachion_i2c (3 tests)
+│   │   ├── test_spi.cpp              # ZTEST_SUITE ostomachion_spi
+│   │   ├── test_i2c.cpp              # ZTEST_SUITE ostomachion_i2c
+│   │   ├── test_gpio.cpp             # ZTEST_SUITE ostomachion_gpio
+│   │   └── test_fft_accel.cpp        # ZTEST_SUITE ostomachion_fft (CONFIG_FFT_ACCEL)
+│   ├── dts/bindings/
+│   │   ├── vendor-prefixes.txt       # "ostomachion" vendor prefix
+│   │   ├── misc/ostomachion,fft-accel.yaml  # AXI DMA + xfft binding
+│   │   ├── spi/neorv32,spi.yaml
+│   │   └── i2c/neorv32,twi.yaml
 │   └── drivers/
 │       ├── neorv32_regs.h            # Shared poll budget + soc.h re-export
 │       ├── spi/spi_neorv32.c         # SPI driver (polling + IRQ paths, Kconfig-gated)
 │       ├── spi/Kconfig               # CONFIG_SPI_NEORV32 / CONFIG_SPI_NEORV32_INTERRUPT
 │       ├── i2c/i2c_neorv32.c         # I2C driver (polling + IRQ paths, Kconfig-gated)
 │       ├── i2c/Kconfig               # CONFIG_I2C_NEORV32 / CONFIG_I2C_NEORV32_INTERRUPT
+│       ├── accel/fft_accel.c         # FFT accelerator driver (CONFIG_FFT_ACCEL)
+│       ├── accel/Kconfig             # CONFIG_FFT_ACCEL
 │       ├── Kconfig
 │       └── CMakeLists.txt
-├── dts/bindings/
-│   ├── spi/neorv32,spi.yaml
-│   └── i2c/neorv32,twi.yaml
-└── bin2vhd.py                        # ELF binary → VHDL IMEM image
 ```
 
 ---
 
 ## Peripheral map
 
-| NEORV32 Generic    | Simulation | Arty A7 FPGA | MMIO Base    | FIRQ | Zephyr compatible  | DT node |
-|--------------------|------------|--------------|--------------|------|--------------------|---------|
-| `IO_GPIO_NUM`      | 8          | 4            | `0xFFFFFFC0` | —    | `neorv32,gpio`     | (board) |
-| `IO_UART0_EN`      | true       | true         | `0xFFFFFFE0` | 2    | `neorv32,uart`     | (board) |
-| `IO_SPI_EN`        | true       | true         | `0xFFF80000` | 6    | `neorv32,spi`      | `spi0`  |
-| `IO_TWI_EN`        | true       | true         | `0xFFF90000` | 7    | `neorv32,twi`      | `i2c0`  |
-| `IO_CLINT_EN`      | true       | true         | `0xF0000000` | —    | `neorv32,clint`    | (board) |
-| `IO_SPI_FIFO`      | 4          | 32           | —            | —    | FIFO depth         | —       |
-| `IO_TWI_FIFO`      | 4          | 32           | —            | —    | FIFO depth         | —       |
-| `IO_UART0_TX_FIFO` | 1          | 32           | —            | —    | TX FIFO depth      | —       |
-| `BOOT_MODE_SELECT` | 2 (IMEM)   | 0 (bootloader)| —           | —    | Boot mode          | —       |
-| `OCD_EN`           | false      | true         | —            | —    | On-chip debugger   | —       |
-| `IO_WDT_EN`        | false      | true         | —            | —    | Watchdog           | —       |
-| `IMEM_SIZE`        | 64 KB      | 64 KB        | —            | —    | Instruction memory | —       |
-| `DMEM_SIZE`        | 64 KB      | 64 KB        | —            | —    | Data memory        | —       |
+| NEORV32 Generic    | Simulation | Arty A7-100T | MMIO Base    | IRQ/FIRQ | Zephyr compatible        | DT node      |
+|--------------------|------------|--------------|--------------|----------|--------------------------|--------------|
+| `IO_GPIO_NUM`      | 8          | 8            | `0xFFFFFFC0` | —        | `neorv32,gpio`           | (board)      |
+| `IO_UART0_EN`      | true       | true         | `0xFFFFFFE0` | FIRQ 2   | `neorv32,uart`           | (board)      |
+| `IO_SPI_EN`        | true       | true         | `0xFFF80000` | FIRQ 6   | `neorv32,spi`            | `spi0`       |
+| `IO_TWI_EN`        | true       | true         | `0xFFF90000` | FIRQ 7   | `neorv32,twi`            | `i2c0`       |
+| `IO_CLINT_EN`      | true       | true         | `0xF0000000` | —        | `neorv32,clint`          | (board)      |
+| `IO_SPI_FIFO`      | 4          | 32           | —            | —        | FIFO depth               | —            |
+| `IO_TWI_FIFO`      | 4          | 32           | —            | —        | FIFO depth               | —            |
+| `IO_UART0_TX_FIFO` | 1          | 32           | —            | —        | TX FIFO depth            | —            |
+| `BOOT_MODE_SELECT` | 2 (IMEM)   | 0 (bootloader)| —           | —        | Boot mode                | —            |
+| `OCD_EN`           | false      | true         | —            | —        | On-chip debugger         | —            |
+| `IO_WDT_EN`        | false      | true         | —            | —        | Watchdog                 | —            |
+| `IMEM_SIZE`        | 64 KB      | 128 KB       | —            | —        | Instruction memory       | —            |
+| `DMEM_SIZE`        | 64 KB      | 64 KB        | —            | —        | Data memory              | —            |
+| AXI DMA ctrl       | —          | FPGA only    | `0x40000000` | MEI/IRQ 11 | `ostomachion,fft-accel`| `fft_accel`  |
+| TX BRAM            | —          | FPGA only    | `0x41000000` | —        | (part of fft_accel)      | `fft_accel`  |
+| RX BRAM            | —          | FPGA only    | `0x41004000` | —        | (part of fft_accel)      | `fft_accel`  |
 
 ---
 
@@ -176,6 +208,31 @@ int err = i2c.write_then_read(0x50U, tx, rx); // [[nodiscard]]
 ```
 
 Provides `write()`, `read()`, and `write_then_read()` (REPEATED START).
+
+### `FftAccel`  (`include/ostomachion/hal/fft_accel.hpp`)
+
+```cpp
+#include <ostomachion/hal/fft_accel.hpp>
+
+const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(fft_accel));
+ostomachion::FftAccel accel{dev};
+
+if (!accel.ready()) { /* handle missing bitstream */ }
+
+fft_sample_t in[64]{};
+fft_sample_t out[64]{};
+
+// Fill in[] with Q1.15 complex samples (re = int16_t, im = int16_t)
+in[0].re = 16384; // 0.5 in Q1.15
+
+int err = accel.transform(in, out, 64); // [[nodiscard]]
+// out[] now contains the 64-point forward FFT result
+// Frequency bin k occupies out[k].re + j·out[k].im (Q1.15, scaled)
+```
+
+`FftAccel` is non-copyable and non-movable by design; the underlying
+driver serialises concurrent callers via a mutex, but sharing an instance
+across threads without external synchronisation is not recommended.
 
 ---
 
@@ -313,16 +370,24 @@ Adding a new NEORV32 peripheral (e.g. TRNG, PWM) follows a five-step recipe:
 
 ## Makefile targets
 
-| Target              | Description                                         |
-|---------------------|-----------------------------------------------------|
-| `make all`          | Analyze + simulate with default IMEM image          |
-| `make test-default` | Clean + simulate with the built-in NEORV32 demo     |
-| `make test-baremetal` | Build bare-metal firmware + simulate              |
-| `make test-zephyr`  | Build Zephyr app + simulate (needs venv active)     |
-| `make zephyr`       | Build Zephyr app only (no simulation)               |
-| `make sw`           | Build bare-metal firmware only                      |
-| `make clean-ghdl`   | Remove GHDL artifacts (keeps firmware)              |
-| `make clean`        | Full clean (GHDL + firmware + Zephyr build)         |
+| Target                | Description                                                       |
+|-----------------------|-------------------------------------------------------------------|
+| `make all`            | Analyze + simulate with default IMEM image                        |
+| `make test-default`   | Clean + simulate with the built-in NEORV32 demo                   |
+| `make test-baremetal` | Build bare-metal firmware + simulate                              |
+| `make test-zephyr`    | Build Zephyr app + simulate (needs venv active)                   |
+| `make zephyr`         | Build Zephyr app only (simulation target)                         |
+| `make zephyr-fpga`    | Build Zephyr firmware for the FPGA target (115200 baud, IRQ drivers) |
+| `make sw`             | Build bare-metal firmware only                                    |
+| `make clean-ghdl`     | Remove GHDL artifacts (keeps firmware)                            |
+| `make clean`          | Full clean (GHDL + firmware + all Zephyr build dirs)              |
+| `make fpga-synth`     | Run Vivado: synthesise + implement + generate bitstream           |
+| `make fpga-program`   | Load bitstream onto Arty A7 via JTAG (OpenOCD)                   |
+| `make fpga-fw`        | Build + upload FPGA Zephyr firmware via UART bootloader           |
+| `make fpga-check`     | Run post-build timing/DRC quality gates (`check_build.tcl`)       |
+| `make test-hw`        | Build + upload hardware test firmware (SPI/I2C/GPIO ztest)        |
+| `make test-accel-hw`  | Build + upload FFT accelerator ztest firmware                     |
+| `make shell-hw`       | Build + upload interactive shell firmware (`fft`, `test` commands) |
 
 Override `SIM_TIME` to control simulation duration:
 
@@ -393,13 +458,15 @@ immediately compatible with the standard Zephyr CI infrastructure.
 | Item | Status |
 |------|--------|
 | Interrupt-driven SPI/I2C drivers | **Done** — `CONFIG_SPI_NEORV32_INTERRUPT` / `CONFIG_I2C_NEORV32_INTERRUPT`; enabled by `prj_fpga.conf` |
-| Physical FPGA target (Arty A7) | **Done** — `fpga/arty_a7/` with VHDL top, XDC, Vivado TCL, OpenOCD config |
+| Physical FPGA target (Arty A7-100T) | **Done** — `fpga/arty_a7/` with VHDL top, XDC, Vivado TCL, OpenOCD config |
 | UART bootloader firmware upload | **Done** — `make fpga-fw` via `neorv32_upload.py` |
 | JTAG on-chip debug | **Done** — `OCD_EN=true` in FPGA top, `openocd.cfg` + NEORV32 OCD config |
+| Xilinx xfft FFT accelerator | **Done** — `ostomachion_bd.tcl` + `drivers/accel/fft_accel.c` + `hal/fft_accel.hpp` |
+| FFT driver thread safety | **Known limitation** — callers serialised by mutex; concurrent multi-thread use discouraged |
+| FFT GHDL simulation | **Not supported** — Xilinx encrypted IP is not simulatable in GHDL |
 | `GpioInput` HAL class | Roadmap — trivial to add alongside `GpioOutput` |
 | `twister` integration | Roadmap — add `testcase.yaml` and board YAML for Zephyr CI |
 | SPI flash boot (`BOOT_MODE_SELECT=1`) | Roadmap — requires SPI flash programming flow |
-| DMA support | Not planned — NEORV32 v1.11.6 has no DMA engine |
 | 10-bit I2C addressing | Not supported — NEORV32 TWI is 7-bit only |
 | Second FPGA board target | Roadmap — parameterised `fpga/` layout supports additional boards |
 
@@ -475,14 +542,20 @@ cat neorv32_tb.UART0_rx.out
 
 ## Deploying to Arty A7
 
-The FPGA build targets the Digilent Arty A7-35T (XC7A35T, CSG324 package).
+The FPGA build targets the Digilent **Arty A7-100T** (XC7A100T, CSG324 package).
 All required files live in `fpga/arty_a7/`.
+
+> **Board variant note:** The Arty A7-100T and A7-35T share the same PCB and
+> pin-compatible CSG324 package.  The 100T is required because the design
+> uses ~58 RAMB36 (xfft IP, AXI DMA, TX/RX BRAMs, NEORV32 IMEM/DMEM) and
+> the 35T provides only 50 RAMB36.  Build-time utilisation: **LUTs 14.9%,
+> BRAMs 43%** (WNS +0.83 ns at 100 MHz).
 
 ### Prerequisites
 
 | Tool | Minimum version | Notes |
 |------|----------------|-------|
-| Vivado | 2020.1 | Any edition; add to `PATH` or set `VIVADO=` |
+| Vivado | 2024.1 | Any edition; add to `PATH` or set `VIVADO=` |
 | OpenOCD | 0.12.0 | Must include `cpld/xilinx-xc7.cfg` |
 | West / Zephyr SDK | current | Same environment as simulation build |
 | Python 3 | 3.8+ | For `neorv32_upload.py` (UART bootloader) |
@@ -672,5 +745,48 @@ TESTSUITE ostomachion_i2c succeeded
 Running TESTSUITE ostomachion_gpio
 ...
 TESTSUITE ostomachion_gpio succeeded
+```
+
+### FFT accelerator test
+
+The FFT accelerator requires the full block-design bitstream (`make fpga-synth` +
+`make fpga-program`).  Build and upload the FFT ztest image:
+
+```bash
+make test-accel-hw UART_DEVICE=/dev/ttyUSB1
+```
+
+Expected output:
+
+```
+Running TESTSUITE ostomachion_fft
+===================================================================
+START - test_dc_response
+ PASS - test_dc_response in 1 ms
+START - test_single_tone
+ PASS - test_single_tone in 1 ms
+START - test_roundtrip_latency
+[test_fft_accel] FFT latency: N cycles (87 us)
+ PASS - test_roundtrip_latency in 1 ms
+START - test_invalid_n
+ PASS - test_invalid_n in 0 ms
+START - test_sequential
+ PASS - test_sequential in 2 ms
+TESTSUITE ostomachion_fft succeeded
+
+PROJECT EXECUTION SUCCESSFUL
+```
+
+For interactive FFT exploration, use the shell image:
+
+```bash
+make shell-hw UART_DEVICE=/dev/ttyUSB1
+# connect at 115200 baud, then:
+uart:~$ fft dc
+[FFT] Input: DC (all 0.5 + 0j, 64 points)
+[FFT] Done in 87 us.  Bin 0: 16320  max_other: 12  PASS
+uart:~$ fft sine 8
+[FFT] Input: sine wave at bin 8
+[FFT] Done in 89 us.  Peak bin: 8  magnitude: 15960  PASS
 ```
 

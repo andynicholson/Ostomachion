@@ -16,3 +16,14 @@ target_sources(app PRIVATE
     tests/test_i2c.cpp
     tests/test_gpio.cpp
 )
+
+if(CONFIG_FFT_ACCEL)
+  target_sources(app PRIVATE tests/test_fft_accel.cpp)
+endif()
+
+if(CONFIG_SHELL)
+  target_sources(app PRIVATE src/test_runner.c)
+  if(CONFIG_FFT_ACCEL)
+    target_sources(app PRIVATE src/fft_shell.c)
+  endif()
+endif()

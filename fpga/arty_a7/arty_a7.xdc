@@ -1,5 +1,5 @@
 ## Ostomachion — Arty A7 pin constraints
-## Target: xc7a35tcsg324-1 (Digilent Arty A7-35T)
+## Target: xc7a100tcsg324-1 (Digilent Arty A7-100T)
 ## All I/O: LVCMOS33 unless noted
 
 ## ==========================================================================
@@ -59,6 +59,22 @@ set_property -dict {PACKAGE_PIN K17 IOSTANDARD LVCMOS33} [get_ports jtag_tck_i]
 set_property -dict {PACKAGE_PIN M18 IOSTANDARD LVCMOS33} [get_ports jtag_tdi_i]
 set_property -dict {PACKAGE_PIN N17 IOSTANDARD LVCMOS33} [get_ports jtag_tdo_o]
 set_property -dict {PACKAGE_PIN P18 IOSTANDARD LVCMOS33} [get_ports jtag_tms_i]
+
+## ==========================================================================
+## JTAG clock (user JTAG via Pmod, not the dedicated FPGA JTAG pads)
+## 10 MHz is a safe upper bound for most JTAG probes over Pmod.
+## CLOCK_DEDICATED_ROUTE FALSE suppresses DRC REQP-49 for user-I/O clocks.
+## ==========================================================================
+create_clock -period 100.000 -name jtag_tck [get_ports jtag_tck_i]
+set_property CLOCK_DEDICATED_ROUTE FALSE [get_nets jtag_tck_i_IBUF]
+
+## ==========================================================================
+## Timing exceptions for asynchronous I/O
+## SPI MISO, TWI, and JTAG control signals are asynchronous to the 100 MHz
+## system clock.  Without these constraints Vivado reports unconstrained paths.
+## ==========================================================================
+set_false_path -from [get_ports {spi_dat_i twi_sda twi_scl jtag_tdi_i jtag_tms_i}]
+set_false_path -to   [get_ports {spi_clk_o spi_dat_o spi_csn_o twi_sda twi_scl jtag_tdo_o uart_txd_out}]
 
 ## ==========================================================================
 ## Bitstream / configuration

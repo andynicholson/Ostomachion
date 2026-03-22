@@ -1,0 +1,46 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: Apache-2.0
+#
+# DTS binding for the Ostomachion FFT accelerator pipeline.
+# The FFT core is the Xilinx xfft IP; it has no AXI4-Lite slave interface.
+# All data movement is handled by the AXI DMA.
+#
+# Example DTS node:
+#
+#   fft_accel: fft-accel@40000000 {
+#       compatible = "ostomachion,fft-accel";
+#       reg = <0x40000000 0x40>,     /* AXI DMA control registers  (64 B)  */
+#             <0x41000000 0x4000>,   /* TX BRAM                   (16 KB)  */
+#             <0x41004000 0x4000>;   /* RX BRAM                   (16 KB)  */
+#       reg-names = "dma", "tx_bram", "rx_bram";
+#       bram-size = <16384>;
+#       interrupts = <11>;          /* RISC-V MEI line (IRQ 11) */
+#       status = "okay";
+#   };
+
+description: Ostomachion AXI DMA + Xilinx xfft hardware accelerator pipeline
+
+compatible: "ostomachion,fft-accel"
+
+include: base.yaml
+
+properties:
+  reg:
+    required: true
+
+  reg-names:
+    required: true
+    description: |
+      Must be "dma", "tx_bram", "rx_bram" in that order.
+
+  bram-size:
+    type: int
+    required: true
+    description: Size of each BRAM buffer in bytes (TX and RX are equal).
+
+  interrupts:
+    required: true
+    description: |
+      Machine External Interrupt (MEI), IRQ 11 on the riscv,cpu-intc (&intc).
+      The DMA mm2s_introut and s2mm_introut are aggregated via xlconcat into
+      a single mext_irq_i line driving NEORV32's MEI input.

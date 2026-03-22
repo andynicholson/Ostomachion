@@ -27,10 +27,13 @@ UART_DEVICE ?= /dev/ttyUSB1
 FPGA_DIR             = fpga/arty_a7
 ZEPHYR_BUILD_FPGA    = build_zephyr_fpga
 ZEPHYR_BUILD_HW_TEST = build_zephyr_hw_test
+ZEPHYR_BUILD_ACCEL   = build_zephyr_accel_test
+ZEPHYR_BUILD_SHELL   = build_zephyr_shell
 BIT_FILE             = build/arty_a7/ostomachion_arty_a7.bit
 
 .PHONY: all analyze simulate clean sw test-baremetal test-default test-zephyr zephyr \
-        zephyr-fpga fpga-synth fpga-program fpga-fw fpga-check test-hw
+        zephyr-fpga fpga-synth fpga-program fpga-fw fpga-check test-hw \
+        test-accel-hw shell-hw
 
 # ---------- default flow (uses the image baked into neorv32/rtl/core) ------
 all: analyze simulate
@@ -83,7 +86,7 @@ zephyr:
 	cp $(ZEPHYR_BUILD_DIR)/zephyr/zephyr.vhd zephyr_imem_image.vhd
 
 test-zephyr: zephyr clean-ghdl
-	$(MAKE) IMEM_IMAGE=zephyr_imem_image.vhd SIM_TIME=400ms all
+	$(MAKE) IMEM_IMAGE=zephyr_imem_image.vhd SIM_TIME=$(SIM_TIME) all
 
 clean-ghdl:
 	@echo "=== Cleaning GHDL artifacts ==="
@@ -95,7 +98,8 @@ clean: clean-ghdl
 	@echo "=== Cleaning SW build ==="
 	$(MAKE) -C $(SW_DIR) RISCV_PREFIX=$(RISCV_PREFIX) clean 2>/dev/null || true
 	rm -f test_imem_image.vhd zephyr_imem_image.vhd
-	rm -rf $(ZEPHYR_BUILD_DIR) $(ZEPHYR_BUILD_FPGA) $(ZEPHYR_BUILD_HW_TEST)
+	rm -rf $(ZEPHYR_BUILD_DIR) $(ZEPHYR_BUILD_FPGA) $(ZEPHYR_BUILD_HW_TEST) \
+	       $(ZEPHYR_BUILD_ACCEL) $(ZEPHYR_BUILD_SHELL)
 
 # ---------- FPGA targets (Arty A7) -------------------------------------------
 
@@ -168,3 +172,40 @@ test-hw:
 		--port $(UART_DEVICE) \
 		$(ZEPHYR_BUILD_HW_TEST)/zephyr/zephyr.bin
 	@echo "=== Firmware uploaded — connect a terminal at 115200 baud to see results ==="
+
+## Build automated ZTEST image with FFT accelerator support and upload.
+## Runs all ZTEST suites (spi, i2c, gpio, fft) at boot.
+## Prerequisites: accelerator bitstream must be programmed via fpga-program.
+## UART output at 115200 baud shows pass/fail for each test.
+test-accel-hw:
+	@echo "=== Building Zephyr ZTEST accelerator firmware ==="
+	west build -b $(ZEPHYR_BOARD) $(ZEPHYR_APP_DIR) \
+		-d $(ZEPHYR_BUILD_ACCEL) --pristine=auto \
+		-- -DCMAKE_PROGRAM_PATH=$(IMAGE_GEN_DIR) \
+		   -DDTC_OVERLAY_FILE="$(CURDIR)/$(ZEPHYR_APP_DIR)/app.overlay;$(CURDIR)/$(ZEPHYR_APP_DIR)/app_fpga.overlay;$(CURDIR)/$(ZEPHYR_APP_DIR)/app_accel.overlay" \
+		   -DOVERLAY_CONFIG="$(CURDIR)/$(ZEPHYR_APP_DIR)/prj.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_fpga.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_accel.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_hw_test.conf"
+	@echo "=== Uploading ZTEST accelerator firmware via UART bootloader ==="
+	python3 $(NEORV32_HOME)/sw/bootloader/neorv32_upload.py \
+		--port $(UART_DEVICE) \
+		$(ZEPHYR_BUILD_ACCEL)/zephyr/zephyr.bin
+	@echo "=== Firmware uploaded — connect a terminal at 115200 baud ==="
+
+## Build interactive shell firmware with FFT commands and upload.
+## Boots to Zephyr shell prompt.  No ZTEST — use 'test run' and 'fft' commands.
+## Prerequisites: accelerator bitstream must be programmed via fpga-program.
+shell-hw:
+	@echo "=== Building Zephyr interactive shell firmware ==="
+	west build -b $(ZEPHYR_BOARD) $(ZEPHYR_APP_DIR) \
+		-d $(ZEPHYR_BUILD_SHELL) --pristine=auto \
+		-- -DCMAKE_PROGRAM_PATH=$(IMAGE_GEN_DIR) \
+		   -DDTC_OVERLAY_FILE="$(CURDIR)/$(ZEPHYR_APP_DIR)/app.overlay;$(CURDIR)/$(ZEPHYR_APP_DIR)/app_fpga.overlay;$(CURDIR)/$(ZEPHYR_APP_DIR)/app_accel.overlay" \
+		   -DOVERLAY_CONFIG="$(CURDIR)/$(ZEPHYR_APP_DIR)/prj.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_fpga.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_shell.conf"
+	@echo "=== Uploading shell firmware via UART bootloader ==="
+	python3 $(NEORV32_HOME)/sw/bootloader/neorv32_upload.py \
+		--port $(UART_DEVICE) \
+		$(ZEPHYR_BUILD_SHELL)/zephyr/zephyr.bin
+	@echo "=== Connect at 115200 baud — type 'help' for available commands ==="
+
+## NOTE: FFT simulation target removed.
+## The FFT core is now the Xilinx xfft IP (PG109), instantiated in the
+## block design.  GHDL simulation of Xilinx encrypted IP is not supported.

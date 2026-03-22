@@ -1,65 +1,46 @@
--- Ostomachion — Arty A7 board-level top
+-- Ostomachion — Arty A7-100T board-level top
 -- Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
 --
--- Instantiates neorv32_top directly with FPGA-appropriate generics.
--- The simulation wrapper (rtl/neorv32_wrapper.vhd) is NOT used here;
--- both files share the same NEORV32 RTL core but carry different generics
--- and physical I/O primitives.
+-- Architecture:
+--   arty_a7_top (this file)
+--   ├── ostomachion_bd_wrapper  (Vivado-generated; only Xilinx IP inside)
+--   ├── neorv32_top             (RISC-V SoC, library neorv32, std_ulogic ports)
+--   ├── xbus_axi4lite_bridge    (XBUS→AXI4-Lite, library work, std_logic ports)
+--   └── IOBUF_SDA / IOBUF_SCL  (open-drain I2C pads, Xilinx primitive)
 --
--- Physical pinout (all Arty A7-35T):
---   sys_clk      E3   – 100 MHz LVCMOS33 oscillator
---   ck_rst       C2   – active-low pushbutton (BTN RESET)
---   uart_txd_out D10  – USB-UART TX (FTDI FT2232HQ)
---   uart_rxd_in  A9   – USB-UART RX
---   led[0]       H5   – LD0 (green)
---   led[1]       J5   – LD1 (green)
---   led[2]       T9   – LD2 (green, shared with RGB)
---   led[3]       T10  – LD3 (green, shared with RGB)
---   spi_clk_o    G13  – Pmod JA pin 1 (SCK)
---   spi_dat_o    B11  – Pmod JA pin 2 (MOSI)
---   spi_dat_i    A11  – Pmod JA pin 3 (MISO)
---   spi_csn_o    D12  – Pmod JA pin 4 (CS0)
---   twi_sda      E15  – Pmod JB pin 1 (SDA, open-drain via IOBUF)
---   twi_scl      E16  – Pmod JB pin 2 (SCL, open-drain via IOBUF)
---   jtag_tck_i   K17  – Pmod JC pin 1
---   jtag_tdi_i   M18  – Pmod JC pin 2
---   jtag_tdo_o   N17  – Pmod JC pin 3
---   jtag_tms_i   P18  – Pmod JC pin 4
+-- Type strategy:
+--   Internal AXI and board signals use std_logic / std_logic_vector.
+--   NEORV32 uses std_ulogic / std_ulogic_vector on all ports.
+--   Intermediate ulogic signals hold NEORV32 outputs; concurrent assignments
+--   convert them to std_logic for the bridge and board I/O.
 
 library ieee;
 use ieee.std_logic_1164.all;
 
-library neorv32;
-use neorv32.neorv32_package.all;
-
--- Xilinx unisim library for BUFG and IOBUF primitives
 library unisim;
 use unisim.vcomponents.all;
 
+library neorv32;
+use neorv32.neorv32_package.all;
+
 entity arty_a7_top is
   port (
-    -- System clock and reset
     sys_clk      : in    std_logic;
-    ck_rst       : in    std_logic;                     -- active-low pushbutton
+    ck_rst       : in    std_logic;
 
-    -- USB-UART (via onboard FTDI FT2232HQ)
     uart_txd_out : out   std_logic;
     uart_rxd_in  : in    std_logic;
 
-    -- GPIO → on-board LEDs LD0..LD3
     led          : out   std_logic_vector(3 downto 0);
 
-    -- SPI master (Pmod JA)
     spi_clk_o    : out   std_logic;
     spi_dat_o    : out   std_logic;
     spi_dat_i    : in    std_logic;
-    spi_csn_o    : out   std_logic;                     -- CS0 only exposed
+    spi_csn_o    : out   std_logic;
 
-    -- I2C / TWI (Pmod JB) – bidirectional open-drain
     twi_sda      : inout std_logic;
     twi_scl      : inout std_logic;
 
-    -- JTAG on-chip debugger (Pmod JC)
     jtag_tck_i   : in    std_logic;
     jtag_tdi_i   : in    std_logic;
     jtag_tdo_o   : out   std_logic;
@@ -69,147 +50,199 @@ end entity arty_a7_top;
 
 architecture rtl of arty_a7_top is
 
-  -- Buffered clock
-  signal clk_buf      : std_ulogic;
+  -- ── BD outputs ───────────────────────────────────────────────────────────
+  -- clk_o is STD_LOGIC (scalar clock from MMCM)
+  -- periph_resetn_o is STD_LOGIC_VECTOR(0 to 0) — proc_sys_reset bus output
+  -- mext_irq_o is STD_LOGIC_VECTOR(1 downto 0) — xlconcat of mm2s + s2mm IRQs
+  signal clk         : std_logic;
+  signal periph_rstn : std_logic_vector(0 downto 0);
+  signal mext_irq    : std_logic_vector(1 downto 0);
 
-  -- Two-stage reset synchroniser: synchronises the async button to the clock
-  -- and generates an active-low synchronous reset.
-  signal rst_meta     : std_ulogic := '0';
-  signal rstn_sync    : std_ulogic := '0';
+  -- ── NEORV32 scalar outputs (std_ulogic → converted to std_logic) ─────────
+  signal uart0_txd_u : std_ulogic;
+  signal spi_clk_u   : std_ulogic;
+  signal spi_mosi_u  : std_ulogic;
+  signal jtag_tdo_u  : std_ulogic;
 
-  -- Watchdog reset output (unused on this board — tie off)
-  signal rstn_wdt     : std_ulogic;
+  -- ── NEORV32 vector outputs (std_ulogic_vector) ────────────────────────────
+  signal gpio_out_u  : std_ulogic_vector(31 downto 0);
+  signal spi_csn_u   : std_ulogic_vector(7 downto 0);
 
-  -- Internal std_ulogic signals for neorv32_top ports
-  signal gpio_out     : std_ulogic_vector(31 downto 0);
-  signal uart_tx      : std_ulogic;
+  -- ── NEORV32 XBUS outputs → std_logic for bridge input ────────────────────
+  signal xbus_adr_u  : std_ulogic_vector(31 downto 0);
+  signal xbus_wdat_u : std_ulogic_vector(31 downto 0);
+  signal xbus_we_u   : std_ulogic;
+  signal xbus_sel_u  : std_ulogic_vector(3 downto 0);
+  signal xbus_stb_u  : std_ulogic;
+  signal xbus_cyc_u  : std_ulogic;
 
-  signal spi_clk_int  : std_ulogic;
-  signal spi_dat_out  : std_ulogic;
-  signal spi_csn_int  : std_ulogic_vector(7 downto 0);
+  -- ── Bridge XBUS outputs → std_ulogic for NEORV32 input ───────────────────
+  signal xbus_rdat_l : std_logic_vector(31 downto 0);
+  signal xbus_ack_l  : std_logic;
+  signal xbus_err_l  : std_logic;
 
-  -- TWI open-drain signals
-  -- neorv32_top drives twi_xxx_o: '0' = assert low, '1' = release (tristate)
-  signal twi_sda_out  : std_ulogic;   -- from core: '0' = drive low
-  signal twi_sda_in   : std_ulogic;   -- to core: current SDA value
-  signal twi_scl_out  : std_ulogic;
-  signal twi_scl_in   : std_ulogic;
+  -- ── TWI split signals (std_ulogic ← NEORV32, std_logic ↔ IOBUF) ─────────
+  signal twi_sda_out_u : std_ulogic;
+  signal twi_scl_out_u : std_ulogic;
+  signal twi_sda_in_l  : std_logic;
+  signal twi_scl_in_l  : std_logic;
 
-  signal jtag_tdo_int : std_ulogic;
+  -- ── AXI4-Lite bus (bridge master ↔ BD slave, all std_logic) ──────────────
+  signal axi_awaddr  : std_logic_vector(31 downto 0);
+  signal axi_awprot  : std_logic_vector(2 downto 0);
+  signal axi_awvalid : std_logic;
+  signal axi_awready : std_logic;
+  signal axi_wdata   : std_logic_vector(31 downto 0);
+  signal axi_wstrb   : std_logic_vector(3 downto 0);
+  signal axi_wvalid  : std_logic;
+  signal axi_wready  : std_logic;
+  signal axi_bresp   : std_logic_vector(1 downto 0);
+  signal axi_bvalid  : std_logic;
+  signal axi_bready  : std_logic;
+  signal axi_araddr  : std_logic_vector(31 downto 0);
+  signal axi_arprot  : std_logic_vector(2 downto 0);
+  signal axi_arvalid : std_logic;
+  signal axi_arready : std_logic;
+  signal axi_rdata   : std_logic_vector(31 downto 0);
+  signal axi_rresp   : std_logic_vector(1 downto 0);
+  signal axi_rvalid  : std_logic;
+  signal axi_rready  : std_logic;
 
 begin
 
-  -- Global clock buffer
-  BUFG_inst : BUFG
-    port map (I => sys_clk, O => clk_buf);
+  -- ── Board outputs from NEORV32 std_ulogic ────────────────────────────────
+  uart_txd_out <= std_logic(uart0_txd_u);
+  spi_clk_o    <= std_logic(spi_clk_u);
+  spi_dat_o    <= std_logic(spi_mosi_u);
+  jtag_tdo_o   <= std_logic(jtag_tdo_u);
+  led          <= std_logic_vector(gpio_out_u(3 downto 0));
+  spi_csn_o    <= std_logic(spi_csn_u(0));
 
-  -- Two-stage synchroniser for asynchronous active-low reset button.
-  -- After de-assertion of the button, rstn_sync goes high after two
-  -- rising clock edges, preventing metastability from propagating.
-  reset_sync : process(clk_buf, ck_rst)
-  begin
-    if ck_rst = '0' then
-      rst_meta  <= '0';
-      rstn_sync <= '0';
-    elsif rising_edge(clk_buf) then
-      rst_meta  <= '1';
-      rstn_sync <= rst_meta;
-    end if;
-  end process;
-
-  -- IOBUF for SDA (open-drain):
-  --   I  = '0'        (always drive the pad to 0 when enabled)
-  --   T  = twi_sda_out ('0' = drive low, '1' = tristate / release)
-  --   O  = twi_sda_in  (current pad voltage, read by the core)
+  -- ── I2C / TWI open-drain pads ─────────────────────────────────────────────
   IOBUF_SDA : IOBUF
-    port map (
-      IO => twi_sda,
-      I  => '0',
-      T  => std_logic(twi_sda_out),
-      O  => twi_sda_in
-    );
+    port map (IO => twi_sda, I => '0', T => std_logic(twi_sda_out_u), O => twi_sda_in_l);
 
-  -- IOBUF for SCL (open-drain, same convention)
   IOBUF_SCL : IOBUF
+    port map (IO => twi_scl, I => '0', T => std_logic(twi_scl_out_u), O => twi_scl_in_l);
+
+  -- ── Block design (Xilinx IP subsystem) ───────────────────────────────────
+  bd_i : entity work.ostomachion_bd_wrapper
     port map (
-      IO => twi_scl,
-      I  => '0',
-      T  => std_logic(twi_scl_out),
-      O  => twi_scl_in
+      sys_clk              => sys_clk,
+      ck_rst               => ck_rst,
+      clk_o                => clk,
+      periph_resetn_o      => periph_rstn,   -- STD_LOGIC_VECTOR(0 to 0)
+      mext_irq_o           => mext_irq,     -- STD_LOGIC_VECTOR(1 downto 0)
+      s_axi_cpu_awaddr     => axi_awaddr,
+      s_axi_cpu_awprot     => axi_awprot,
+      s_axi_cpu_awvalid    => axi_awvalid,
+      s_axi_cpu_awready    => axi_awready,
+      s_axi_cpu_wdata      => axi_wdata,
+      s_axi_cpu_wstrb      => axi_wstrb,
+      s_axi_cpu_wvalid     => axi_wvalid,
+      s_axi_cpu_wready     => axi_wready,
+      s_axi_cpu_bresp      => axi_bresp,
+      s_axi_cpu_bvalid     => axi_bvalid,
+      s_axi_cpu_bready     => axi_bready,
+      s_axi_cpu_araddr     => axi_araddr,
+      s_axi_cpu_arprot     => axi_arprot,
+      s_axi_cpu_arvalid    => axi_arvalid,
+      s_axi_cpu_arready    => axi_arready,
+      s_axi_cpu_rdata      => axi_rdata,
+      s_axi_cpu_rresp      => axi_rresp,
+      s_axi_cpu_rvalid     => axi_rvalid,
+      s_axi_cpu_rready     => axi_rready
     );
 
-  -- Drive board outputs
-  uart_txd_out  <= std_logic(uart_tx);
-  led           <= std_logic_vector(gpio_out(3 downto 0));
-  spi_clk_o     <= std_logic(spi_clk_int);
-  spi_dat_o     <= std_logic(spi_dat_out);
-  spi_csn_o     <= std_logic(spi_csn_int(0));
-  jtag_tdo_o    <= std_logic(jtag_tdo_int);
+  -- ── XBUS → AXI4-Lite bridge ───────────────────────────────────────────────
+  bridge_i : entity work.xbus_axi4lite_bridge
+    port map (
+      aclk          => clk,
+      aresetn       => periph_rstn(0),   -- extract scalar from 1-bit vector
+      -- XBUS inputs: convert NEORV32 std_ulogic_vector → std_logic_vector
+      xbus_adr_i    => std_logic_vector(xbus_adr_u),
+      xbus_dat_i    => std_logic_vector(xbus_wdat_u),
+      xbus_dat_o    => xbus_rdat_l,
+      xbus_we_i     => std_logic(xbus_we_u),
+      xbus_sel_i    => std_logic_vector(xbus_sel_u),
+      xbus_stb_i    => std_logic(xbus_stb_u),
+      xbus_cyc_i    => std_logic(xbus_cyc_u),
+      xbus_ack_o    => xbus_ack_l,
+      xbus_err_o    => xbus_err_l,
+      -- AXI4-Lite master → BD
+      m_axi_awaddr  => axi_awaddr,
+      m_axi_awprot  => axi_awprot,
+      m_axi_awvalid => axi_awvalid,
+      m_axi_awready => axi_awready,
+      m_axi_wdata   => axi_wdata,
+      m_axi_wstrb   => axi_wstrb,
+      m_axi_wvalid  => axi_wvalid,
+      m_axi_wready  => axi_wready,
+      m_axi_bresp   => axi_bresp,
+      m_axi_bvalid  => axi_bvalid,
+      m_axi_bready  => axi_bready,
+      m_axi_araddr  => axi_araddr,
+      m_axi_arprot  => axi_arprot,
+      m_axi_arvalid => axi_arvalid,
+      m_axi_arready => axi_arready,
+      m_axi_rdata   => axi_rdata,
+      m_axi_rresp   => axi_rresp,
+      m_axi_rvalid  => axi_rvalid,
+      m_axi_rready  => axi_rready
+    );
 
-  -- NEORV32 processor core
-  --
-  -- Key differences from simulation wrapper (rtl/neorv32_wrapper.vhd):
-  --   BOOT_MODE_SELECT = 0  : BROM bootloader — firmware uploaded over UART
-  --   OCD_EN           = true: JTAG on-chip debugger exposed on Pmod JC
-  --   IO_SPI_FIFO      = 32 : larger FIFO reduces interrupt frequency
-  --   IO_TWI_FIFO      = 32 : same
-  --   IO_UART0_TX_FIFO = 32 : prevents TX stalls at 115200 baud
-  --   IO_WDT_EN        = true: hardware watchdog for production use
-  neorv32_inst : entity neorv32.neorv32_top
+  -- ── NEORV32 RISC-V SoC ───────────────────────────────────────────────────
+  neorv32_i : entity neorv32.neorv32_top
     generic map (
-      CLOCK_FREQUENCY   => 100_000_000,
-      BOOT_MODE_SELECT  => 0,           -- internal bootloader (UART upload)
-      RISCV_ISA_C       => true,
-      RISCV_ISA_M       => true,
-      RISCV_ISA_Zicntr  => true,
-      -- On-chip debugger
-      OCD_EN            => true,
-      -- Memory
-      IMEM_EN           => true,
-      IMEM_SIZE         => 65536,
-      DMEM_EN           => true,
-      DMEM_SIZE         => 65536,
-      -- Peripherals
-      IO_CLINT_EN       => true,
-      IO_GPIO_NUM       => 4,
-      IO_UART0_EN       => true,
-      IO_UART0_RX_FIFO  => 32,
-      IO_UART0_TX_FIFO  => 32,
-      IO_SPI_EN         => true,
-      IO_SPI_FIFO       => 32,
-      IO_TWI_EN         => true,
-      IO_TWI_FIFO       => 32,
-      IO_WDT_EN         => true
+      CLOCK_FREQUENCY  => 100_000_000,
+      BOOT_MODE_SELECT => 2,          -- boot from IMEM pre-loaded image
+      IMEM_EN          => true,
+      IMEM_SIZE        => 128 * 1024,
+      DMEM_EN          => true,
+      DMEM_SIZE        => 64 * 1024,
+      XBUS_EN          => true,
+      RISCV_ISA_C      => true,
+      RISCV_ISA_M      => true,
+      RISCV_ISA_Zicntr => true,
+      OCD_EN           => true,
+      IO_CLINT_EN      => true,
+      IO_UART0_EN      => true,
+      IO_SPI_EN        => true,
+      IO_TWI_EN        => true,
+      IO_GPIO_NUM      => 8
     )
     port map (
-      clk_i        => std_ulogic(clk_buf),
-      rstn_i       => rstn_sync,
-      rstn_wdt_o   => rstn_wdt,
-
-      -- GPIO (lower 4 bits → LEDs)
-      gpio_o       => gpio_out,
-
-      -- UART
-      uart0_txd_o  => uart_tx,
-      uart0_rxd_i  => std_ulogic(uart_rxd_in),
-
-      -- SPI
-      spi_clk_o    => spi_clk_int,
-      spi_dat_o    => spi_dat_out,
-      spi_dat_i    => std_ulogic(spi_dat_i),
-      spi_csn_o    => spi_csn_int,
-
-      -- TWI
-      twi_sda_o    => twi_sda_out,
-      twi_sda_i    => std_ulogic(twi_sda_in),
-      twi_scl_o    => twi_scl_out,
-      twi_scl_i    => std_ulogic(twi_scl_in),
-
-      -- JTAG (OCD)
-      jtag_tck_i   => std_ulogic(jtag_tck_i),
-      jtag_tdi_i   => std_ulogic(jtag_tdi_i),
-      jtag_tdo_o   => jtag_tdo_int,
-      jtag_tms_i   => std_ulogic(jtag_tms_i)
+      clk_i       => std_ulogic(clk),
+      rstn_i      => std_ulogic(periph_rstn(0)),  -- extract scalar from 1-bit vector
+      jtag_tck_i  => std_ulogic(jtag_tck_i),
+      jtag_tdi_i  => std_ulogic(jtag_tdi_i),
+      jtag_tdo_o  => jtag_tdo_u,
+      jtag_tms_i  => std_ulogic(jtag_tms_i),
+      -- XBUS outputs (captured as std_ulogic_vector for bridge conversion)
+      xbus_adr_o  => xbus_adr_u,
+      xbus_dat_o  => xbus_wdat_u,
+      xbus_cti_o  => open,
+      xbus_tag_o  => open,
+      xbus_dat_i  => std_ulogic_vector(xbus_rdat_l),
+      xbus_we_o   => xbus_we_u,
+      xbus_sel_o  => xbus_sel_u,
+      xbus_stb_o  => xbus_stb_u,
+      xbus_cyc_o  => xbus_cyc_u,
+      xbus_ack_i  => std_ulogic(xbus_ack_l),
+      xbus_err_i  => std_ulogic(xbus_err_l),
+      mext_irq_i  => std_ulogic(mext_irq(0) or mext_irq(1)),  -- OR mm2s+s2mm IRQs
+      uart0_txd_o => uart0_txd_u,
+      uart0_rxd_i => std_ulogic(uart_rxd_in),
+      uart0_rtsn_o => open,
+      gpio_o      => gpio_out_u,
+      spi_clk_o   => spi_clk_u,
+      spi_dat_o   => spi_mosi_u,
+      spi_dat_i   => std_ulogic(spi_dat_i),
+      spi_csn_o   => spi_csn_u,
+      twi_sda_o   => twi_sda_out_u,
+      twi_sda_i   => std_ulogic(twi_sda_in_l),
+      twi_scl_o   => twi_scl_out_u,
+      twi_scl_i   => std_ulogic(twi_scl_in_l)
     );
 
 end architecture rtl;
