@@ -47,7 +47,7 @@ set_property -dict {
 ## ── 2. Utility constants ────────────────────────────────────────────────────
 ## const_zero: 1-bit 0 — tie-off for unused inputs
 ## const_one:  1-bit 1 — tie valid/ready high on streams with no back-pressure
-## const_fft_cfg: 8-bit xfft config — FWD=1, scale all 6 stages (0x7F)
+## const_fft_cfg: 16-bit xfft config — FWD=1, scale all 12 stages (0x1FFF)
 
 create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 const_zero
 set_property -dict {CONFIG.CONST_WIDTH {1} CONFIG.CONST_VAL {0}} \
@@ -57,11 +57,13 @@ create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 const_one
 set_property -dict {CONFIG.CONST_WIDTH {1} CONFIG.CONST_VAL {1}} \
     [get_bd_cells const_one]
 
-## xfft config: 8-bit tdata = {SCHED_B[5:0], FWD_INV}
+## xfft config: 16-bit tdata = {padding[3], SCHED_B[11:0], FWD_INV}
+## SCHED_B[11:0] = 12 scale bits (one per stage), all 1 = divide-by-2 at every stage.
+## 0x1FFF = 0001_1111_1111_1111: bits[12:1]=all-scaled, bit[0]=FWD.
 ## For 64-pt (6 stages), forward FFT, scale all stages: value = 0x7F = 127
 ## (Pipelined streaming 64-pt FFT: C_S_AXIS_CONFIG_TDATA_WIDTH=8)
 create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 const_fft_cfg
-set_property -dict {CONFIG.CONST_WIDTH {8} CONFIG.CONST_VAL {127}} \
+set_property -dict {CONFIG.CONST_WIDTH {16} CONFIG.CONST_VAL {8191}} \
     [get_bd_cells const_fft_cfg]
 
 ## ── 3. Reset: Processor System Reset ───────────────────────────────────────
@@ -105,17 +107,18 @@ set_property -dict {
     CONFIG.c_include_s2mm            {1}
 } [get_bd_cells axi_dma_0]
 
-## ── 6. Xilinx FFT IP (xfft) — pipelined streaming, 64-pt, 16-bit Q1.15 ─────
+## ── 6. Xilinx FFT IP (xfft) — pipelined streaming, 4096-pt, 16-bit Q1.15 ────
 ## Architecture 1 = Pipelined Streaming: accepts one sample per clock.
 ## AXI-Stream widths:
-##   s_axis_data_tdata  [31:0] = {XN_IM[15:0], XN_RE[15:0]}
-##   m_axis_data_tdata  [31:0] = {XK_IM[15:0], XK_RE[15:0]} (with scaling)
-##   s_axis_config_tdata [7:0] = {padding[1], SCHED_B[5:0], FWD_INV}
-## Config is hardwired via const_fft_cfg (forward, scale all 6 stages).
+##   s_axis_data_tdata   [31:0] = {XN_IM[15:0], XN_RE[15:0]}
+##   m_axis_data_tdata   [31:0] = {XK_IM[15:0], XK_RE[15:0]} (scaled output)
+##   s_axis_config_tdata [15:0] = {padding[3], SCHED_B[11:0], FWD_INV}
+## Config is hardwired via const_fft_cfg (forward, scale all 12 stages).
+## Output remains 16-bit per component because all 12 stages are scaled (÷2 each).
 
 ## xfft 9.1 in Vivado 2024+ uses component-level parameter names (not the old C_*
 ## model-parameter names).  Key parameters and their valid values:
-##   transform_length          — FFT size as integer (64 for 6-stage)
+##   transform_length          — FFT size as integer (4096 for 12-stage)
 ##   implementation_options    — "pipelined_streaming_io" → C_ARCH=1
 ##   input_width               — "16" for Q1.15 fixed-point
 ##   phase_factor_width        — "16"
@@ -131,7 +134,7 @@ set_property -dict {
 
 create_bd_cell -type ip -vlnv xilinx.com:ip:xfft:9.1 xfft_0
 set_property -dict {
-    CONFIG.transform_length       {64}
+    CONFIG.transform_length       {4096}
     CONFIG.implementation_options {pipelined_streaming_io}
     CONFIG.input_width            {16}
     CONFIG.phase_factor_width     {16}

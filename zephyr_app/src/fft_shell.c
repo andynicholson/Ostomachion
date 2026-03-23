@@ -7,16 +7,16 @@
  *
  * Shell session examples:
  *   uart:~$ fft dc
- *   [FFT] Input: DC (all 0.5 + 0j)
- *   [FFT] Done in 87 us.  Bin 0: 32512  all others < 200  PASS
+ *   [FFT] Input: DC (all 0.5 + 0j, 4096 points)
+ *   [FFT] Done in 240 us.  Bin 0: 16384  max_other: 0  PASS
  *
  *   uart:~$ fft sine 8
- *   [FFT] Input: sine wave at bin 8
- *   [FFT] Done in 89 us.  Peak bin: 8  magnitude: 31940  PASS
+ *   [FFT] Input: sine wave at bin 8 (4096 points)
+ *   [FFT] Done in 250 us.  Peak bin: 8  magnitude: 8192  PASS
  *
- *   uart:~$ fft run 64
- *   [FFT] Input: DC (64 points)
- *   [FFT] Done in 87 us.  Peak bin: 0  magnitude: 32512
+ *   uart:~$ fft run 4096
+ *   [FFT] Input: DC (4096 points)
+ *   [FFT] Done in 240 us.  Peak bin: 0  magnitude: 16384
  */
 
 #include <zephyr/kernel.h>
@@ -74,9 +74,15 @@ static int fft_peak(const struct fft_sample_t *out, int n, uint32_t *mag_out)
 	return peak_bin;
 }
 
-/* ── Static sample buffers (avoid stack overflow in shell thread) ─────────── */
-static struct fft_sample_t g_fft_in[64];
-static struct fft_sample_t g_fft_out[64];
+#define FFT_N 4096
+
+/* ── Shared sample buffers — also used by test_runner.c in the shell build ──
+ * Not static: extern declarations in test_runner.c reference these.
+ * Keeping them in a single translation unit avoids the linker placing
+ * duplicate 16 KB arrays in BSS (one per .o that declares a static version).
+ */
+struct fft_sample_t g_fft_in[FFT_N];
+struct fft_sample_t g_fft_out[FFT_N];
 
 /* ── "fft dc" ─────────────────────────────────────────────────────────────── */
 
@@ -91,15 +97,15 @@ static int cmd_fft_dc(const struct shell *sh, size_t argc, char **argv)
 		return -ENODEV;
 	}
 
-	for (int i = 0; i < 64; i++) {
+	for (int i = 0; i < FFT_N; i++) {
 		g_fft_in[i].re = 16384;  /* 0.5 in Q1.15 */
 		g_fft_in[i].im = 0;
 	}
 
-	shell_print(sh, "[FFT] Input: DC (all 0.5 + 0j, 64 points)");
+	shell_print(sh, "[FFT] Input: DC (all 0.5 + 0j, %d points)", FFT_N);
 
 	uint32_t t0 = k_cycle_get_32();
-	int rc = fft_accel_transform(dev, g_fft_in, g_fft_out, 64);
+	int rc = fft_accel_transform(dev, g_fft_in, g_fft_out, FFT_N);
 	uint32_t t1 = k_cycle_get_32();
 
 	if (rc != 0) {
@@ -116,7 +122,7 @@ static int cmd_fft_dc(const struct shell *sh, size_t argc, char **argv)
 
 	uint32_t bin0_mag = fft_magnitude(g_fft_out[0].re, g_fft_out[0].im);
 	uint32_t max_other = 0;
-	for (int k = 1; k < 64; k++) {
+	for (int k = 1; k < FFT_N; k++) {
 		uint32_t m = fft_magnitude(g_fft_out[k].re, g_fft_out[k].im);
 		if (m > max_other) {
 			max_other = m;
@@ -135,13 +141,13 @@ static int cmd_fft_dc(const struct shell *sh, size_t argc, char **argv)
 static int cmd_fft_sine(const struct shell *sh, size_t argc, char **argv)
 {
 	if (argc < 2) {
-		shell_print(sh, "Usage: fft sine <bin>  (0..63)");
+		shell_print(sh, "Usage: fft sine <bin>  (0..%d)", FFT_N / 2 - 1);
 		return -EINVAL;
 	}
 
 	int target_bin = atoi(argv[1]);
-	if (target_bin < 0 || target_bin >= 64) {
-		shell_error(sh, "bin must be 0..63");
+	if (target_bin < 0 || target_bin >= FFT_N / 2) {
+		shell_error(sh, "bin must be 0..%d", FFT_N / 2 - 1);
 		return -EINVAL;
 	}
 
@@ -152,16 +158,17 @@ static int cmd_fft_sine(const struct shell *sh, size_t argc, char **argv)
 	}
 
 	/* Use float: NEORV32 has no double-precision FPU */
-	for (int k = 0; k < 64; k++) {
-		float angle = 2.0f * 3.14159265f * target_bin * k / 64.0f;
+	for (int k = 0; k < FFT_N; k++) {
+		float angle = 2.0f * 3.14159265f * target_bin * k / (float)FFT_N;
 		g_fft_in[k].re = (int16_t)(16384.0f * cosf(angle));
-		g_fft_in[k].im = (int16_t)(-16384.0f * sinf(angle));
+		g_fft_in[k].im = 0;  /* real cosine — symmetric spectrum */
 	}
 
-	shell_print(sh, "[FFT] Input: sine wave at bin %d", target_bin);
+	shell_print(sh, "[FFT] Input: cosine at bin %d (%d points)",
+		    target_bin, FFT_N);
 
 	uint32_t t0 = k_cycle_get_32();
-	int rc = fft_accel_transform(dev, g_fft_in, g_fft_out, 64);
+	int rc = fft_accel_transform(dev, g_fft_in, g_fft_out, FFT_N);
 	uint32_t t1 = k_cycle_get_32();
 
 	if (rc != 0) {
@@ -177,7 +184,7 @@ static int cmd_fft_sine(const struct shell *sh, size_t argc, char **argv)
 #endif
 
 	uint32_t peak_mag;
-	int peak_bin = fft_peak(g_fft_out, 64, &peak_mag);
+	int peak_bin = fft_peak(g_fft_out, FFT_N, &peak_mag);
 
 	/* Guard against target_bin=0: peak_bin >= -1 would always be true */
 	int lo = (target_bin > 0) ? (target_bin - 1) : 0;
@@ -192,11 +199,11 @@ static int cmd_fft_sine(const struct shell *sh, size_t argc, char **argv)
 
 static int cmd_fft_run(const struct shell *sh, size_t argc, char **argv)
 {
-	int n = 64;
+	int n = FFT_N;
 	if (argc >= 2) {
 		n = atoi(argv[1]);
-		if (n != 64) {
-			shell_error(sh, "Only n=64 supported by this hardware");
+		if (n != FFT_N) {
+			shell_error(sh, "Only n=%d supported by this hardware", FFT_N);
 			return -EINVAL;
 		}
 	}
@@ -232,7 +239,7 @@ static int cmd_fft_run(const struct shell *sh, size_t argc, char **argv)
 #endif
 
 	uint32_t peak_mag;
-	int peak_bin = fft_peak(g_fft_out, n, &peak_mag);
+	int peak_bin = fft_peak(g_fft_out, FFT_N, &peak_mag);
 
 	shell_print(sh,
 		    "[FFT] Done in %u us.  Peak bin: %d  magnitude: %u",
@@ -244,10 +251,10 @@ static int cmd_fft_run(const struct shell *sh, size_t argc, char **argv)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(fft_sub,
 	SHELL_CMD_ARG(run,  NULL,
-		      "fft run [n_points]      — transform DC input",
+		      "fft run [n_points]      — transform DC input (n must be 4096)",
 		      cmd_fft_run,  1, 1),
 	SHELL_CMD_ARG(sine, NULL,
-		      "fft sine <bin>          — sine wave at given bin",
+		      "fft sine <bin>          — cosine at given bin (0..2047)",
 		      cmd_fft_sine, 2, 0),
 	SHELL_CMD_ARG(dc,   NULL,
 		      "fft dc                  — DC input, verify bin 0",

@@ -225,6 +225,13 @@ static int64_t _mag_sq(int16_t re, int16_t im)
 	return (int64_t)re * re + (int64_t)im * im;
 }
 
+#define FFT_N 4096
+
+/* Reuse the buffers already allocated in fft_shell.c to avoid a second
+ * 32 KB BSS footprint for the same shell firmware image. */
+extern struct fft_sample_t g_fft_in[FFT_N];
+extern struct fft_sample_t g_fft_out[FFT_N];
+
 static int fft_test_dc_response(void)
 {
 	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(fft_accel));
@@ -232,20 +239,19 @@ static int fft_test_dc_response(void)
 		return -ENODEV;
 	}
 
-	static struct fft_sample_t in[64], out[64];
-	for (int i = 0; i < 64; i++) {
-		in[i].re = 16384;
-		in[i].im = 0;
+	for (int i = 0; i < FFT_N; i++) {
+		g_fft_in[i].re = 16384;
+		g_fft_in[i].im = 0;
 	}
 
-	int rc = fft_accel_transform(dev, in, out, 64);
+	int rc = fft_accel_transform(dev, g_fft_in, g_fft_out, FFT_N);
 	if (rc != 0) {
 		return rc;
 	}
 
-	int64_t bin0 = _mag_sq(out[0].re, out[0].im);
-	for (int k = 1; k < 64; k++) {
-		if (_mag_sq(out[k].re, out[k].im) >= bin0) {
+	int64_t bin0 = _mag_sq(g_fft_out[0].re, g_fft_out[0].im);
+	for (int k = 1; k < FFT_N; k++) {
+		if (_mag_sq(g_fft_out[k].re, g_fft_out[k].im) >= bin0) {
 			return -EIO;
 		}
 	}
@@ -259,35 +265,33 @@ static int fft_test_single_tone(void)
 		return -ENODEV;
 	}
 
-	/* Real cosine at bin 8: x[k] = 0.5 * cos(2π·8·k/64), im = 0.
-	 * Aligned with ZTEST test_single_tone which uses the same signal model.
-	 * A real cosine produces symmetric peaks at bin 8 AND its mirror bin 56
-	 * (= 64 - 8); the peak detector must accept either. */
-	static struct fft_sample_t in[64], out[64];
+	/* Real cosine at bin 8: x[k] = 0.5 * cos(2π·8·k/4096), im = 0.
+	 * A real cosine produces symmetric peaks at bin 8 AND its mirror
+	 * bin 4088 (= 4096 - 8); the peak detector must accept either. */
 	const int target = 8;
-	for (int k = 0; k < 64; k++) {
-		float angle = 2.0f * 3.14159265f * (float)target * k / 64.0f;
-		in[k].re = (int16_t)(16384.0f * cosf(angle));
-		in[k].im = 0;
+	for (int k = 0; k < FFT_N; k++) {
+		float angle = 2.0f * 3.14159265f * (float)target * k / (float)FFT_N;
+		g_fft_in[k].re = (int16_t)(16384.0f * cosf(angle));
+		g_fft_in[k].im = 0;
 	}
 
-	int rc = fft_accel_transform(dev, in, out, 64);
+	int rc = fft_accel_transform(dev, g_fft_in, g_fft_out, FFT_N);
 	if (rc != 0) {
 		return rc;
 	}
 
 	int peak_bin = 0;
 	int64_t peak = 0;
-	for (int k = 0; k < 64; k++) {
-		int64_t m = _mag_sq(out[k].re, out[k].im);
+	for (int k = 0; k < FFT_N; k++) {
+		int64_t m = _mag_sq(g_fft_out[k].re, g_fft_out[k].im);
 		if (m > peak) {
 			peak = m;
 			peak_bin = k;
 		}
 	}
-	/* Accept bin 8 (±1) or its mirror bin 56 (±1) */
+	/* Accept bin 8 (±1) or its mirror bin 4088 (±1) */
 	bool ok = ((peak_bin >= 7 && peak_bin <= 9) ||
-		   (peak_bin >= 55 && peak_bin <= 57));
+		   (peak_bin >= 4087 && peak_bin <= 4089));
 	return ok ? 0 : -EIO;
 }
 

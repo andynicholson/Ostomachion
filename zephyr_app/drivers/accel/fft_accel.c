@@ -180,7 +180,7 @@ static void fft_accel_isr(const struct device *dev)
  * @param dev  FFT accelerator device
  * @param in   Input samples (re/im Q1.15), length n
  * @param out  Output buffer, same size
- * @param n    Transform size (must be 64; other values return -EINVAL)
+ * @param n    Transform size (must be 4096; other values return -EINVAL)
  * @return 0 on success, negative errno on error or timeout
  */
 int fft_accel_transform(const struct device *dev,
@@ -195,7 +195,10 @@ int fft_accel_transform(const struct device *dev,
 	const struct fft_accel_config *cfg = dev->config;
 	struct fft_accel_data *data = dev->data;
 
-	if (n != 64) {
+	/* The xfft IP is synthesised for a fixed transform length (4096).
+	 * A partial transfer would leave the IP waiting for more samples and
+	 * the DMA would time out; reject any other size immediately. */
+	if (n != 4096) {
 		return -EINVAL;
 	}
 

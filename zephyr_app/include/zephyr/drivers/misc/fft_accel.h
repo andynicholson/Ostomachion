@@ -33,7 +33,7 @@ struct fft_sample_t {
  * @param dev  Pointer to FFT accelerator device (from DT_NODELABEL).
  * @param in   Input samples, length @p n (Q1.15 complex).
  * @param out  Output buffer, length @p n.
- * @param n    Transform size.  Only 64 is supported by this hardware;
+ * @param n    Transform size.  Only 4096 is supported by this hardware;
  *             any other value returns -EINVAL.
  * @return 0 on success, negative errno on failure:
  *         -ENODEV   device is not ready (init failed or null pointer)

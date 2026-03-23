@@ -61,7 +61,7 @@ without disturbing what already works.
   ┌────────────────────────▼─────────────────────────────────────────┐
   │  Xilinx IP Subsystem  (fpga/arty_a7/ostomachion_bd.tcl)          │
   │  • AXI SmartConnect (axi_smc) + AXI DMA (axi_dma_0)             │
-  │  • TX BRAM (0x41000000) ── xfft IP (64-pt, 16-bit) ── RX BRAM  │
+  │  • TX BRAM (0x41000000) ── xfft IP (4096-pt, 16-bit) ── RX BRAM │
   │  • RX BRAM controller (0x41004000)                               │
   │  • xlconcat: {MM2S irq, S2MM irq, xfft overflow} → NEORV32 MEI │
   │  • MMCM clocking, proc_sys_reset                                 │
@@ -244,13 +244,13 @@ ostomachion::FftAccel accel{dev};
 
 if (!accel.ready()) { /* handle missing / unloaded bitstream */ }
 
-fft_sample_t in[64]{};
-fft_sample_t out[64]{};
+static fft_sample_t in[4096]{};
+static fft_sample_t out[4096]{};
 // Fill in[] with Q1.15 complex samples (re = int16_t, im = int16_t)
 in[0].re = 16384; // 0.5 in Q1.15
 
-[[nodiscard]] int err = accel.transform(in, out, 64);
-// out[] now contains the 64-point forward FFT result
+[[nodiscard]] int err = accel.transform(in, out, 4096);
+// out[] now contains the 4096-point forward FFT result
 // Frequency bin k occupies out[k].re + j·out[k].im (Q1.15, scaled)
 
 if (accel.last_overflow()) {
@@ -261,7 +261,7 @@ if (accel.last_overflow()) {
 **Generic platform interface (via `Accel::submit`):**
 
 ```cpp
-ostomachion::FftOpDesc op{in, out, 64};
+ostomachion::FftOpDesc op{in, out, 4096};
 int err = accel.submit(op);  // type-safe, no RTTI
 ```
 
@@ -271,7 +271,7 @@ int err = accel.submit(op);  // type-safe, no RTTI
 |--------|---------|
 | `0` | Success |
 | `-ENODEV` | Device not ready (bitstream not loaded or DTS mismatch) |
-| `-EINVAL` | Invalid parameters (e.g. `n != 64`) |
+| `-EINVAL` | Invalid parameters (e.g. `n != 4096`) |
 | `-ETIMEDOUT` | DMA did not complete within `CONFIG_FFT_ACCEL_TIMEOUT_MS` |
 | `-EIO` | Hardware error (DMA bus fault, unexpected state) |
 
@@ -711,7 +711,7 @@ to `ostomachion_bd.tcl` and the Zephyr driver ISR.
 | Physical FPGA target (Arty A7-100T) | **Done** — `fpga/arty_a7/` with VHDL top, XDC, Vivado TCL, OpenOCD config |
 | UART bootloader firmware upload | **Done** — `make fpga-fw` via `neorv32_upload.py` |
 | JTAG on-chip debug | **Done** — `OCD_EN=true` in FPGA top, `openocd.cfg` + NEORV32 OCD config |
-| Xilinx xfft FFT accelerator | **Done** — 64-pt, 16-bit, pipelined streaming, `ostomachion_bd.tcl` |
+| Xilinx xfft FFT accelerator | **Done** — 4096-pt, 16-bit, pipelined streaming, `ostomachion_bd.tcl` |
 | FFT overflow detection | **Done** — xfft `ovflo` output wired to IRQ; `fft_accel_get_last_overflow()` |
 | Configurable DMA timeout | **Done** — `CONFIG_FFT_ACCEL_TIMEOUT_MS` (default 100 ms) |
 | AXI bridge watchdog | **Done** — 256-cycle AXI response timeout in `xbus_axi4lite_bridge.vhd` |
@@ -816,9 +816,9 @@ All required files live in `fpga/arty_a7/`.
 
 > **Board variant note:** The Arty A7-100T and A7-35T share the same PCB and
 > pin-compatible CSG324 package.  The 100T is required because the design
-> uses ~58 RAMB36 (xfft IP, AXI DMA, TX/RX BRAMs, NEORV32 IMEM/DMEM) and
-> the 35T provides only 50 RAMB36.  Verified build-time utilisation on 100T:
-> **LUTs 14.75%, BRAMs 42.96%** (WNS +0.821 ns, WHS +0.014 ns at 100 MHz,
+> uses ~64 RAMB36 (4096-pt xfft IP, AXI DMA, TX/RX BRAMs, NEORV32 IMEM/DMEM)
+> and the 35T provides only 50 RAMB36.  Verified build-time utilisation on 100T:
+> **LUTs 17.21%, BRAMs 47.04%** (WNS +0.292 ns, WHS +0.019 ns at 100 MHz,
 > 0 DRC errors).
 
 ### Prerequisites
@@ -1038,14 +1038,14 @@ For interactive FFT exploration, use the shell image:
 make shell-hw UART_DEVICE=/dev/ttyUSB1
 # connect at 115200 baud, then:
 uart:~$ fft dc
-[FFT] Input: DC (all 0.5 + 0j, 64 points)
-[FFT] Done in 87 us.  Bin 0: 16320  max_other: 12  PASS
+[FFT] Input: DC (all 0.5 + 0j, 4096 points)
+[FFT] Done in 245 us.  Bin 0: 16384  max_other: 0  PASS
 uart:~$ fft sine 8
-[FFT] Input: sine wave at bin 8
-[FFT] Done in 89 us.  Peak bin: 8  magnitude: 15960  PASS
+[FFT] Input: cosine at bin 8 (4096 points)
+[FFT] Done in 250 us.  Peak bin: 8  magnitude: 8192  PASS
 uart:~$ help
 Available commands:
-  fft     - FFT accelerator commands (dc, sine <bin>, run <n>)
+  fft     - FFT accelerator commands (dc, sine <bin 0..2047>, run <n>)
   test    - Run peripheral test suites
   kernel  - Kernel commands
 ```

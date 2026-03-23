@@ -7,12 +7,12 @@
 //   const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(fft_accel));
 //   ostomachion::FftAccel accel{dev};
 //
-//   fft_sample_t in[64]{};
-//   fft_sample_t out[64]{};
+//   static fft_sample_t in[4096]{};
+//   static fft_sample_t out[4096]{};
 //   // fill in[] ...
-//   int rc = accel.transform(in, out, 64);     // legacy typed interface
+//   int rc = accel.transform(in, out, 4096);   // direct typed interface
 //   // OR, via the generic Accel platform interface:
-//   ostomachion::FftOpDesc op{in, out, 64};
+//   ostomachion::FftOpDesc op{in, out, 4096};
 //   rc = accel.submit(op);
 //   if (accel.last_overflow()) { /* reduce input amplitude */ }
 
@@ -33,7 +33,7 @@ namespace ostomachion {
 struct FftOpDesc : AccelOpDesc {
     const fft_sample_t *in;   ///< Input samples (Q1.15 complex), length n
     fft_sample_t       *out;  ///< Output buffer, length n
-    size_t              n;    ///< Transform length (must be 64)
+    size_t              n;    ///< Transform length (must be 4096)
 
     FftOpDesc(const fft_sample_t *in_, fft_sample_t *out_, size_t n_)
         : AccelOpDesc{AccelOpDesc::Type::Fft}, in{in_}, out{out_}, n{n_} {}
@@ -101,7 +101,7 @@ public:
      *
      * @param in   Pointer to N input samples (Q1.15 complex).
      * @param out  Pointer to N output sample buffer.
-     * @param n    Transform length (must be 64).
+     * @param n    Transform length (must be 4096).
      * @return 0 on success, negative errno on failure.
      */
     [[nodiscard]] int transform(const fft_sample_t *in,
