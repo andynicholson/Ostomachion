@@ -43,3 +43,69 @@ tests:
       - CONFIG_FFT_ACCEL=y
     extra_args:
       - OVERLAY_CONFIG=app_accel.overlay
+
+  # ── WDT driver build verification (compile + sim run on neorv32 sim) ─────
+  # WDT DTS node is only in app_fpga.overlay; tests skip gracefully when the
+  # node is absent, so this configuration still runs all other test suites.
+  ostomachion.wdt.compile:
+    platform_allow: neorv32
+    build_only: false
+    tags: [wdt]
+    extra_configs:
+      - CONFIG_ZTEST=y
+      - CONFIG_ZTEST_NEW_API=y
+      - CONFIG_WATCHDOG=y
+    harness: ztest
+    harness_config:
+      fixture: neorv32_sim
+
+  # ── Hardware-in-the-Loop (HIL) — requires Arty A7 self-hosted runner ─────
+  #
+  # These configurations run the full test suite on a physical Arty A7-100T
+  # board.  Prerequisites:
+  #   1. A self-hosted GitHub Actions runner with label "arty_a7" registered
+  #      on the repository (see docs/acceptance_test_procedure.md §Runner).
+  #   2. The Ostomachion bitstream must be programmed via 'make fpga-flash'
+  #      before the runner starts the HIL tests.
+  #   3. Zephyr firmware is uploaded automatically via the NEORV32 bootloader
+  #      (BOOT_MODE_SELECT=0) at 19200 baud on the first UART port.
+  #
+  # These tests are tagged [hw] so they can be excluded from CI-only runs:
+  #   west twister -T zephyr_app/tests --exclude-tag hw
+  #
+  ostomachion.hw.peripherals:
+    platform_allow: arty_a7
+    build_only: false
+    tags: [hw, spi, i2c, gpio, wdt]
+    extra_configs:
+      - CONFIG_ZTEST=y
+      - CONFIG_ZTEST_NEW_API=y
+      - CONFIG_WATCHDOG=y
+      - CONFIG_WDT_NEORV32=y
+      - CONFIG_SPI_NEORV32_INTERRUPT=y
+      - CONFIG_I2C_NEORV32_INTERRUPT=y
+    extra_args:
+      - DTC_OVERLAY_FILE=app.overlay;app_fpga.overlay
+      - OVERLAY_CONFIG=prj.conf;prj_fpga.conf;prj_hw_test.conf
+    harness: ztest
+    harness_config:
+      fixture: arty_a7_hw
+
+  ostomachion.hw.fft:
+    platform_allow: arty_a7
+    build_only: false
+    tags: [hw, fft, accelerator]
+    extra_configs:
+      - CONFIG_ZTEST=y
+      - CONFIG_ZTEST_NEW_API=y
+      - CONFIG_FFT_ACCEL=y
+      - CONFIG_WATCHDOG=y
+      - CONFIG_WDT_NEORV32=y
+      - CONFIG_SPI_NEORV32_INTERRUPT=y
+      - CONFIG_I2C_NEORV32_INTERRUPT=y
+    extra_args:
+      - DTC_OVERLAY_FILE=app.overlay;app_fpga.overlay;app_accel.overlay
+      - OVERLAY_CONFIG=prj.conf;prj_fpga.conf;prj_accel.conf;prj_hw_test.conf
+    harness: ztest
+    harness_config:
+      fixture: arty_a7_hw_fft

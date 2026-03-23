@@ -4,6 +4,7 @@
 menu "NEORV32 out-of-tree drivers"
 rsource "spi/Kconfig"
 rsource "i2c/Kconfig"
+rsource "wdt/Kconfig"
 rsource "accel/Kconfig"
 endmenu
 

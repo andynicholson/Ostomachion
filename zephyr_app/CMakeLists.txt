@@ -19,6 +19,9 @@ if(CONFIG_ZTEST)
     tests/test_i2c.cpp
     tests/test_gpio.cpp
   )
+  if(CONFIG_WDT_NEORV32)
+    target_sources(app PRIVATE tests/test_wdt.cpp)
+  endif()
   if(CONFIG_FFT_ACCEL)
     target_sources(app PRIVATE tests/test_fft_accel.cpp)
   endif()

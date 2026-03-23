@@ -53,10 +53,10 @@ architecture rtl of arty_a7_top is
   -- ── BD outputs ───────────────────────────────────────────────────────────
   -- clk_o is STD_LOGIC (scalar clock from MMCM)
   -- periph_resetn_o is STD_LOGIC_VECTOR(0 to 0) — proc_sys_reset bus output
-  -- mext_irq_o is STD_LOGIC_VECTOR(2 downto 0) — xlconcat of mm2s + s2mm IRQs + xfft ovflo
+  -- mext_irq_o is STD_LOGIC — single IRQ from AXI INTC (channel 0=MM2S, 1=S2MM, 2=xfft ovflo)
   signal clk         : std_logic;
   signal periph_rstn : std_logic_vector(0 downto 0);
-  signal mext_irq    : std_logic_vector(2 downto 0);
+  signal mext_irq    : std_logic;
 
   -- ── NEORV32 scalar outputs (std_ulogic → converted to std_logic) ─────────
   signal uart0_txd_u : std_ulogic;
@@ -132,7 +132,7 @@ begin
       ck_rst               => ck_rst,
       clk_o                => clk,
       periph_resetn_o      => periph_rstn,   -- STD_LOGIC_VECTOR(0 to 0)
-      mext_irq_o           => mext_irq,     -- STD_LOGIC_VECTOR(1 downto 0)
+      mext_irq_o           => mext_irq,     -- STD_LOGIC — AXI INTC combined IRQ
       s_axi_cpu_awaddr     => axi_awaddr,
       s_axi_cpu_awprot     => axi_awprot,
       s_axi_cpu_awvalid    => axi_awvalid,
@@ -194,22 +194,26 @@ begin
   -- ── NEORV32 RISC-V SoC ───────────────────────────────────────────────────
   neorv32_i : entity neorv32.neorv32_top
     generic map (
-      CLOCK_FREQUENCY  => 100_000_000,
-      BOOT_MODE_SELECT => 2,          -- boot from IMEM pre-loaded image
-      IMEM_EN          => true,
-      IMEM_SIZE        => 128 * 1024,
-      DMEM_EN          => true,
-      DMEM_SIZE        => 64 * 1024,
-      XBUS_EN          => true,
-      RISCV_ISA_C      => true,
-      RISCV_ISA_M      => true,
-      RISCV_ISA_Zicntr => true,
-      OCD_EN           => true,
-      IO_CLINT_EN      => true,
-      IO_UART0_EN      => true,
-      IO_SPI_EN        => true,
-      IO_TWI_EN        => true,
-      IO_GPIO_NUM      => 8
+      CLOCK_FREQUENCY   => 100_000_000,
+      BOOT_MODE_SELECT  => 0,          -- BROM bootloader (firmware via UART; or pre-flash BOOT_MODE_SELECT=1)
+      IMEM_EN           => true,
+      IMEM_SIZE         => 128 * 1024,
+      DMEM_EN           => true,
+      DMEM_SIZE         => 64 * 1024,
+      XBUS_EN           => true,
+      RISCV_ISA_C       => true,
+      RISCV_ISA_M       => true,
+      RISCV_ISA_Zicntr  => true,
+      OCD_EN            => true,
+      IO_CLINT_EN       => true,
+      IO_UART0_EN       => true,
+      IO_UART0_TX_FIFO  => 32,
+      IO_SPI_EN         => true,
+      IO_SPI_FIFO       => 32,
+      IO_TWI_EN         => true,
+      IO_TWI_FIFO       => 32,
+      IO_GPIO_NUM       => 8,
+      IO_WDT_EN         => true        -- watchdog: feed via Zephyr wdt_feed() / CONFIG_WDT_NEORV32
     )
     port map (
       clk_i       => std_ulogic(clk),
@@ -230,7 +234,7 @@ begin
       xbus_cyc_o  => xbus_cyc_u,
       xbus_ack_i  => std_ulogic(xbus_ack_l),
       xbus_err_i  => std_ulogic(xbus_err_l),
-      mext_irq_i  => std_ulogic(mext_irq(0) or mext_irq(1) or mext_irq(2)),  -- OR mm2s+s2mm+ovflo
+      mext_irq_i  => std_ulogic(mext_irq),  -- single IRQ from AXI INTC
       uart0_txd_o => uart0_txd_u,
       uart0_rxd_i => std_ulogic(uart_rxd_in),
       uart0_rtsn_o => open,

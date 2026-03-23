@@ -1,6 +1,8 @@
 # Ostomachion
 
-**A NEORV32 + Zephyr RTOS project targeted to modern C++20 and FPGAs.**
+**A NEORV32 RISC-V Processor + Zephyr RTOS project + custom RTL accelerator pipeline -- targeted to modern C++20 and FPGAs.**
+
+https://github.com/stnolting/neorv32 |  https://www.zephyrproject.org/
 
 ---
 
@@ -63,7 +65,7 @@ without disturbing what already works.
   │  • AXI SmartConnect (axi_smc) + AXI DMA (axi_dma_0)             │
   │  • TX BRAM (0x41000000) ── xfft IP (4096-pt, 16-bit) ── RX BRAM │
   │  • RX BRAM controller (0x41004000)                               │
-  │  • xlconcat: {MM2S irq, S2MM irq, xfft overflow} → NEORV32 MEI │
+  │  • AXI INTC (0x40010000): ch0=MM2S, ch1=S2MM, ch2=ovflo → MEI  │
   │  • MMCM clocking, proc_sys_reset                                 │
   └────────────────────────┬─────────────────────────────────────────┘
                            │  (physical I/O pins / GHDL stimulus)
@@ -519,6 +521,25 @@ This clones Zephyr at the pinned SHA (`d465eac074fa`) and the four required
 modules (cmsis, hal_riscv, picolibc, tinycrypt), matching the environment
 used for CI and hardware validation.
 
+### One-shot shell setup (local Zephyr tree + venv)
+
+If you already keep Zephyr under `~/src/zephyrproject/zephyr` and use
+`~/.zephyr-venv` (as in the simulation example above), source the helper
+script from the Ostomachion repo root:
+
+```bash
+cd /path/to/ostomachion
+source scripts/init_dev_env.sh
+make zephyr-fpga
+```
+
+Defaults: `OSTOMACHION_ZEPHYR_VENV=~/.zephyr-venv`,
+`OSTOMACHION_ZEPHYR_WORKSPACE=~/src/zephyrproject`,
+`ZEPHYR_SDK_INSTALL_DIR=~/zephyr-sdk-1.0.0`,
+and (if present) `source /tools/Xilinx/2025.1/Vivado/settings64.sh` via
+`OSTOMACHION_VIVADO_SETTINGS` so `vivado` is on `PATH` for `make fpga-synth`.
+Override any of these in the environment before sourcing if your layout differs.
+
 ---
 
 ## Extending the platform
@@ -585,13 +606,15 @@ used for CI and hardware validation.
 | `make sw`             | Build bare-metal firmware only                                    |
 | `make clean-ghdl`     | Remove GHDL artifacts (keeps firmware)                            |
 | `make clean`          | Full clean (GHDL + firmware + all Zephyr build dirs)              |
-| `make fpga-synth`     | Vivado: synthesise + implement + bitstream (production)           |
-| `make fpga-program`   | Load bitstream onto Arty A7 via JTAG (OpenOCD)                   |
-| `make fpga-fw`        | Build + upload FPGA Zephyr firmware via UART bootloader           |
-| `make fpga-check`     | Post-build quality gates (timing, utilisation, DRC)               |
-| `make test-hw`        | Build + upload SPI/I2C/GPIO ZTEST firmware                        |
-| `make test-accel-hw`  | Build + upload FFT accelerator ZTEST firmware                     |
-| `make shell-hw`       | Build + upload interactive shell firmware (`fft`, `test` commands)|
+| `make fpga-synth`         | Vivado: synthesise + implement + bitstream + MCS flash image      |
+| `make fpga-program`       | Load bitstream onto Arty A7 via JTAG (OpenOCD) — volatile        |
+| `make fpga-flash`         | Program on-board Quad-SPI flash — persistent across power cycles  |
+| `make fpga-fw`            | Build + upload FPGA Zephyr firmware via UART bootloader           |
+| `make fpga-check`         | Post-build quality gates (timing, utilisation, DRC)               |
+| `make fpga-release VERSION=v1.0.0` | Stage certification artifacts in `release/v1.0.0/`     |
+| `make test-hw`            | Build + upload SPI/I2C/GPIO/WDT ZTEST firmware                    |
+| `make test-accel-hw`      | Build + upload FFT accelerator ZTEST firmware                     |
+| `make shell-hw`           | Build + upload interactive shell firmware (`fft`, `test` commands)|
 
 Override `SIM_TIME` to control simulation duration:
 
@@ -677,12 +700,12 @@ indefinite CPU bus hangs from misconfigured peripherals.
 ### Interrupt architecture
 
 The current design uses a **single NEORV32 Machine External Interrupt (MEI)**
-line for all AXI fabric interrupts, aggregated via `xlconcat[2:0]`:
+line for all AXI fabric interrupts, aggregated via the AXI INTC (at 0x40010000):
 
 ```
-xlconcat[0] — AXI DMA MM2S complete
-xlconcat[1] — AXI DMA S2MM complete
-xlconcat[2] — xfft overflow (m_axis_status_tvalid)
+INTC channel 0 — AXI DMA MM2S complete / error
+INTC channel 1 — AXI DMA S2MM complete / error
+INTC channel 2 — xfft overflow (m_axis_status_tvalid)
          OR ────────────────────────────────────────→  NEORV32 mext_irq_i
 ```
 
@@ -691,11 +714,11 @@ The xfft overflow is detected by the absence of DMA activity when the
 interrupt fires.
 
 **Scalability limitation**: adding a second accelerator would require a
-fourth `xlconcat` input, which still maps to the same single MEI line,
+fourth INTC channel, which still maps to the same single MEI line,
 making interrupt source discrimination increasingly complex.
 
-**Migration path for multi-accelerator platforms**: replace `xlconcat` +
-`OR` with a Xilinx AXI Interrupt Controller (AXI INTC), mapping each IRQ
+**Expansion for multi-accelerator platforms**: add further accelerators by
+wiring their IRQs to additional AXI INTC channels, mapping each IRQ
 source to its own INTC channel (PLIC-style).  The NEORV32 MEI line becomes
 a single "any pending" signal from the INTC, and the driver reads the INTC
 Interrupt Status Register to identify the source.  This change is isolated
@@ -723,9 +746,17 @@ to `ostomachion_bd.tcl` and the Zephyr driver ISR.
 | Build-ID version manifest | **Done** — git hash embedded in bitstream USERID; `build_id.txt` written; `CONFIG_OSTOMACHION_HW_BUILD_ID` for firmware |
 | FFT driver thread safety | **Design constraint** — callers serialised by mutex; single `FftAccel` instance per system recommended |
 | FFT GHDL simulation | **Not supported** — Xilinx encrypted IP is not simulatable in GHDL |
-| AXI INTC for multi-accelerator IRQ | **Roadmap** — replace `xlconcat` OR-tree with AXI INTC for per-channel interrupt lines |
-| `GpioInput` HAL class | **Roadmap** — trivial to add alongside `GpioOutput` |
-| SPI flash boot (`BOOT_MODE_SELECT=1`) | **Roadmap** — requires SPI flash programming flow |
+| AXI INTC for multi-accelerator IRQ | **Done** — `xlconcat` replaced with `axi_intc` in `ostomachion_bd.tcl`; per-channel ISR in `fft_accel.c`; scalable to further accelerators |
+| `GpioInput` HAL class | **Done** — `hal/gpio_input.hpp` with `get()` / `is_active()`, ZTEST coverage in `test_gpio.cpp` |
+| SPI flash boot (bitstream persistence) | **Done** — `write_cfgmem` in `build.tcl`, `make fpga-flash` via `program_flash.tcl`; `BOOT_MODE_SELECT=0` (BROM) for firmware uploads |
+| Watchdog Timer (WDT) software driver | **Done** — `drivers/wdt/wdt_neorv32.c`, DTS binding, `wdt_feed` in LED blink thread, ZTEST coverage |
+| RTL linting in CI | **Done** — `vhdl-lint` CI job (GHDL, ~30 s on ubuntu-latest) |
+| Firmware static analysis in CI | **Done** — `firmware-analysis` CI job (clang-tidy + nm memory map + thread analyzer) |
+| Hardware-in-the-loop CI | **Done** — `ostomachion.hw.*` testcase.yaml entries; requires self-hosted runner with label `arty_a7` |
+| Semantic versioning | **Done** — `git describe --tags` in `build_id.txt`; USERID embeds git hash |
+| Certification artifacts | **Done** — `scripts/gen_release_artifacts.sh`, `make fpga-release` |
+| Acceptance Test Procedure | **Done** — `docs/acceptance_test_procedure.md` (ATP-01..ATP-10) |
+| NEORV32 upgrade assessment | **Done** — `docs/neorv32_upgrade_notes.md` (v1.11.6 → v1.12 risk analysis, go/no-go) |
 | 10-bit I2C addressing | **Not supported** — NEORV32 TWI is 7-bit only |
 | Second FPGA board target | **Roadmap** — parameterised `fpga/` layout supports additional boards |
 
@@ -733,10 +764,17 @@ to `ostomachion_bd.tcl` and the Zephyr driver ISR.
 
 ## NEORV32 version lock
 
-This project uses **NEORV32 v1.11.6**.  Newer versions (v1.12+) reorganized
-the UART control register bits and are **not** compatible with the Zephyr
-`uart_neorv32` driver in the supported Zephyr SDK.  Check the Zephyr board
-support file `boards/riscv/neorv32/` before upgrading the submodule.
+This project uses **NEORV32 v1.11.6**, pinned by submodule hash.  Before
+upgrading to any newer version, read the detailed compatibility analysis:
+[`docs/neorv32_upgrade_notes.md`](docs/neorv32_upgrade_notes.md).
+
+Key upgrade concerns:
+- Verify `uart_neorv32.c` register bit positions against new `neorv32_uart.h`
+- Check for any `neorv32_top` generic renames (run `vhdl-lint` CI first)
+- Allow for a full re-synthesis and re-acceptance test (est. ~2 engineer-days)
+
+**Recommendation:** do not upgrade for the v1.0.0 client delivery.  Plan as a
+separate tracked work item post-acceptance.
 
 ---
 
@@ -857,21 +895,20 @@ Synthesise, implement, and generate the bitstream:
 ```bash
 make fpga-synth
 # equivalent to: vivado -mode batch -source fpga/arty_a7/build.tcl
-# output: build/arty_a7/ostomachion_arty_a7.bit
-#         build/arty_a7/build_id.txt  (git hash + timestamp)
+# output: build/arty_a7/ostomachion_arty_a7.bit   (FPGA bitstream)
+#         build/arty_a7/ostomachion_arty_a7.mcs   (Quad-SPI flash image)
+#         build/arty_a7/build_id.txt              (semver + git hash + timestamp)
 ```
 
 Build time is typically 10–20 minutes on a modern workstation.
 
-The build embeds the current `git describe` hash and a timestamp as the
-bitstream `USERID` property and writes it to `build/arty_a7/build_id.txt`.
-The firmware can log this at boot via `CONFIG_OSTOMACHION_HW_BUILD_ID`
-(set to the expected hash string) for hardware/firmware version verification.
+The build embeds `git describe --tags` and the git hash as the bitstream
+`USERID` property and in `build_id.txt`.  The firmware can log this at boot
+via `CONFIG_OSTOMACHION_HW_BUILD_ID` for hardware/firmware version verification.
 
-### Program the FPGA
+### Program the FPGA (volatile — JTAG)
 
-Load the bitstream into the FPGA's SRAM via JTAG (volatile — erased on
-power-cycle):
+Load the bitstream into the FPGA's SRAM via JTAG (erased on power-cycle):
 
 ```bash
 make fpga-program
@@ -879,8 +916,19 @@ make fpga-program
 #                        -c "pld load 0 build/arty_a7/ostomachion_arty_a7.bit" -c shutdown
 ```
 
-For persistent storage, use Vivado's `write_cfgmem` to generate an SPI flash
-image and program the on-board Quad-SPI flash.
+### Program the Quad-SPI flash (persistent — survives power-cycle)
+
+Program the on-board Micron N25Q128A / MT25QL128 QSPI flash so the FPGA
+auto-configures itself from flash on every power-up:
+
+```bash
+make fpga-flash
+# uses fpga/arty_a7/program_flash.tcl via Vivado batch mode
+# Arty A7 must be connected via USB-JTAG; takes ~60 seconds
+```
+
+After `make fpga-flash`, the board will boot the Ostomachion design automatically
+whenever powered on — no JTAG connection required.
 
 ### Iterating on firmware (no re-synthesis)
 

@@ -3,7 +3,8 @@
 #
 # DTS binding for the Ostomachion FFT accelerator pipeline.
 # The FFT core is the Xilinx xfft IP; it has no AXI4-Lite slave interface.
-# All data movement is handled by the AXI DMA.
+# All data movement is handled by the AXI DMA.  Interrupt source
+# identification is provided by the AXI INTC (Xilinx PG099).
 #
 # Example DTS node:
 #
@@ -11,14 +12,15 @@
 #       compatible = "ostomachion,fft-accel";
 #       reg = <0x40000000 0x40>,     /* AXI DMA control registers  (64 B)  */
 #             <0x41000000 0x4000>,   /* TX BRAM                   (16 KB)  */
-#             <0x41004000 0x4000>;   /* RX BRAM                   (16 KB)  */
-#       reg-names = "dma", "tx_bram", "rx_bram";
+#             <0x41004000 0x4000>,   /* RX BRAM                   (16 KB)  */
+#             <0x40010000 0x80>;     /* AXI INTC (128 B AXI aperture)      */
+#       reg-names = "dma", "tx_bram", "rx_bram", "intc";
 #       bram-size = <16384>;
 #       interrupts = <11>;          /* RISC-V MEI line (IRQ 11) */
 #       status = "okay";
 #   };
 
-description: Ostomachion AXI DMA + Xilinx xfft hardware accelerator pipeline
+description: Ostomachion AXI DMA + Xilinx xfft + AXI INTC hardware accelerator pipeline
 
 compatible: "ostomachion,fft-accel"
 
@@ -31,7 +33,11 @@ properties:
   reg-names:
     required: true
     description: |
-      Must be "dma", "tx_bram", "rx_bram" in that order.
+      Must be "dma", "tx_bram", "rx_bram", "intc" in that order.
+        dma     — AXI DMA control registers (64 B at 0x40000000)
+        tx_bram — TX BRAM input buffer (16 KB at 0x41000000)
+        rx_bram — RX BRAM output buffer (16 KB at 0x41004000)
+        intc    — AXI INTC (128 B decode at 0x40010000; PG099 regs in low 32 B)
 
   bram-size:
     type: int
@@ -43,16 +49,14 @@ properties:
     description: |
       Machine External Interrupt (MEI), IRQ 11 on the riscv,cpu-intc (&intc).
 
-      Interrupt topology (v1.0 — single-accelerator platform):
-        irq_concat/In0 = AXI DMA mm2s_introut  (MM2S completion / error)
-        irq_concat/In1 = AXI DMA s2mm_introut  (S2MM completion / error)
-        irq_concat/In2 = xfft m_axis_status_tvalid  (FFT overflow)
-      All three are OR-reduced into one MEI wire.  The driver ISR
-      distinguishes sources by reading DMASR registers.
+      Interrupt topology (v1.1 — AXI INTC, scalable multi-accelerator):
+        INTC channel 0 = AXI DMA mm2s_introut  (MM2S completion / error)
+        INTC channel 1 = AXI DMA s2mm_introut  (S2MM completion / error)
+        INTC channel 2 = xfft m_axis_status_tvalid  (FFT overflow)
+      The AXI INTC (PG099) OR-reduces pending channels into one MEI wire.
+      The driver ISR reads INTC ISR (offset 0x00) for definitive channel
+      identification, then acknowledges via INTC IAR (offset 0x0C).
 
-      Single-wire MEI limit: this design supports ONE accelerator.
-      Adding a second accelerator (e.g. matrix-multiply, AES) requires
-      replacing irq_concat with a Xilinx AXI INTC IP (PLIC-like) and
-      feeding its single output to MEI while mapping each accelerator's
-      interrupt to a distinct INTC channel.  See "interrupt-architecture"
-      in docs/production_readiness_review.md for the migration plan.
+      Expansion: add further accelerators by wiring their IRQs to INTC
+      channels 3, 4, … and widening C_NUM_INTR_INPUTS in the block design.
+      No firmware or DTS changes are required for the existing channels.

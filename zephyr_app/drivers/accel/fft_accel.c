@@ -9,19 +9,27 @@
  *   - RX BRAM (0x41004000, 16 KB): CPU word-reads output samples
  *   - AXI DMA (0x40000000):        streams TX BRAM → Xilinx xfft IP → RX BRAM
  *
- * The FFT core is the Xilinx xfft IP (PG109), pipelined streaming, 64-point,
+ * The FFT core is the Xilinx xfft IP (PG109), pipelined streaming, 4096-point,
  * 16-bit Q1.15 fixed-point.  It has no AXI4-Lite control interface; it is
  * configured at synthesis time (forward, scale all stages) via hardwired
  * constants in the block design.
  *
  * Data format: each sample is a 32-bit word {im[15:0], re[15:0]}, Q1.15.
  *
+ * Interrupt architecture (v1.1 — AXI INTC):
+ *   The AXI INTC (Xilinx PG099, 0x40010000) aggregates three IRQ sources into
+ *   one NEORV32 MEI line.  The ISR reads the INTC ISR register to identify
+ *   the active channel:
+ *     ch0 — AXI DMA MM2S complete/error
+ *     ch1 — AXI DMA S2MM complete/error  (output ready)
+ *     ch2 — xfft overflow (m_axis_status_tvalid)
+ *
  * Transfer sequence (fft_accel_transform):
  *   1. Acquire xfer_lock (prevents concurrent calls).
  *   2. Write N complex samples to TX BRAM via MMIO.
  *   3. Reset and re-arm both DMA channels.
  *   4. Start both DMA channels with IOC + ERR interrupts enabled.
- *   5. Wait for S2MM IOC interrupt (output committed to RX BRAM) or error.
+ *   5. Wait for S2MM IOC interrupt (INTC ch1) or DMA error (INTC ch0/ch1).
  *   6. Read N complex samples from RX BRAM via MMIO.
  *   7. Release xfer_lock.
  *
@@ -66,12 +74,31 @@ LOG_MODULE_REGISTER(fft_accel, CONFIG_FFT_ACCEL_LOG_LEVEL);
 /* Maximum polling iterations for software reset (~100 µs at 100 MHz) */
 #define DMA_RESET_POLL_MAX 100
 
+/* ── AXI INTC register offsets (Xilinx PG099) ───────────────────────────── */
+#define INTC_ISR  0x00U  /* Interrupt Status Register   (bit N = channel N pending) */
+#define INTC_IPR  0x04U  /* Interrupt Pending Register  (ISR & IER)                 */
+#define INTC_IER  0x08U  /* Interrupt Enable Register                               */
+#define INTC_IAR  0x0CU  /* Interrupt Acknowledge Register (w1c clears ISR bit)      */
+#define INTC_SIE  0x10U  /* Set Interrupt Enables                                   */
+#define INTC_CIE  0x14U  /* Clear Interrupt Enables                                 */
+#define INTC_IVR  0x18U  /* Interrupt Vector Register                               */
+#define INTC_MER  0x1CU  /* Master Enable Register (bit0=ME, bit1=HIE)              */
+
+/* INTC channel bit masks (must match ostomachion_bd.tcl channel wiring) */
+#define INTC_CH_MM2S  BIT(0)  /* AXI DMA MM2S complete/error  */
+#define INTC_CH_S2MM  BIT(1)  /* AXI DMA S2MM complete/error  */
+#define INTC_CH_OVFLO BIT(2)  /* xfft overflow                */
+
+#define INTC_MER_ME  BIT(0)   /* Master Enable                */
+#define INTC_MER_HIE BIT(1)   /* Hardware Interrupt Enable    */
+
 /* ── Driver config / data structs ──────────────────────────────────────── */
 
 struct fft_accel_config {
 	uintptr_t dma_base;     /* AXI DMA base address   */
 	uintptr_t tx_bram_base; /* TX BRAM base address   */
 	uintptr_t rx_bram_base; /* RX BRAM base address   */
+	uintptr_t intc_base;    /* AXI INTC base address  */
 	uint32_t  bram_size;    /* BRAM size in bytes     */
 	uint32_t  irq_num;      /* NEORV32 mext IRQ line  */
 };
@@ -96,6 +123,17 @@ static inline uint32_t dma_rd(const struct fft_accel_config *cfg, uint32_t off)
 	return sys_read32(cfg->dma_base + off);
 }
 
+static inline void intc_wr(const struct fft_accel_config *cfg,
+			    uint32_t off, uint32_t val)
+{
+	sys_write32(val, cfg->intc_base + off);
+}
+
+static inline uint32_t intc_rd(const struct fft_accel_config *cfg, uint32_t off)
+{
+	return sys_read32(cfg->intc_base + off);
+}
+
 /**
  * dma_reset_channel() — pulse software reset and poll until the bit clears.
  *
@@ -117,49 +155,61 @@ static void dma_reset_channel(const struct fft_accel_config *cfg, uint32_t cr_re
 
 /* ── IRQ handler ─────────────────────────────────────────────────────────── */
 
+/**
+ * fft_accel_isr() — AXI INTC-aware interrupt handler.
+ *
+ * Reads the INTC ISR register to determine which channels fired, handles
+ * each channel explicitly, then acknowledges via the INTC IAR register.
+ * This replaces the prior heuristic approach (inspecting DMA SR registers
+ * to guess the source) with definitive per-channel identification.
+ *
+ * INTC channel mapping (see ostomachion_bd.tcl):
+ *   ch0 (INTC_CH_MM2S)  — AXI DMA MM2S complete or error
+ *   ch1 (INTC_CH_S2MM)  — AXI DMA S2MM complete or error (triggers sem)
+ *   ch2 (INTC_CH_OVFLO) — xfft overflow (m_axis_status_tvalid pulse)
+ */
 static void fft_accel_isr(const struct device *dev)
 {
 	struct fft_accel_data *data = dev->data;
 	const struct fft_accel_config *cfg = dev->config;
 	bool give_sem = false;
 
-	uint32_t mm2s_sr = dma_rd(cfg, DMA_MM2S_DMASR);
-	uint32_t s2mm_sr = dma_rd(cfg, DMA_S2MM_DMASR);
+	/* Read INTC ISR: bit N is set if channel N has a pending interrupt */
+	uint32_t isr = intc_rd(cfg, INTC_ISR);
 
-	/* Acknowledge all active bits (write-1-to-clear) */
-	if (mm2s_sr & (DMA_SR_IOC_IRQ | DMA_SR_ERR_IRQ)) {
+	/* Acknowledge all pending channels immediately via IAR (write-1-to-clear).
+	 * Acknowledging before processing is safe for level-sensitive sources
+	 * because the DMA DMASR bits are self-latching until cleared separately. */
+	intc_wr(cfg, INTC_IAR, isr);
+
+	/* ── Channel 0: DMA MM2S (source data read complete or error) ────── */
+	if (isr & INTC_CH_MM2S) {
+		uint32_t mm2s_sr = dma_rd(cfg, DMA_MM2S_DMASR);
+		/* W1C: clear latched IRQ bits in DMASR */
 		dma_wr(cfg, DMA_MM2S_DMASR, mm2s_sr);
+		if (mm2s_sr & DMA_SR_ERR_IRQ) {
+			LOG_ERR("DMA MM2S error: DMASR=0x%08x", mm2s_sr);
+			data->last_error = -EIO;
+			give_sem = true;
+		}
 	}
-	if (s2mm_sr & (DMA_SR_IOC_IRQ | DMA_SR_ERR_IRQ)) {
+
+	/* ── Channel 1: DMA S2MM (output committed to RX BRAM, or error) ── */
+	if (isr & INTC_CH_S2MM) {
+		uint32_t s2mm_sr = dma_rd(cfg, DMA_S2MM_DMASR);
 		dma_wr(cfg, DMA_S2MM_DMASR, s2mm_sr);
+		if (s2mm_sr & DMA_SR_ERR_IRQ) {
+			LOG_ERR("DMA S2MM error: DMASR=0x%08x", s2mm_sr);
+			data->last_error = -EIO;
+			give_sem = true;
+		}
+		if (s2mm_sr & DMA_SR_IOC_IRQ) {
+			give_sem = true;  /* RX BRAM now contains valid output */
+		}
 	}
 
-	/* DMA errors: log, record, and unblock the caller immediately.
-	 * The S2MM IOC will never fire on an error path, so we must
-	 * release the semaphore here or fft_accel_transform would time out. */
-	if (mm2s_sr & DMA_SR_ERR_IRQ) {
-		LOG_ERR("DMA MM2S error: DMASR=0x%08x", mm2s_sr);
-		data->last_error = -EIO;
-		give_sem = true;
-	}
-	if (s2mm_sr & DMA_SR_ERR_IRQ) {
-		LOG_ERR("DMA S2MM error: DMASR=0x%08x", s2mm_sr);
-		data->last_error = -EIO;
-		give_sem = true;
-	}
-
-	/* S2MM IOC: output committed to RX BRAM — results are ready to read */
-	if (s2mm_sr & DMA_SR_IOC_IRQ) {
-		give_sem = true;
-	}
-
-	/* FFT overflow: the xfft m_axis_status_tvalid pulse is routed to
-	 * irq_concat/In2.  When the IRQ fires but neither DMA channel has
-	 * activity, it is an overflow event.  Record it; the caller can
-	 * query fft_accel_get_last_overflow() after fft_accel_transform(). */
-	if (!give_sem &&
-	    !(mm2s_sr & (DMA_SR_IOC_IRQ | DMA_SR_ERR_IRQ)) &&
-	    !(s2mm_sr & (DMA_SR_IOC_IRQ | DMA_SR_ERR_IRQ))) {
+	/* ── Channel 2: xfft overflow ───────────────────────────────────── */
+	if (isr & INTC_CH_OVFLO) {
 		data->last_overflow = true;
 		LOG_WRN("FFT overflow detected — output bins may be corrupted");
 	}
@@ -308,6 +358,7 @@ bool fft_accel_get_last_overflow(const struct device *dev)
 		.dma_base     = DT_INST_REG_ADDR_BY_NAME(inst, dma),		\
 		.tx_bram_base = DT_INST_REG_ADDR_BY_NAME(inst, tx_bram),	\
 		.rx_bram_base = DT_INST_REG_ADDR_BY_NAME(inst, rx_bram),	\
+		.intc_base    = DT_INST_REG_ADDR_BY_NAME(inst, intc),		\
 		.bram_size    = DT_INST_PROP(inst, bram_size),			\
 		.irq_num      = DT_INST_IRQN(inst),				\
 	};									\
@@ -320,12 +371,17 @@ bool fft_accel_get_last_overflow(const struct device *dev)
 		k_sem_init(&data->irq_sem, 0, 1);				\
 		k_mutex_init(&data->xfer_lock);					\
 									\
+		/* Initialise AXI INTC: enable channels 0,1,2 and master */	\
+		intc_wr(cfg, INTC_IER, INTC_CH_MM2S | INTC_CH_S2MM | INTC_CH_OVFLO); \
+		intc_wr(cfg, INTC_MER, INTC_MER_ME | INTC_MER_HIE);		\
+									\
 		IRQ_CONNECT(DT_INST_IRQN(inst), 0,				\
 			    fft_accel_isr, DEVICE_DT_INST_GET(inst), 0);	\
 		irq_enable(cfg->irq_num);					\
 									\
-		LOG_INF("FFT accelerator (xfft) initialised, DMA @ 0x%08x",	\
-			(unsigned)cfg->dma_base);				\
+		LOG_INF("FFT accelerator (xfft) initialised, "			\
+			"DMA @ 0x%08x, INTC @ 0x%08x",				\
+			(unsigned)cfg->dma_base, (unsigned)cfg->intc_base);	\
 		if (sizeof(CONFIG_OSTOMACHION_HW_BUILD_ID) > 1) {		\
 			LOG_INF("Expected HW build ID : %s",			\
 				CONFIG_OSTOMACHION_HW_BUILD_ID);		\

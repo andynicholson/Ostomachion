@@ -13,6 +13,10 @@
 //     monopolise the CPU.
 //   - The led_blink thread provides a visible heartbeat on real hardware once
 //     the tests have completed and the scheduler has idle time.
+//   - When CONFIG_WDT_NEORV32=y (FPGA target), the led_blink thread also feeds
+//     the hardware watchdog every 500 ms.  The WDT timeout is 5 s by default
+//     (configured in wdt_setup_fpga); if the LED thread hangs for more than
+//     5 s the system resets automatically.
 //
 // To add a new test suite: create tests/test_<peripheral>.cpp, register it
 // with ZTEST_SUITE, and add it to CMakeLists.txt target_sources().
@@ -21,6 +25,10 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
+
+#ifdef CONFIG_WDT_NEORV32
+#include <zephyr/drivers/watchdog.h>
+#endif
 
 #include "ostomachion/hal/gpio.hpp"
 
@@ -39,14 +47,58 @@ static int gpio_alive_init(void)
 }
 SYS_INIT(gpio_alive_init, APPLICATION, 0);
 
+#ifdef CONFIG_WDT_NEORV32
+// WDT channel ID returned by wdt_install_timeout(); stored for wdt_feed().
+static int g_wdt_channel_id = -1;
+
+// Initialise the hardware watchdog with a 5-second timeout.
+// Called from led_blink_thread before the blink loop starts so that the
+// WDT is only armed once the system has fully booted.
+static void wdt_setup_fpga(const struct device *wdt_dev)
+{
+    if (!device_is_ready(wdt_dev)) {
+        return;
+    }
+
+    static const struct wdt_timeout_cfg wdt_cfg = {
+        .window =
+            {
+                .min = 0U,
+                .max = 5000U, // 5 s timeout; LED thread feeds every 500 ms
+            },
+        .callback = NULL, // reset-only mode
+        .flags    = 0U,
+    };
+
+    g_wdt_channel_id = wdt_install_timeout(wdt_dev, &wdt_cfg);
+    if (g_wdt_channel_id < 0) {
+        return;
+    }
+
+    wdt_setup(wdt_dev, WDT_OPT_PAUSE_HALTED_BY_DBG);
+}
+#endif // CONFIG_WDT_NEORV32
+
 static void led_blink_thread(void *, void *, void *)
 {
     ostomachion::hal::GpioOutput led{GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios)};
+
+#ifdef CONFIG_WDT_NEORV32
+    const struct device *wdt_dev = DEVICE_DT_GET_OR_NULL(DT_NODELABEL(wdt0));
+    wdt_setup_fpga(wdt_dev);
+#endif
+
     while (true) {
         led.toggle();
         k_msleep(500);
+
+#ifdef CONFIG_WDT_NEORV32
+        if ((wdt_dev != NULL) && (g_wdt_channel_id >= 0)) {
+            wdt_feed(wdt_dev, g_wdt_channel_id);
+        }
+#endif
     }
 }
 
-K_THREAD_DEFINE(led_blink, 1024, led_blink_thread,
+K_THREAD_DEFINE(led_blink, 1536, led_blink_thread,
                 NULL, NULL, NULL, 7, 0, 0);

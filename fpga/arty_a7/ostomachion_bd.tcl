@@ -5,18 +5,31 @@
 ## Sourced from build.tcl after all RTL sources have been added to sources_1.
 ##
 ## Architecture: the BD contains ONLY Xilinx IP (clocking, reset, AXI fabric,
-## DMA, BRAM, xfft).  NEORV32 and the XBUS-to-AXI4-Lite bridge remain in RTL
-## (arty_a7_top.vhd).  The BD exposes:
+## DMA, BRAM, xfft, AXI INTC).  NEORV32 and the XBUS-to-AXI4-Lite bridge
+## remain in RTL (arty_a7_top.vhd).  The BD exposes:
 ##   s_axi_cpu      — AXI4-Lite slave input (from xbus_axi4lite_bridge master)
 ##   clk_o          — 100 MHz MMCM output (for neorv32_top and bridge)
 ##   periph_resetn_o— peripheral_aresetn (for neorv32_top rstn_i and bridge)
-##   mext_irq_o     — DMA interrupt aggregate (for neorv32_top mext_irq_i)
+##   mext_irq_o     — single IRQ from AXI INTC (for neorv32_top mext_irq_i)
+##
+## Interrupt topology (v1.1 — AXI INTC, scalable to multiple accelerators):
+##   axi_intc channel 0 ← AXI DMA mm2s_introut  (MM2S completion / error)
+##   axi_intc channel 1 ← AXI DMA s2mm_introut  (S2MM completion / error)
+##   axi_intc channel 2 ← xfft_0 overflow        (m_axis_status_tvalid)
+##   axi_intc IRQ output  → NEORV32 mext_irq_i   (single combined line)
+##
+## The AXI INTC (PG099) replaces the prior xlconcat OR-tree, enabling clean
+## per-channel disambiguation in the ISR (read INTC ISR, ACK via INTC IAR)
+## and straightforward expansion to additional accelerators without complex
+## heuristic detection in the driver.
+##
+## AXI INTC address: 0x40010000 (128 B AXI aperture — Vivado 2025.1 minimum)
 ##
 ## This avoids the long "create_bd_cell -type module -reference neorv32_top"
 ## elaboration step that was stalling Vivado batch mode.
 ##
 ## FFT is provided by the Xilinx xfft IP (PG109) — pipelined streaming,
-## 64-point, 16-bit fixed-point.
+## 4096-point, 16-bit fixed-point.
 ##
 ## Resulting block design name: ostomachion_bd
 ## BD wrapper: ostomachion_bd_wrapper (VHDL, auto-generated)
@@ -84,12 +97,13 @@ connect_bd_net [get_bd_pins clk_wiz_0/locked] \
 
 ## ── 4. AXI SmartConnect ─────────────────────────────────────────────────────
 ## 3 masters: CPU AXI slave port (S00), DMA MM2S (S01), DMA S2MM (S02)
-## 3 slaves:  AXI DMA ctrl (M00), TX BRAM ctrl (M01), RX BRAM ctrl (M02)
+## 4 slaves:  AXI DMA ctrl (M00), TX BRAM ctrl (M01), RX BRAM ctrl (M02),
+##            AXI INTC    (M03, 0x40010000)
 
 create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 axi_smc
 set_property -dict {
     CONFIG.NUM_SI {3}
-    CONFIG.NUM_MI {3}
+    CONFIG.NUM_MI {4}
 } [get_bd_cells axi_smc]
 
 ## ── 5. AXI DMA — simple/register-direct mode, no scatter-gather ────────────
@@ -182,31 +196,52 @@ connect_bd_intf_net [get_bd_intf_pins rx_bram_ctrl/BRAM_PORTA] \
 connect_bd_intf_net [get_bd_intf_pins rx_bram_ctrl/BRAM_PORTB] \
                     [get_bd_intf_pins rx_bram/BRAM_PORTB]
 
-## ── 8. Interrupt aggregation ─────────────────────────────────────────────
-## In0: mm2s_introut  (DMA MM2S completion / error)
-## In1: s2mm_introut  (DMA S2MM completion / error)
-## In2: xfft_0/m_axis_status_tvalid  (FFT overflow, one pulse per frame)
+## ── 8. AXI Interrupt Controller ───────────────────────────────────────────
+## Replaces the prior xlconcat OR-tree with a Xilinx AXI INTC (PG099).
+## This provides clean per-channel interrupt source identification via the
+## INTC ISR register, enabling scalable addition of future accelerators.
 ##
-## The driver ISR reads DMA SR registers to classify each interrupt.
-## When neither DMA channel shows activity, the event is an FFT overflow.
+## Channel mapping:
+##   channel 0 ← AXI DMA mm2s_introut  (MM2S completion / error)
+##   channel 1 ← AXI DMA s2mm_introut  (S2MM completion / error)
+##   channel 2 ← xfft_0 m_axis_status_tvalid (overflow, one pulse per frame)
 ##
-## Interrupt topology note: all three sources share the single NEORV32
-## Machine External Interrupt (MEI) line via this OR-reduction.  Adding a
-## second accelerator requires an AXI INTC (PLIC-style) in place of this
-## xlconcat — see interrupt-architecture in the production readiness plan.
+## IRQ output → mext_irq_o → NEORV32 mext_irq_i (single MEI line)
+##
+## INTC register map (PG099; low 32 B used, 128 B AXI decode for Vivado 2025+):
+##   0x00 ISR  Interrupt Status Register   (bit N = channel N pending)
+##   0x04 IPR  Interrupt Pending Register  (ISR & IER)
+##   0x08 IER  Interrupt Enable Register
+##   0x0C IAR  Interrupt Acknowledge Reg   (write 1 to clear ISR bit)
+##   0x1C MER  Master Enable Register      (bit0=ME, bit1=HIE)
+##
+## Driver init: IER=0x07 (enable ch0..2), MER=0x03 (ME=1, HIE=1)
+## Driver ISR:  read ISR, handle each bit, write IAR to acknowledge
+##
+## Vivado 2025.1+ axi_intc: C_NUM_INTR_INPUTS is read-only (inferred from the
+## width of `intr`); per-bit slice connections intr(0:0) are not valid.  Use
+## xlconcat to merge three 1-bit sources into intr[2:0] (same channel order).
 
-create_bd_cell -type ip -vlnv xilinx.com:ip:xlconcat:2.1 irq_concat
-set_property CONFIG.NUM_PORTS {3} [get_bd_cells irq_concat]
+create_bd_cell -type ip -vlnv xilinx.com:ip:xlconcat:2.1 irq_concat_intc
+set_property -dict {CONFIG.NUM_PORTS {3}} [get_bd_cells irq_concat_intc]
 
-connect_bd_net [get_bd_pins axi_dma_0/mm2s_introut]          \
-               [get_bd_pins irq_concat/In0]
-connect_bd_net [get_bd_pins axi_dma_0/s2mm_introut]          \
-               [get_bd_pins irq_concat/In1]
-connect_bd_net [get_bd_pins xfft_0/m_axis_status_tvalid]     \
-               [get_bd_pins irq_concat/In2]
+connect_bd_net [get_bd_pins axi_dma_0/mm2s_introut] \
+               [get_bd_pins irq_concat_intc/In0]
+connect_bd_net [get_bd_pins axi_dma_0/s2mm_introut] \
+               [get_bd_pins irq_concat_intc/In1]
+connect_bd_net [get_bd_pins xfft_0/m_axis_status_tvalid] \
+               [get_bd_pins irq_concat_intc/In2]
 
-## Always-ready: consume the status stream immediately.
-## The driver learns of overflow from the tvalid→IRQ pulse, not from tdata.
+create_bd_cell -type ip -vlnv xilinx.com:ip:axi_intc:4.1 axi_intc_0
+set_property -dict {
+    CONFIG.C_HAS_FAST     {0}
+    CONFIG.C_KIND_OF_INTR {0x00000000}
+} [get_bd_cells axi_intc_0]
+
+connect_bd_net [get_bd_pins irq_concat_intc/dout] [get_bd_pins axi_intc_0/intr]
+
+## Always-ready: consume the xfft status stream tdata immediately.
+## The INTC sees the tvalid pulse; no need to inspect tdata.
 connect_bd_net [get_bd_pins const_one/dout] \
                [get_bd_pins xfft_0/m_axis_status_tready]
 
@@ -229,6 +264,9 @@ connect_bd_intf_net [get_bd_intf_pins axi_smc/M01_AXI] \
 ## M02 → RX BRAM controller (0x41004000, 16 KB)
 connect_bd_intf_net [get_bd_intf_pins axi_smc/M02_AXI] \
                     [get_bd_intf_pins rx_bram_ctrl/S_AXI]
+## M03 → AXI INTC (0x40010000, 128 B)
+connect_bd_intf_net [get_bd_intf_pins axi_smc/M03_AXI] \
+                    [get_bd_intf_pins axi_intc_0/s_axi]
 
 ## ── 10. AXI-Stream: DMA ↔ xfft ──────────────────────────────────────────────
 ## DMA MM2S output → xfft input data stream
@@ -245,7 +283,7 @@ connect_bd_net [get_bd_pins const_one/dout] \
                [get_bd_pins xfft_0/s_axis_config_tvalid]
 
 ## xfft status stream: tready is tied high (see section 8 above).
-## tvalid is routed to irq_concat/In2 (see section 8 above).
+## tvalid is routed to irq_concat_intc/In2 → axi_intc intr[2] (see section 8).
 
 ## ── 11. Clock distribution ───────────────────────────────────────────────────
 set aclk [get_bd_pins clk_wiz_0/clk_out1]
@@ -261,6 +299,7 @@ foreach pin {
     tx_bram_ctrl/s_axi_aclk
     rx_bram_ctrl/s_axi_aclk
     xfft_0/aclk
+    axi_intc_0/s_axi_aclk
 } {
     connect_bd_net $aclk [get_bd_pins $pin]
 }
@@ -277,6 +316,7 @@ foreach pin {
     axi_dma_0/axi_resetn
     tx_bram_ctrl/s_axi_aresetn
     rx_bram_ctrl/s_axi_aresetn
+    axi_intc_0/s_axi_aresetn
 } {
     connect_bd_net $peripheral_rstn [get_bd_pins $pin]
 }
@@ -302,9 +342,10 @@ set_property CONFIG.ASSOCIATED_BUSIF {s_axi_cpu} [get_bd_ports clk_o]
 create_bd_port -dir O periph_resetn_o
 connect_bd_net [get_bd_ports periph_resetn_o] $peripheral_rstn
 
-## DMA interrupt output to RTL (neorv32_top mext_irq_i)
+## Single combined IRQ from AXI INTC to RTL (neorv32_top mext_irq_i)
+## The INTC irq output is a 1-bit signal; any pending channel asserts it.
 create_bd_port -dir O mext_irq_o
-connect_bd_net [get_bd_ports mext_irq_o] [get_bd_pins irq_concat/dout]
+connect_bd_net [get_bd_ports mext_irq_o] [get_bd_pins axi_intc_0/irq]
 
 ## AXI4-Lite slave input from RTL (xbus_axi4lite_bridge master output)
 create_bd_intf_port -mode Slave -vlnv xilinx.com:interface:aximm_rtl:1.0 s_axi_cpu
@@ -344,6 +385,12 @@ assign_bd_address \
     -offset 0x41004000 -range 0x00004000 \
     -target_address_space [get_bd_addr_spaces s_axi_cpu] \
     [get_bd_addr_segs rx_bram_ctrl/S_AXI/Mem0] -force
+
+## AXI INTC: 0x40010000, 128 B (Vivado 2025+ enforces min range; regs use low 32 B)
+assign_bd_address \
+    -offset 0x40010000 -range 0x00000080 \
+    -target_address_space [get_bd_addr_spaces s_axi_cpu] \
+    [get_bd_addr_segs axi_intc_0/S_AXI/Reg] -force
 
 assign_bd_address \
     -offset 0x41000000 -range 0x00004000 \

@@ -1,0 +1,44 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: Apache-2.0
+#
+# DTS binding for the NEORV32 Watchdog Timer (WDT).
+#
+# The NEORV32 WDT generates a system hardware reset when the 24-bit timeout
+# counter reaches the programmed threshold value.  The counter increments at
+# CLK/4096.  No interrupt is generated (reset only); this binding therefore
+# does not declare an 'interrupts' property.
+#
+# Password: write 0x709D1AB3 to the RESET register to feed the watchdog.
+#
+# Register map (from neorv32_wdt.h):
+#   0x00 CTRL   r/w  bit[0]=EN, bit[1]=LOCK, bit[2]=STRICT,
+#                    bits[4:3]=RCAUSE (r/-), bits[31:8]=TIMEOUT
+#   0x04 RESET  -/w  write WDT_PASSWORD (0x709D1AB3) to feed
+#
+# Example DTS node (in app_fpga.overlay):
+#
+#   wdt0: watchdog@fffb0000 {
+#       compatible = "neorv32,wdt";
+#       reg = <0xfffb0000 0x8>;
+#       clock-frequency = <100000000>;
+#       status = "okay";
+#   };
+
+description: NEORV32 hardware watchdog timer (reset-only)
+
+compatible: "neorv32,wdt"
+
+include: base.yaml
+
+properties:
+  reg:
+    required: true
+
+  clock-frequency:
+    type: int
+    required: true
+    description: |
+      System clock frequency in Hz.  Used to convert the requested timeout
+      in milliseconds to the 24-bit TIMEOUT counter value.
+      Timeout counter increments at clock-frequency / 4096.
+      Maximum timeout = 0xFFFFFF * 4096 / clock-frequency seconds.

@@ -9,5 +9,6 @@ zephyr_library()
 
 zephyr_library_sources_ifdef(CONFIG_SPI_NEORV32 spi/spi_neorv32.c)
 zephyr_library_sources_ifdef(CONFIG_I2C_NEORV32 i2c/i2c_neorv32.c)
+zephyr_library_sources_ifdef(CONFIG_WDT_NEORV32 wdt/wdt_neorv32.c)
 
 add_subdirectory_ifdef(CONFIG_FFT_ACCEL accel)

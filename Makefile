@@ -30,10 +30,11 @@ ZEPHYR_BUILD_HW_TEST = build_zephyr_hw_test
 ZEPHYR_BUILD_ACCEL   = build_zephyr_accel_test
 ZEPHYR_BUILD_SHELL   = build_zephyr_shell
 BIT_FILE             = build/arty_a7/ostomachion_arty_a7.bit
+MCS_FILE             = build/arty_a7/ostomachion_arty_a7.mcs
 
 .PHONY: all analyze simulate clean sw test-baremetal test-default test-zephyr zephyr \
-        zephyr-fpga fpga-synth fpga-program fpga-fw fpga-check test-hw \
-        test-accel-hw shell-hw
+        zephyr-fpga fpga-synth fpga-program fpga-flash fpga-fw fpga-check fpga-release \
+        test-hw test-accel-hw shell-hw
 
 # ---------- default flow (uses the image baked into neorv32/rtl/core) ------
 all: analyze simulate
@@ -120,7 +121,8 @@ zephyr-fpga:
 fpga-synth:
 	@echo "=== Running Vivado batch build ==="
 	mkdir -p build/arty_a7
-	$(VIVADO) -mode batch -source $(FPGA_DIR)/build.tcl | tee build/arty_a7/build.log
+	@command -v "$(VIVADO)" >/dev/null 2>&1 || { echo "ERROR: '$(VIVADO)' not found — install Vivado and add to PATH or set VIVADO=/path/to/vivado"; exit 1; }
+	bash -o pipefail -c '$(VIVADO) -mode batch -source $(FPGA_DIR)/build.tcl 2>&1 | tee build/arty_a7/build.log'
 	@echo "=== Bitstream: $(BIT_FILE) ==="
 
 ## Program the Arty A7 bitstream over JTAG using OpenOCD.
@@ -132,6 +134,18 @@ fpga-program: $(BIT_FILE)
 		-c "pld load 0 $(BIT_FILE)" \
 		-c shutdown
 
+## Write the bitstream to the on-board Quad-SPI flash for persistent boot.
+## After this operation the FPGA loads the design automatically on every
+## power-up without needing fpga-program.
+## Requires: fpga-synth must have been run (produces the .mcs file).
+## Requires: Vivado on PATH and JTAG cable connected.
+fpga-flash: $(MCS_FILE)
+	@echo "=== Programming Arty A7 Quad-SPI flash via Vivado ==="
+	$(VIVADO) -mode batch -source $(FPGA_DIR)/program_flash.tcl \
+		-tclargs $(MCS_FILE) \
+		| tee build/arty_a7/flash_program.log
+	@echo "=== Flash programming complete — FPGA will auto-boot on next power-up ==="
+
 ## Upload Zephyr firmware to the NEORV32 bootloader over UART.
 ## The NEORV32 BROM bootloader listens at 19200 baud on UART0 immediately
 ## after reset.  Use this target for firmware iteration without re-synthesising.
@@ -142,6 +156,13 @@ fpga-fw: zephyr-fpga
 		--port $(UART_DEVICE) \
 		$(ZEPHYR_BUILD_FPGA)/zephyr/zephyr.bin
 	@echo "=== Firmware upload complete ==="
+
+## Stage release certification artifacts into release/<VERSION>/.
+## Requires: fpga-synth must have completed successfully.
+## Usage: make fpga-release VERSION=v1.0.0
+fpga-release:
+	@echo "=== Staging release artifacts ==="
+	bash scripts/gen_release_artifacts.sh $(VERSION)
 
 ## Run post-build quality gates against an existing built project.
 ## Checks: timing closure (WNS/WHS >= 0), DRC errors, resource headroom.

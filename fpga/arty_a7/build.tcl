@@ -6,8 +6,13 @@
 ##     vivado -mode batch -source fpga/arty_a7/build.tcl -tclargs debug
 ##
 ## Produces:
-##   build/arty_a7/ostomachion_arty_a7.bit        (production)
+##   build/arty_a7/ostomachion_arty_a7.bit        (production bitstream)
+##   build/arty_a7/ostomachion_arty_a7.mcs        (Quad-SPI flash image)
 ##   build/arty_a7/ostomachion_arty_a7_debug.bit  (ILA debug, if -tclargs debug)
+##   build/arty_a7/build_id.txt                   (version + git hash)
+##   build/arty_a7/timing_summary.rpt             (setup/hold analysis)
+##   build/arty_a7/utilization.rpt                (LUT/BRAM/IO counts)
+##   build/arty_a7/drc.rpt                        (design rule violations)
 ##
 ## The script resolves paths relative to the project root, which is assumed
 ## to be two levels above this script's location:
@@ -208,15 +213,18 @@ if {[regexp {ERROR} $drc_str]} {
 puts "INFO: DRC clean — no errors found."
 
 # ---------------------------------------------------------------------------
-# Build ID — capture git hash + timestamp, embed in bitstream USER_CODE,
-# and write to build_id.txt for firmware/field version matching.
+# Build ID — capture git semver tag + hash + timestamp, embed in bitstream
+# USER_CODE, and write to build_id.txt for firmware/field version matching.
 # ---------------------------------------------------------------------------
-set git_hash "unknown"
+set git_hash    "unknown"
+set git_version "unknown"
 catch {
-    set git_hash [string trim [exec git -C $proj_root describe --always --dirty --abbrev=8]]
+    set git_hash    [string trim [exec git -C $proj_root describe --always --dirty --abbrev=8]]
+    # Try for an annotated/lightweight tag first (e.g. v1.0.0 or v1.0.0-3-gabc1234)
+    set git_version [string trim [exec git -C $proj_root describe --tags --always --dirty --abbrev=8]]
 }
 set build_ts  [clock format [clock seconds] -format {%Y%m%d_%H%M%S}]
-set build_id  "${git_hash}_${build_ts}"
+set build_id  "${git_version} (git: ${git_hash}, built: ${build_ts})"
 
 # USERID must be an 8-character hex string (32-bit).  Pad / truncate the hash.
 set id_clean [string map {- "" g ""} $git_hash]
@@ -230,6 +238,18 @@ puts "INFO: Build ID : $build_id"
 puts "INFO: USERID   : 0x${id_clean}  (readable via JTAG config status register)"
 
 # ---------------------------------------------------------------------------
+# SPI configuration mode — required for write_cfgmem (Quad-SPI flash)
+# The Arty A7-100T has a Micron N25Q128A (MT25QL128) on-board Quad-SPI flash.
+# Setting these properties before write_bitstream embeds them in the bitstream
+# so that the FPGA auto-configures from flash on every power cycle once
+# 'make fpga-flash' has been run.
+# ---------------------------------------------------------------------------
+set_property BITSTREAM.CONFIG.SPI_BUSWIDTH 4        [current_design]
+set_property BITSTREAM.CONFIG.SPI_FALL_EDGE Yes     [current_design]
+set_property BITSTREAM.CONFIG.CONFIGRATE 33         [current_design]
+set_property CONFIG_MODE SPIx4                      [current_design]
+
+# ---------------------------------------------------------------------------
 # Bitstream
 # ---------------------------------------------------------------------------
 puts "INFO: ── Bitstream ──────────────────────────────────────────────────────"
@@ -239,6 +259,23 @@ write_bitstream \
     "$build_dir/ostomachion_arty_a7.bit"
 
 puts "INFO: Production bitstream → $build_dir/ostomachion_arty_a7.bit"
+
+# ---------------------------------------------------------------------------
+# Quad-SPI flash image (MCS) — for 'make fpga-flash' persistent programming
+# Generates a Vivado-compatible MCS configuration memory file for the
+# Micron MT25QL128 / N25Q128A on-board Quad-SPI flash (16 MB, SPIx4).
+# Use with program_flash.tcl / 'make fpga-flash' to survive power cycles.
+# ---------------------------------------------------------------------------
+puts "INFO: ── Flash image (MCS) ───────────────────────────────────────────────"
+write_cfgmem \
+    -format mcs \
+    -interface SPIx4 \
+    -size 16 \
+    -loadbit "up 0x00000000 $build_dir/ostomachion_arty_a7.bit" \
+    -force \
+    "$build_dir/ostomachion_arty_a7.mcs"
+puts "INFO: Flash image → $build_dir/ostomachion_arty_a7.mcs"
+puts "INFO: Run 'make fpga-flash' to program the on-board Quad-SPI flash."
 
 # ---------------------------------------------------------------------------
 # Post-build quality gates (timing closure check)

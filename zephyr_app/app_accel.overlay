@@ -26,13 +26,14 @@
 	soc {
 		fft_accel: fft-accel@40000000 {
 			compatible = "ostomachion,fft-accel";
-			/* reg-names:  dma         tx_bram     rx_bram */
+			/* reg-names:  dma         tx_bram     rx_bram     intc        */
 			reg = <0x40000000 0x40>,
 			      <0x41000000 0x4000>,
-			      <0x41004000 0x4000>;
-			reg-names = "dma", "tx_bram", "rx_bram";
+			      <0x41004000 0x4000>,
+			      <0x40010000 0x80>;
+			reg-names = "dma", "tx_bram", "rx_bram", "intc";
 			bram-size = <16384>;
-			/* mext_irq_i → Machine External Interrupt (MEI) = INTC IRQ 11 */
+			/* AXI INTC IRQ output → NEORV32 MEI line (INTC IRQ 11) */
 			interrupts = <11>;
 			interrupt-parent = <&intc>;
 			status = "okay";
