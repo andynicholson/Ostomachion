@@ -1,0 +1,184 @@
+name: CI
+
+# Run on every pull request and on direct pushes to main / develop.
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+
+# Cancel in-progress runs when a new commit arrives on the same branch / PR.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── GHDL + Zephyr simulation ─────────────────────────────────────────────
+  #
+  # Builds the Zephyr application (no-FFT sim config), generates the VHDL
+  # memory image, and runs the full GHDL co-simulation.
+  # Passes when the testbench prints "PROJECT EXECUTION SUCCESSFUL".
+  #
+  sim:
+    name: GHDL + Zephyr simulation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            ghdl ghdl-llvm \
+            python3-pip \
+            cmake ninja-build \
+            gcc-riscv64-unknown-elf
+
+      - name: Install west
+        run: pip3 install west
+
+      - name: Set up Zephyr workspace
+        run: |
+          west init -l .
+          west update --narrow -o=--depth=1
+
+      - name: Install Zephyr Python requirements
+        run: pip3 install -r zephyr/scripts/requirements-base.txt
+
+      - name: Download Zephyr SDK (minimal RISC-V toolchain)
+        run: |
+          SDK_VER=1.0.0
+          SDK_MIN="zephyr-sdk-${SDK_VER}_linux-x86_64_minimal.tar.xz"
+          wget -q "https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${SDK_VER}/${SDK_MIN}"
+          tar -xf "${SDK_MIN}"
+          ./zephyr-sdk-${SDK_VER}/setup.sh -h -c
+          echo "ZEPHYR_SDK_INSTALL_DIR=$PWD/zephyr-sdk-${SDK_VER}" >> "$GITHUB_ENV"
+
+      - name: Build Zephyr (simulation config)
+        working-directory: zephyr_app
+        run: |
+          west build \
+            -b neorv32 \
+            -d ../build_zephyr_ci \
+            -- \
+            -DCONF_FILE=prj.conf \
+            -DOVERLAY_CONFIG="" 2>&1 | tee ../build_zephyr_ci.log
+          echo "Zephyr build finished."
+
+      - name: Run GHDL simulation
+        run: |
+          make SIM_TIME=400ms test-zephyr 2>&1 | tee ghdl_sim.log
+          # Fail the job if the expected success string is absent.
+          grep -q "PROJECT EXECUTION SUCCESSFUL" ghdl_sim.log || \
+            { echo "FAIL: simulation did not print PROJECT EXECUTION SUCCESSFUL"; exit 1; }
+
+      - name: Upload simulation log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghdl-sim-log
+          path: ghdl_sim.log
+
+  # ── Zephyr Twister (all configs) ─────────────────────────────────────────
+  #
+  # Runs `west twister` using the testcase.yaml in zephyr_app/tests/.
+  # Does NOT require hardware; the neorv32 sim board is used where possible.
+  #
+  twister:
+    name: Twister test suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: sim   # only run if the basic sim passes
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            python3-pip cmake ninja-build gcc-riscv64-unknown-elf
+
+      - name: Install west
+        run: pip3 install west
+
+      - name: Set up Zephyr workspace
+        run: |
+          west init -l .
+          west update --narrow -o=--depth=1
+
+      - name: Install Zephyr Python requirements
+        run: pip3 install -r zephyr/scripts/requirements-base.txt
+
+      - name: Download Zephyr SDK (minimal)
+        run: |
+          SDK_VER=1.0.0
+          SDK_MIN="zephyr-sdk-${SDK_VER}_linux-x86_64_minimal.tar.xz"
+          wget -q "https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${SDK_VER}/${SDK_MIN}"
+          tar -xf "${SDK_MIN}"
+          ./zephyr-sdk-${SDK_VER}/setup.sh -h -c
+          echo "ZEPHYR_SDK_INSTALL_DIR=$PWD/zephyr-sdk-${SDK_VER}" >> "$GITHUB_ENV"
+
+      - name: Run Twister
+        run: |
+          west twister \
+            -T zephyr_app/tests \
+            --integration \
+            --inline-logs \
+            -v \
+            2>&1 | tee twister.log
+
+      - name: Upload Twister results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: twister-results
+          path: |
+            twister.log
+            twister-out/
+
+  # ── Vivado FPGA synthesis (self-hosted runner, optional) ─────────────────
+  #
+  # Requires a self-hosted runner with Vivado 2024.1+ and the label "vivado".
+  # Skipped on forks (no access to licensed tools) and when the runner is
+  # unavailable; does not block merging.
+  #
+  vivado-synth:
+    name: Vivado synthesis + timing closure
+    runs-on: [self-hosted, vivado]
+    if: |
+      github.repository_owner == 'ostomachion' &&
+      (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
+    timeout-minutes: 120
+    needs: sim
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Run Vivado build
+        run: make fpga-synth
+
+      - name: Run quality gate checks
+        run: make fpga-check
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vivado-artifacts
+          path: |
+            build/arty_a7/timing_summary.rpt
+            build/arty_a7/utilization.rpt
+            build/arty_a7/drc.rpt
+            build/arty_a7/build_id.txt
+            build/arty_a7/ostomachion_arty_a7.bit

@@ -79,7 +79,8 @@ struct fft_accel_config {
 struct fft_accel_data {
 	struct k_sem   irq_sem;
 	struct k_mutex xfer_lock;
-	int            last_error;  /* set by ISR on DMA error; read by transform */
+	int            last_error;    /* set by ISR on DMA error; read by transform */
+	bool           last_overflow; /* set by ISR when xfft ovflo fires; cleared at transform start */
 };
 
 /* ── Register accessors ─────────────────────────────────────────────────── */
@@ -152,6 +153,17 @@ static void fft_accel_isr(const struct device *dev)
 		give_sem = true;
 	}
 
+	/* FFT overflow: the xfft m_axis_status_tvalid pulse is routed to
+	 * irq_concat/In2.  When the IRQ fires but neither DMA channel has
+	 * activity, it is an overflow event.  Record it; the caller can
+	 * query fft_accel_get_last_overflow() after fft_accel_transform(). */
+	if (!give_sem &&
+	    !(mm2s_sr & (DMA_SR_IOC_IRQ | DMA_SR_ERR_IRQ)) &&
+	    !(s2mm_sr & (DMA_SR_IOC_IRQ | DMA_SR_ERR_IRQ))) {
+		data->last_overflow = true;
+		LOG_WRN("FFT overflow detected — output bins may be corrupted");
+	}
+
 	if (give_sem) {
 		k_sem_give(&data->irq_sem);
 	}
@@ -176,6 +188,10 @@ int fft_accel_transform(const struct device *dev,
 			struct fft_sample_t *out,
 			size_t n)
 {
+	if (!device_is_ready(dev)) {
+		return -ENODEV;
+	}
+
 	const struct fft_accel_config *cfg = dev->config;
 	struct fft_accel_data *data = dev->data;
 
@@ -191,7 +207,15 @@ int fft_accel_transform(const struct device *dev,
 
 	/* Serialise concurrent callers */
 	k_mutex_lock(&data->xfer_lock, K_FOREVER);
-	data->last_error = 0;
+	data->last_error    = 0;
+	data->last_overflow = false;
+
+	/* Discard any stale completion left by a previous timed-out transfer.
+	 * After k_sem_take returns -EAGAIN the DMA channels are reset, but a
+	 * late ISR may still call k_sem_give before the reset completes.
+	 * Resetting here (while holding xfer_lock) is safe and avoids the
+	 * next transfer reading a bogus immediate-complete. */
+	k_sem_reset(&data->irq_sem);
 
 	/* 1. Write input samples to TX BRAM */
 	for (size_t i = 0; i < n; i++) {
@@ -215,9 +239,9 @@ int fft_accel_transform(const struct device *dev,
 	dma_wr(cfg, DMA_S2MM_LENGTH, byte_len);
 
 	/* 5. Wait for S2MM IOC (output ready) or DMA error */
-	int ret = k_sem_take(&data->irq_sem, K_MSEC(100));
+	int ret = k_sem_take(&data->irq_sem, K_MSEC(CONFIG_FFT_ACCEL_TIMEOUT_MS));
 	if (ret != 0) {
-		LOG_ERR("FFT DMA timeout after 100 ms");
+		LOG_ERR("FFT DMA timeout after %d ms", CONFIG_FFT_ACCEL_TIMEOUT_MS);
 		/* Halt both channels to prevent a stale IRQ on the next call */
 		dma_reset_channel(cfg, DMA_MM2S_DMACR);
 		dma_reset_channel(cfg, DMA_S2MM_DMACR);
@@ -226,6 +250,11 @@ int fft_accel_transform(const struct device *dev,
 	}
 
 	int err = data->last_error;
+
+	if (data->last_overflow) {
+		LOG_WRN("FFT overflow occurred — results may be corrupted; "
+			"reduce input amplitude or enable scaling");
+	}
 
 	/* 6. Read output samples from RX BRAM (only on success) */
 	if (err == 0) {
@@ -238,6 +267,26 @@ int fft_accel_transform(const struct device *dev,
 
 	k_mutex_unlock(&data->xfer_lock);
 	return err;
+}
+
+/**
+ * fft_accel_get_last_overflow() — check whether the last transform overflowed.
+ *
+ * The xfft IP fires an interrupt on m_axis_status_tvalid when the
+ * fixed-point accumulator would have overflowed.  This function returns true
+ * if that event was recorded during the most recent fft_accel_transform() call.
+ * The flag is cleared at the start of every fft_accel_transform().
+ *
+ * @param dev  FFT accelerator device
+ * @return true if overflow was detected in the last transform, false otherwise
+ */
+bool fft_accel_get_last_overflow(const struct device *dev)
+{
+	if (!device_is_ready(dev)) {
+		return false;
+	}
+	const struct fft_accel_data *data = dev->data;
+	return data->last_overflow;
 }
 
 /* ── Device instantiation macros ─────────────────────────────────────────── */
@@ -274,6 +323,13 @@ int fft_accel_transform(const struct device *dev,
 									\
 		LOG_INF("FFT accelerator (xfft) initialised, DMA @ 0x%08x",	\
 			(unsigned)cfg->dma_base);				\
+		if (sizeof(CONFIG_OSTOMACHION_HW_BUILD_ID) > 1) {		\
+			LOG_INF("Expected HW build ID : %s",			\
+				CONFIG_OSTOMACHION_HW_BUILD_ID);		\
+		} else {							\
+			LOG_DBG("HW build ID check disabled "			\
+				"(CONFIG_OSTOMACHION_HW_BUILD_ID not set)");	\
+		}								\
 		return 0;							\
 	}									\
 									\

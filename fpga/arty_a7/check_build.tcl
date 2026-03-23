@@ -59,7 +59,7 @@ puts "INFO: ============================================================"
 puts "INFO:  Timing (100 MHz constraint)"
 puts "INFO:    WNS (worst setup slack) : ${wns} ns"
 puts "INFO:    WHS (worst hold  slack) : ${whs} ns"
-puts "INFO:  Utilisation (XC7A35T)"
+puts "INFO:  Utilisation (XC7A100T)"
 puts "INFO:    Slice LUTs    : [lindex $lut_info  0] / [lindex $lut_info  1]  ([lindex $lut_info  2]%)"
 puts "INFO:    Slice Regs    : [lindex $reg_info  0] / [lindex $reg_info  1]  ([lindex $reg_info  2]%)"
 puts "INFO:    Block RAMs    : [lindex $bram_info 0] / [lindex $bram_info 1]  ([lindex $bram_info 2]%)"
@@ -104,6 +104,15 @@ if {$bram_pct ne "?" && $bram_pct > 95} {
     puts "WARN: BRAM utilisation ${bram_pct}% high (>85%)"
 } else {
     puts "PASS: BRAM utilisation ${bram_pct}% within safe threshold"
+}
+
+# Gate 5: DRC — any ERROR-level DRC violation blocks deployment
+set drc_str [report_drc -return_string -quiet]
+if {[regexp {ERROR} $drc_str]} {
+    puts "FAIL: DRC violations present — run report_drc for details"
+    set pass 0
+} else {
+    puts "PASS: DRC clean — no error-level violations"
 }
 
 puts "INFO: ============================================================"

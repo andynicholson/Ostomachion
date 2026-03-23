@@ -53,10 +53,10 @@ architecture rtl of arty_a7_top is
   -- ── BD outputs ───────────────────────────────────────────────────────────
   -- clk_o is STD_LOGIC (scalar clock from MMCM)
   -- periph_resetn_o is STD_LOGIC_VECTOR(0 to 0) — proc_sys_reset bus output
-  -- mext_irq_o is STD_LOGIC_VECTOR(1 downto 0) — xlconcat of mm2s + s2mm IRQs
+  -- mext_irq_o is STD_LOGIC_VECTOR(2 downto 0) — xlconcat of mm2s + s2mm IRQs + xfft ovflo
   signal clk         : std_logic;
   signal periph_rstn : std_logic_vector(0 downto 0);
-  signal mext_irq    : std_logic_vector(1 downto 0);
+  signal mext_irq    : std_logic_vector(2 downto 0);
 
   -- ── NEORV32 scalar outputs (std_ulogic → converted to std_logic) ─────────
   signal uart0_txd_u : std_ulogic;
@@ -230,7 +230,7 @@ begin
       xbus_cyc_o  => xbus_cyc_u,
       xbus_ack_i  => std_ulogic(xbus_ack_l),
       xbus_err_i  => std_ulogic(xbus_err_l),
-      mext_irq_i  => std_ulogic(mext_irq(0) or mext_irq(1)),  -- OR mm2s+s2mm IRQs
+      mext_irq_i  => std_ulogic(mext_irq(0) or mext_irq(1) or mext_irq(2)),  -- OR mm2s+s2mm+ovflo
       uart0_txd_o => uart0_txd_u,
       uart0_rxd_i => std_ulogic(uart_rxd_in),
       uart0_rtsn_o => open,

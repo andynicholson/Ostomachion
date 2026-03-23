@@ -28,19 +28,37 @@ struct fft_sample_t {
  * @brief Run an N-point complex FFT on the hardware accelerator.
  *
  * Blocks until the DMA transfer and FFT computation are complete,
- * or until a 100 ms timeout elapses.
+ * or until CONFIG_FFT_ACCEL_TIMEOUT_MS elapses (default 100 ms).
  *
  * @param dev  Pointer to FFT accelerator device (from DT_NODELABEL).
  * @param in   Input samples, length @p n (Q1.15 complex).
  * @param out  Output buffer, length @p n.
  * @param n    Transform size.  Only 64 is supported by this hardware;
  *             any other value returns -EINVAL.
- * @return 0 on success, negative errno on failure.
+ * @return 0 on success, negative errno on failure:
+ *         -ENODEV   device is not ready (init failed or null pointer)
+ *         -EINVAL   @p n != 64
+ *         -ETIMEDOUT DMA did not complete within CONFIG_FFT_ACCEL_TIMEOUT_MS
+ *         -EIO      DMA reported an error
  */
 int fft_accel_transform(const struct device *dev,
 			const struct fft_sample_t *in,
 			struct fft_sample_t *out,
 			size_t n);
+
+/**
+ * @brief Check whether the last transform produced a fixed-point overflow.
+ *
+ * The xfft IP fires an interrupt on m_axis_status_tvalid when the scaled
+ * accumulator would have overflowed.  If this flag is true the output bins
+ * may contain corrupted values.  Reduce the input amplitude or re-examine
+ * the scaling schedule.  The flag is cleared at the start of each
+ * fft_accel_transform() call.
+ *
+ * @param dev  Pointer to FFT accelerator device.
+ * @return true if overflow was detected in the last transform, false otherwise.
+ */
+bool fft_accel_get_last_overflow(const struct device *dev);
 
 #ifdef __cplusplus
 }

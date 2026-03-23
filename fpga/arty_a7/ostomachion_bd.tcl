@@ -124,7 +124,10 @@ set_property -dict {
 ##   rounding_modes            — "truncation"
 ##   throttle_scheme           — "nonrealtime" (C_THROTTLE_SCHEME=1)
 ##   aclken                    — false
-##   ovflo                     — false (no BFP)
+##   ovflo                     — true: enables m_axis_status stream (bit 0 = overflow)
+##                                m_axis_status_tvalid fires once per frame on overflow.
+##                                It is routed to irq_concat/In2 so the driver ISR can
+##                                detect overflow without any additional AXI peripheral.
 
 create_bd_cell -type ip -vlnv xilinx.com:ip:xfft:9.1 xfft_0
 set_property -dict {
@@ -137,7 +140,7 @@ set_property -dict {
     CONFIG.rounding_modes         {truncation}
     CONFIG.throttle_scheme        {nonrealtime}
     CONFIG.aclken                 {false}
-    CONFIG.ovflo                  {false}
+    CONFIG.ovflo                  {true}
 } [get_bd_cells xfft_0]
 
 ## ── 7. Dual-port BRAM controllers + Block Memory Generators ─────────────────
@@ -177,15 +180,32 @@ connect_bd_intf_net [get_bd_intf_pins rx_bram_ctrl/BRAM_PORTB] \
                     [get_bd_intf_pins rx_bram/BRAM_PORTB]
 
 ## ── 8. Interrupt aggregation ─────────────────────────────────────────────
-## mm2s_introut and s2mm_introut → xlconcat → mext_irq_o port → neorv32_top
+## In0: mm2s_introut  (DMA MM2S completion / error)
+## In1: s2mm_introut  (DMA S2MM completion / error)
+## In2: xfft_0/m_axis_status_tvalid  (FFT overflow, one pulse per frame)
+##
+## The driver ISR reads DMA SR registers to classify each interrupt.
+## When neither DMA channel shows activity, the event is an FFT overflow.
+##
+## Interrupt topology note: all three sources share the single NEORV32
+## Machine External Interrupt (MEI) line via this OR-reduction.  Adding a
+## second accelerator requires an AXI INTC (PLIC-style) in place of this
+## xlconcat — see interrupt-architecture in the production readiness plan.
 
 create_bd_cell -type ip -vlnv xilinx.com:ip:xlconcat:2.1 irq_concat
-set_property CONFIG.NUM_PORTS {2} [get_bd_cells irq_concat]
+set_property CONFIG.NUM_PORTS {3} [get_bd_cells irq_concat]
 
-connect_bd_net [get_bd_pins axi_dma_0/mm2s_introut] \
+connect_bd_net [get_bd_pins axi_dma_0/mm2s_introut]          \
                [get_bd_pins irq_concat/In0]
-connect_bd_net [get_bd_pins axi_dma_0/s2mm_introut] \
+connect_bd_net [get_bd_pins axi_dma_0/s2mm_introut]          \
                [get_bd_pins irq_concat/In1]
+connect_bd_net [get_bd_pins xfft_0/m_axis_status_tvalid]     \
+               [get_bd_pins irq_concat/In2]
+
+## Always-ready: consume the status stream immediately.
+## The driver learns of overflow from the tvalid→IRQ pulse, not from tdata.
+connect_bd_net [get_bd_pins const_one/dout] \
+               [get_bd_pins xfft_0/m_axis_status_tready]
 
 ## ── 9. AXI interconnect wiring ──────────────────────────────────────────────
 
@@ -221,8 +241,8 @@ connect_bd_net [get_bd_pins const_fft_cfg/dout] \
 connect_bd_net [get_bd_pins const_one/dout] \
                [get_bd_pins xfft_0/s_axis_config_tvalid]
 
-## xfft status stream: not present when C_HAS_BFP=0 and scaling is fixed-schedule.
-## No m_axis_status port exists in this configuration; no connection needed.
+## xfft status stream: tready is tied high (see section 8 above).
+## tvalid is routed to irq_concat/In2 (see section 8 above).
 
 ## ── 11. Clock distribution ───────────────────────────────────────────────────
 set aclk [get_bd_pins clk_wiz_0/clk_out1]

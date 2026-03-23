@@ -7,6 +7,23 @@ rsource "i2c/Kconfig"
 rsource "accel/Kconfig"
 endmenu
 
+menu "Ostomachion platform"
+
+config OSTOMACHION_HW_BUILD_ID
+	string "Expected bitstream build ID string"
+	default ""
+	help
+	  Set this to the build ID string written to build/arty_a7/build_id.txt
+	  by the Vivado build (format: <git-hash>_<YYYYMMDD_HHMMSS>).
+	  At boot the FFT accelerator driver logs this value alongside a reminder
+	  to verify it against the programmed bitstream.  An empty string (the
+	  default) disables the check — suitable for development.
+
+	  Example (in your prj.conf):
+	    CONFIG_OSTOMACHION_HW_BUILD_ID="abc1234e_20260318_120000"
+
+endmenu
+
 menu "Ostomachion test configuration"
 
 config TEST_I2C_SLAVE_ADDR

@@ -1,0 +1,49 @@
+# west.yml — Ostomachion workspace manifest
+# Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+#
+# Pins the exact Zephyr SHA and SDK version used to build and validate the
+# Ostomachion FFT accelerator platform.  Run the following to initialise a
+# clean workspace:
+#
+#   west init -m <this-repo-url> --mr main ostomachion_ws
+#   cd ostomachion_ws
+#   west update
+#
+# The ostomachion application lives under:
+#   ostomachion_ws/ostomachion/zephyr_app/
+#
+# Tool prerequisites:
+#   - Zephyr SDK 1.0.0 installed to ~/zephyr-sdk-1.0.0
+#     https://github.com/zephyrproject-rtos/sdk-ng/releases/tag/v1.0.0
+#   - GHDL  ≥ 4.0 for simulation
+#   - Vivado 2024.1 (or later) for FPGA synthesis
+#
+# Zephyr snapshot used: v4.3.0-dev (post v4.3.0, SHA d465eac074fa)
+# SDK version: 1.0.0
+# Last verified: 2026-03-18
+
+manifest:
+  defaults:
+    remote: zephyrproject-rtos
+
+  remotes:
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+
+  projects:
+    - name: zephyr
+      remote: zephyrproject-rtos
+      revision: d465eac074fa26093888d4c34a3fb70efefb0604
+      path: zephyr
+      import:
+        # Pull in only the modules actually used by this application to keep
+        # the workspace small.  Add entries here if new peripherals require
+        # additional HAL modules.
+        name-allowlist:
+          - cmsis
+          - hal_riscv
+          - picolibc
+          - tinycrypt
+
+  self:
+    path: ostomachion

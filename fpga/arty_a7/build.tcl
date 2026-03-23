@@ -1,11 +1,24 @@
 ## Ostomachion — Vivado non-interactive build script
 ## Usage: vivado -mode batch -source fpga/arty_a7/build.tcl
+##   Normal production build:
+##     vivado -mode batch -source fpga/arty_a7/build.tcl
+##   Debug build with ILA probes:
+##     vivado -mode batch -source fpga/arty_a7/build.tcl -tclargs debug
 ##
-## Produces: build/arty_a7/ostomachion_arty_a7.bit
+## Produces:
+##   build/arty_a7/ostomachion_arty_a7.bit        (production)
+##   build/arty_a7/ostomachion_arty_a7_debug.bit  (ILA debug, if -tclargs debug)
 ##
 ## The script resolves paths relative to the project root, which is assumed
 ## to be two levels above this script's location:
 ##   fpga/arty_a7/build.tcl  →  project root = [file dirname [file dirname ...]]
+
+## Set DEBUG_BUILD=1 if "debug" is passed as the first Tcl argument.
+set DEBUG_BUILD 0
+if {[llength $argv] > 0 && [lindex $argv 0] eq "debug"} {
+    set DEBUG_BUILD 1
+    puts "INFO: ══ DEBUG BUILD — ILA probes will be inserted ══"
+}
 
 # ---------------------------------------------------------------------------
 # Resolve project root and output directory
@@ -31,58 +44,12 @@ set_property TARGET_LANGUAGE VHDL [current_project]
 
 # ---------------------------------------------------------------------------
 # Add NEORV32 core sources (library neorv32)
-# The file_list_soc.f lists all required files in dependency order.
+# Discovered by glob so the list stays correct when the submodule is updated.
+# neorv32_application_image.vhd carries the default empty image; in the FPGA
+# flow BOOT_MODE_SELECT=0 means the bootloader is used, so this is included.
 # ---------------------------------------------------------------------------
-set soc_files [list \
-    "$neorv32_rtl/neorv32_package.vhd"          \
-    "$neorv32_rtl/neorv32_sys.vhd"              \
-    "$neorv32_rtl/neorv32_fifo.vhd"             \
-    "$neorv32_rtl/neorv32_cpu_decompressor.vhd" \
-    "$neorv32_rtl/neorv32_cpu_frontend.vhd"     \
-    "$neorv32_rtl/neorv32_cpu_control.vhd"      \
-    "$neorv32_rtl/neorv32_cpu_counters.vhd"     \
-    "$neorv32_rtl/neorv32_cpu_regfile.vhd"      \
-    "$neorv32_rtl/neorv32_cpu_cp_shifter.vhd"   \
-    "$neorv32_rtl/neorv32_cpu_cp_muldiv.vhd"    \
-    "$neorv32_rtl/neorv32_cpu_cp_bitmanip.vhd"  \
-    "$neorv32_rtl/neorv32_cpu_cp_fpu.vhd"       \
-    "$neorv32_rtl/neorv32_cpu_cp_cfu.vhd"       \
-    "$neorv32_rtl/neorv32_cpu_cp_cond.vhd"      \
-    "$neorv32_rtl/neorv32_cpu_cp_crypto.vhd"    \
-    "$neorv32_rtl/neorv32_cpu_alu.vhd"          \
-    "$neorv32_rtl/neorv32_cpu_lsu.vhd"          \
-    "$neorv32_rtl/neorv32_cpu_pmp.vhd"          \
-    "$neorv32_rtl/neorv32_cpu.vhd"              \
-    "$neorv32_rtl/neorv32_cache.vhd"            \
-    "$neorv32_rtl/neorv32_bus.vhd"              \
-    "$neorv32_rtl/neorv32_dma.vhd"              \
-    "$neorv32_rtl/neorv32_application_image.vhd"\
-    "$neorv32_rtl/neorv32_imem.vhd"             \
-    "$neorv32_rtl/neorv32_dmem.vhd"             \
-    "$neorv32_rtl/neorv32_xbus.vhd"             \
-    "$neorv32_rtl/neorv32_bootloader_image.vhd" \
-    "$neorv32_rtl/neorv32_boot_rom.vhd"         \
-    "$neorv32_rtl/neorv32_cfs.vhd"              \
-    "$neorv32_rtl/neorv32_sdi.vhd"              \
-    "$neorv32_rtl/neorv32_gpio.vhd"             \
-    "$neorv32_rtl/neorv32_wdt.vhd"              \
-    "$neorv32_rtl/neorv32_clint.vhd"            \
-    "$neorv32_rtl/neorv32_uart.vhd"             \
-    "$neorv32_rtl/neorv32_spi.vhd"              \
-    "$neorv32_rtl/neorv32_twi.vhd"              \
-    "$neorv32_rtl/neorv32_twd.vhd"              \
-    "$neorv32_rtl/neorv32_pwm.vhd"              \
-    "$neorv32_rtl/neorv32_trng.vhd"             \
-    "$neorv32_rtl/neorv32_neoled.vhd"           \
-    "$neorv32_rtl/neorv32_gptmr.vhd"            \
-    "$neorv32_rtl/neorv32_onewire.vhd"          \
-    "$neorv32_rtl/neorv32_slink.vhd"            \
-    "$neorv32_rtl/neorv32_sysinfo.vhd"          \
-    "$neorv32_rtl/neorv32_debug_dtm.vhd"        \
-    "$neorv32_rtl/neorv32_debug_auth.vhd"       \
-    "$neorv32_rtl/neorv32_debug_dm.vhd"         \
-    "$neorv32_rtl/neorv32_top.vhd"              \
-]
+set soc_files [lsort [glob "$neorv32_rtl/*.vhd"]]
+puts "INFO: Found [llength $soc_files] NEORV32 core files in $neorv32_rtl"
 
 add_files -fileset sources_1 $soc_files
 foreach f $soc_files {
@@ -181,6 +148,42 @@ write_checkpoint -force "$build_dir/impl_final.dcp"
 puts "INFO: Checkpoint saved to $build_dir/impl_final.dcp"
 
 # ---------------------------------------------------------------------------
+# Optional ILA debug build
+# When DEBUG_BUILD=1 (pass -tclargs debug), insert ILA cores on key nets
+# and produce a separate debug bitstream.  The production bitstream is
+# written first so a failing debug insertion does not block deployment.
+# ---------------------------------------------------------------------------
+if {$DEBUG_BUILD} {
+    puts "INFO: ── ILA insertion (debug build) ────────────────────────────────"
+
+    ## Mark key nets for ILA capture.
+    ## AXI-Stream between AXI DMA MM2S output and xfft input
+    set mm2s_nets [get_nets -hierarchical -filter {NAME =~ *M_AXIS_MM2S*} -quiet]
+    ## AXI-Stream between xfft output and AXI DMA S2MM input
+    set s2mm_nets [get_nets -hierarchical -filter {NAME =~ *S_AXIS_S2MM*} -quiet]
+    ## DMA status register outputs (interrupt lines)
+    set irq_nets  [get_nets -hierarchical -filter {NAME =~ *introut*} -quiet]
+    ## xfft overflow status
+    set ovflo_nets [get_nets -hierarchical -filter {NAME =~ *m_axis_status*} -quiet]
+
+    foreach net [concat $mm2s_nets $s2mm_nets $irq_nets $ovflo_nets] {
+        set_property MARK_DEBUG true [get_nets $net]
+    }
+
+    ## Implement the ILA cores using the Vivado debug flow
+    implement_debug_core
+    write_debug_probes -force "$build_dir/debug_probes.ltx"
+    puts "INFO: Debug probes written to $build_dir/debug_probes.ltx"
+    puts "INFO: Load this .ltx file in Vivado Hardware Manager alongside the debug bitstream."
+
+    write_bitstream \
+        -force \
+        "$build_dir/ostomachion_arty_a7_debug.bit"
+    puts "INFO: Debug bitstream → $build_dir/ostomachion_arty_a7_debug.bit"
+    puts "INFO: Use with debug_probes.ltx in Vivado Hardware Manager."
+}
+
+# ---------------------------------------------------------------------------
 # Reports
 # ---------------------------------------------------------------------------
 report_timing_summary \
@@ -195,6 +198,37 @@ report_utilization \
 report_drc \
     -file "$build_dir/drc.rpt"
 
+# Gate on DRC errors: any ERROR-level violation must block bitstream deployment.
+set drc_str [report_drc -return_string -quiet]
+if {[regexp {ERROR} $drc_str]} {
+    puts "ERROR: DRC violations detected — see $build_dir/drc.rpt"
+    puts "ERROR: Resolve all DRC errors before deploying bitstream."
+    exit 1
+}
+puts "INFO: DRC clean — no errors found."
+
+# ---------------------------------------------------------------------------
+# Build ID — capture git hash + timestamp, embed in bitstream USER_CODE,
+# and write to build_id.txt for firmware/field version matching.
+# ---------------------------------------------------------------------------
+set git_hash "unknown"
+catch {
+    set git_hash [string trim [exec git -C $proj_root describe --always --dirty --abbrev=8]]
+}
+set build_ts  [clock format [clock seconds] -format {%Y%m%d_%H%M%S}]
+set build_id  "${git_hash}_${build_ts}"
+
+# USERID must be an 8-character hex string (32-bit).  Pad / truncate the hash.
+set id_clean [string map {- "" g ""} $git_hash]
+set id_clean [string range "${id_clean}00000000" 0 7]
+set_property BITSTREAM.CONFIG.USERID "0x${id_clean}" [current_design]
+
+set fid [open "$build_dir/build_id.txt" w]
+puts $fid $build_id
+close $fid
+puts "INFO: Build ID : $build_id"
+puts "INFO: USERID   : 0x${id_clean}  (readable via JTAG config status register)"
+
 # ---------------------------------------------------------------------------
 # Bitstream
 # ---------------------------------------------------------------------------
@@ -204,7 +238,7 @@ write_bitstream \
     -verbose \
     "$build_dir/ostomachion_arty_a7.bit"
 
-puts "INFO: Bitstream written to $build_dir/ostomachion_arty_a7.bit"
+puts "INFO: Production bitstream → $build_dir/ostomachion_arty_a7.bit"
 
 # ---------------------------------------------------------------------------
 # Post-build quality gates (timing closure check)

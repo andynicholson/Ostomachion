@@ -1,0 +1,45 @@
+# testcase.yaml — Twister test definitions for the Ostomachion test suite
+# Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+#
+# Usage:
+#   west twister -T zephyr_app/tests --integration
+#
+# The neorv32 simulator platform is used for build verification and basic
+# configuration coverage.  Hardware-in-the-loop tests require a physical
+# Arty A7 board connected to a self-hosted runner.
+
+tests:
+  # ── SPI / I2C / GPIO baseline (builds for neorv32 sim target) ───────────
+  ostomachion.peripherals.baseline:
+    platform_allow: neorv32
+    build_only: false
+    tags: [baseline, spi, i2c, gpio]
+    extra_configs:
+      - CONFIG_ZTEST=y
+      - CONFIG_ZTEST_NEW_API=y
+    harness: ztest
+    harness_config:
+      fixture: neorv32_sim
+
+  # ── FFT accelerator suite (compile-only on sim; runs on HW with bitstream)
+  ostomachion.fft.compile:
+    platform_allow: neorv32
+    build_only: true
+    tags: [fft, accelerator]
+    extra_configs:
+      - CONFIG_FFT_ACCEL=y
+      - CONFIG_ZTEST=y
+      - CONFIG_ZTEST_NEW_API=y
+    extra_args:
+      - OVERLAY_CONFIG=app_accel.overlay
+
+  # ── Shell / interactive firmware (compile-only on sim) ───────────────────
+  ostomachion.shell.compile:
+    platform_allow: neorv32
+    build_only: true
+    tags: [shell]
+    extra_configs:
+      - CONFIG_SHELL=y
+      - CONFIG_FFT_ACCEL=y
+    extra_args:
+      - OVERLAY_CONFIG=app_accel.overlay

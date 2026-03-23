@@ -66,9 +66,9 @@ architecture rtl of xbus_axi4lite_bridge is
   signal state : state_t := IDLE;
 
   -- Registered capture of XBUS request
-  signal adr_r  : std_logic_vector(31 downto 0);
-  signal dat_r  : std_logic_vector(31 downto 0);
-  signal sel_r  : std_logic_vector(3 downto 0);
+  signal adr_r  : std_logic_vector(31 downto 0) := (others => '0');
+  signal dat_r  : std_logic_vector(31 downto 0) := (others => '0');
+  signal sel_r  : std_logic_vector(3 downto 0)  := (others => '0');
 
   -- Internal valid/ready registers
   signal awvalid_r : std_logic := '0';
@@ -80,6 +80,11 @@ architecture rtl of xbus_axi4lite_bridge is
   signal ack_r     : std_logic := '0';
   signal err_r     : std_logic := '0';
   signal rdata_r   : std_logic_vector(31 downto 0) := (others => '0');
+
+  -- AXI response watchdog: 256-cycle counter; if a slave does not respond
+  -- within 256 cycles we abort with an XBUS error to avoid a CPU lockup.
+  signal timeout_cnt : unsigned(8 downto 0) := (others => '0');
+  constant TIMEOUT_LIMIT : unsigned(8 downto 0) := to_unsigned(256, 9);
 
 begin
 
@@ -106,17 +111,22 @@ begin
       err_r <= '0';
 
       if aresetn = '0' then
-        state     <= IDLE;
-        awvalid_r <= '0';
-        wvalid_r  <= '0';
-        arvalid_r <= '0';
-        bready_r  <= '0';
-        rready_r  <= '0';
+        state       <= IDLE;
+        awvalid_r   <= '0';
+        wvalid_r    <= '0';
+        arvalid_r   <= '0';
+        bready_r    <= '0';
+        rready_r    <= '0';
+        adr_r       <= (others => '0');
+        dat_r       <= (others => '0');
+        sel_r       <= (others => '0');
+        timeout_cnt <= (others => '0');
       else
         case state is
 
           -- ── IDLE: wait for a new XBUS cycle ───────────────────────────────
           when IDLE =>
+            timeout_cnt <= (others => '0');
             if xbus_stb_i = '1' and xbus_cyc_i = '1' then
               adr_r <= xbus_adr_i;
               dat_r <= xbus_dat_i;
@@ -143,42 +153,64 @@ begin
             -- Proceed once both have been accepted (or already clear)
             if (awvalid_r = '0' or m_axi_awready = '1') and
                (wvalid_r  = '0' or m_axi_wready  = '1') then
-              awvalid_r <= '0';
-              wvalid_r  <= '0';
-              bready_r  <= '1';
-              state     <= WR_RESP;
+              awvalid_r   <= '0';
+              wvalid_r    <= '0';
+              bready_r    <= '1';
+              timeout_cnt <= (others => '0');
+              state       <= WR_RESP;
             end if;
 
           -- ── WR_RESP: wait for B channel ───────────────────────────────────
+          -- Watchdog: abort after 256 cycles with no BVALID to prevent CPU hang.
           when WR_RESP =>
             if m_axi_bvalid = '1' then
-              bready_r <= '0';
-              ack_r    <= '1';
+              bready_r    <= '0';
+              timeout_cnt <= (others => '0');
+              ack_r       <= '1';
               -- Map SLVERR/DECERR to XBUS error
               if m_axi_bresp /= "00" then
                 err_r <= '1';
               end if;
               state <= IDLE;
+            elsif timeout_cnt = TIMEOUT_LIMIT then
+              bready_r    <= '0';
+              timeout_cnt <= (others => '0');
+              err_r       <= '1';
+              ack_r       <= '1';
+              state       <= IDLE;
+            else
+              timeout_cnt <= timeout_cnt + 1;
             end if;
 
           -- ── RD_ADDR: issue AR ─────────────────────────────────────────────
           when RD_ADDR =>
             if m_axi_arready = '1' then
-              arvalid_r <= '0';
-              rready_r  <= '1';
-              state     <= RD_DATA;
+              arvalid_r   <= '0';
+              rready_r    <= '1';
+              timeout_cnt <= (others => '0');
+              state       <= RD_DATA;
             end if;
 
           -- ── RD_DATA: wait for R channel ───────────────────────────────────
+          -- Watchdog: abort after 256 cycles with no RVALID to prevent CPU hang.
           when RD_DATA =>
             if m_axi_rvalid = '1' then
-              rready_r <= '0';
-              rdata_r  <= m_axi_rdata;
-              ack_r    <= '1';
+              rready_r    <= '0';
+              timeout_cnt <= (others => '0');
+              rdata_r     <= m_axi_rdata;
+              ack_r       <= '1';
               if m_axi_rresp /= "00" then
                 err_r <= '1';
               end if;
               state <= IDLE;
+            elsif timeout_cnt = TIMEOUT_LIMIT then
+              rready_r    <= '0';
+              timeout_cnt <= (others => '0');
+              err_r       <= '1';
+              ack_r       <= '1';
+              state       <= IDLE;
+            else
+              timeout_cnt <= timeout_cnt + 1;
             end if;
 
         end case;

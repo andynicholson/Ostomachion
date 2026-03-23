@@ -148,11 +148,12 @@ static int i2c_test_no_ack(void)
 	if (!device_is_ready(dev)) {
 		return -ENODEV;
 	}
-	/* Address 0x7F is typically unused — expect NACK */
+	/* Address 0x7F is reserved / typically unpopulated — expect slave NACK.
+	 * The driver reports -ENXIO on address-phase NACK (aligned with ZTEST
+	 * test_nack_nonexistent which asserts exactly -ENXIO). */
 	uint8_t buf = 0;
 	int rc = i2c_write(dev, &buf, 1, 0x7F);
-	/* NACK is expected: success means the bus handled it without hanging */
-	return (rc == -EIO || rc == -ENXIO) ? 0 : -EBADE;
+	return (rc == -ENXIO) ? 0 : -EBADE;
 }
 
 static int i2c_test_nack_recovery(void)
@@ -162,10 +163,15 @@ static int i2c_test_nack_recovery(void)
 		return -ENODEV;
 	}
 	uint8_t buf = 0;
-	/* Two consecutive NACKs — bus must recover between them */
-	i2c_write(dev, &buf, 1, 0x7F);
-	int rc = i2c_write(dev, &buf, 1, 0x7E);
-	return (rc == -EIO || rc == -ENXIO) ? 0 : -EBADE;
+	/* Five consecutive NACKs — matches ZTEST test_nack_repeated coverage.
+	 * Each attempt must return -ENXIO; the driver must not corrupt state. */
+	for (int i = 0; i < 5; i++) {
+		int rc = i2c_write(dev, &buf, 1, 0x7F);
+		if (rc != -ENXIO) {
+			return -EBADE;
+		}
+	}
+	return 0;
 }
 
 /* ── GPIO / LED tests ─────────────────────────────────────────────────────── */
@@ -253,12 +259,16 @@ static int fft_test_single_tone(void)
 		return -ENODEV;
 	}
 
+	/* Real cosine at bin 8: x[k] = 0.5 * cos(2π·8·k/64), im = 0.
+	 * Aligned with ZTEST test_single_tone which uses the same signal model.
+	 * A real cosine produces symmetric peaks at bin 8 AND its mirror bin 56
+	 * (= 64 - 8); the peak detector must accept either. */
 	static struct fft_sample_t in[64], out[64];
+	const int target = 8;
 	for (int k = 0; k < 64; k++) {
-		/* Use float: NEORV32 has no double-precision FPU */
-		float angle = 2.0f * 3.14159265f * 8.0f * k / 64.0f;
+		float angle = 2.0f * 3.14159265f * (float)target * k / 64.0f;
 		in[k].re = (int16_t)(16384.0f * cosf(angle));
-		in[k].im = (int16_t)(-16384.0f * sinf(angle));
+		in[k].im = 0;
 	}
 
 	int rc = fft_accel_transform(dev, in, out, 64);
@@ -275,7 +285,10 @@ static int fft_test_single_tone(void)
 			peak_bin = k;
 		}
 	}
-	return (peak_bin >= 7 && peak_bin <= 9) ? 0 : -EIO;
+	/* Accept bin 8 (±1) or its mirror bin 56 (±1) */
+	bool ok = ((peak_bin >= 7 && peak_bin <= 9) ||
+		   (peak_bin >= 55 && peak_bin <= 57));
+	return ok ? 0 : -EIO;
 }
 
 /* ── Suite runners ───────────────────────────────────────────────────────── */

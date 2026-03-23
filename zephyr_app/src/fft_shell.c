@@ -107,8 +107,12 @@ static int cmd_fft_dc(const struct shell *sh, size_t argc, char **argv)
 		return rc;
 	}
 
+#if CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC > 0
 	uint32_t us = (uint64_t)(t1 - t0) * 1000000 /
 		      CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC;
+#else
+	uint32_t us = 0;
+#endif
 
 	uint32_t bin0_mag = fft_magnitude(g_fft_out[0].re, g_fft_out[0].im);
 	uint32_t max_other = 0;
@@ -165,8 +169,12 @@ static int cmd_fft_sine(const struct shell *sh, size_t argc, char **argv)
 		return rc;
 	}
 
+#if CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC > 0
 	uint32_t us = (uint64_t)(t1 - t0) * 1000000 /
 		      CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC;
+#else
+	uint32_t us = 0;
+#endif
 
 	uint32_t peak_mag;
 	int peak_bin = fft_peak(g_fft_out, 64, &peak_mag);
@@ -216,8 +224,12 @@ static int cmd_fft_run(const struct shell *sh, size_t argc, char **argv)
 		return rc;
 	}
 
+#if CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC > 0
 	uint32_t us = (uint64_t)(t1 - t0) * 1000000 /
 		      CONFIG_SYS_CLOCK_HW_CYCLES_PER_SEC;
+#else
+	uint32_t us = 0;
+#endif
 
 	uint32_t peak_mag;
 	int peak_bin = fft_peak(g_fft_out, n, &peak_mag);

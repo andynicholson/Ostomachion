@@ -16,4 +16,13 @@ module = FFT_ACCEL
 module-str = fft_accel
 source "subsys/logging/Kconfig.template.log_config"
 
+config FFT_ACCEL_TIMEOUT_MS
+	int "DMA completion timeout (milliseconds)"
+	default 100
+	range 10 10000
+	help
+	  Maximum time to wait for the S2MM DMA interrupt-on-completion after
+	  a transfer is kicked off.  Increase on slow or heavily loaded systems.
+	  Decrease to detect stalls faster on real-time applications.
+
 endif # FFT_ACCEL

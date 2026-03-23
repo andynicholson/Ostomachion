@@ -10,25 +10,42 @@
 //   fft_sample_t in[64]{};
 //   fft_sample_t out[64]{};
 //   // fill in[] ...
-//   accel.transform(in, out, 64);
+//   int rc = accel.transform(in, out, 64);     // legacy typed interface
+//   // OR, via the generic Accel platform interface:
+//   ostomachion::FftOpDesc op{in, out, 64};
+//   rc = accel.submit(op);
+//   if (accel.last_overflow()) { /* reduce input amplitude */ }
 
 #pragma once
 
+#include <ostomachion/accel.hpp>
 #include <zephyr/device.h>
 #include <zephyr/drivers/misc/fft_accel.h>
-#include <cstdint>
 #include <cstddef>
 
 namespace ostomachion {
 
-/**
- * @brief C++20 RAII wrapper for the FFT hardware accelerator.
- *
- * Acquires the device at construction and provides a typed transform()
- * method.  The device is not released on destruction (it persists for
- * the system lifetime).
- */
-class FftAccel {
+// ── FftOpDesc ──────────────────────────────────────────────────────────────
+//
+// Operation descriptor for one N-point FFT.
+// Passed to FftAccel::submit() via the generic Accel interface.
+//
+struct FftOpDesc : AccelOpDesc {
+    const fft_sample_t *in;   ///< Input samples (Q1.15 complex), length n
+    fft_sample_t       *out;  ///< Output buffer, length n
+    size_t              n;    ///< Transform length (must be 64)
+
+    FftOpDesc(const fft_sample_t *in_, fft_sample_t *out_, size_t n_)
+        : AccelOpDesc{AccelOpDesc::Type::Fft}, in{in_}, out{out_}, n{n_} {}
+};
+
+// ── FftAccel ───────────────────────────────────────────────────────────────
+//
+// Concrete accelerator class for the Xilinx xfft hardware pipeline.
+// Inherits from Accel so it can be stored as ostomachion::Accel& in a
+// platform-wide accelerator table without knowing the concrete type.
+//
+class FftAccel : public Accel {
 public:
     explicit FftAccel(const struct device *dev) : dev_{dev}
     {
@@ -37,18 +54,46 @@ public:
         }
     }
 
-    /* Non-copyable, non-movable: copying would silently alias the device
-     * pointer with no shared access control, leading to concurrent-use bugs. */
-    FftAccel(const FftAccel &)            = delete;
-    FftAccel &operator=(const FftAccel &) = delete;
-    FftAccel(FftAccel &&)                 = delete;
-    FftAccel &operator=(FftAccel &&)      = delete;
-
     /** @return true if the underlying device is ready */
-    [[nodiscard]] bool ready() const noexcept { return dev_ != nullptr; }
+    [[nodiscard]] bool ready() const noexcept override { return dev_ != nullptr; }
 
     /**
-     * @brief Run a complex FFT on the hardware.
+     * @brief Submit an FftOpDesc operation and wait for completion.
+     *
+     * @p op must be an FftOpDesc; passing any other AccelOpDesc type
+     * returns -EINVAL.
+     *
+     * @param op  FftOpDesc carrying in/out buffers and transform length.
+     * @return 0 on success, negative errno on failure.
+     */
+    [[nodiscard]] int submit(const AccelOpDesc &op) noexcept override
+    {
+        if (!ready()) {
+            return -ENODEV;
+        }
+        /* Type discrimination without RTTI (Zephyr builds use -fno-rtti).
+         * Only FftOpDesc (type_id == Type::Fft) is accepted. */
+        if (op.type_id != AccelOpDesc::Type::Fft) {
+            return -EINVAL;
+        }
+        const auto &fop = static_cast<const FftOpDesc &>(op);
+        return fft_accel_transform(dev_, fop.in, fop.out, fop.n);
+    }
+
+    /**
+     * @brief Return true if the last submit() detected xfft fixed-point overflow.
+     *
+     * The overflow flag is set by the ISR and cleared at the start of each
+     * fft_accel_transform() call.  Check this after submit() returns 0 to
+     * detect silent magnitude corruption.
+     */
+    [[nodiscard]] bool last_overflow() const noexcept override
+    {
+        return dev_ != nullptr && fft_accel_get_last_overflow(dev_);
+    }
+
+    /**
+     * @brief Run a complex FFT on the hardware (typed convenience interface).
      *
      * Not thread-safe: concurrent calls from multiple threads are serialised
      * by an internal mutex in the driver, but callers should avoid sharing
@@ -59,9 +104,9 @@ public:
      * @param n    Transform length (must be 64).
      * @return 0 on success, negative errno on failure.
      */
-    int transform(const fft_sample_t *in,
-                  fft_sample_t       *out,
-                  size_t              n) const noexcept
+    [[nodiscard]] int transform(const fft_sample_t *in,
+                                fft_sample_t       *out,
+                                size_t              n) const noexcept
     {
         if (!ready()) {
             return -ENODEV;

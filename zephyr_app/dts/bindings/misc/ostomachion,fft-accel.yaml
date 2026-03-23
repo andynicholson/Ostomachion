@@ -42,5 +42,17 @@ properties:
     required: true
     description: |
       Machine External Interrupt (MEI), IRQ 11 on the riscv,cpu-intc (&intc).
-      The DMA mm2s_introut and s2mm_introut are aggregated via xlconcat into
-      a single mext_irq_i line driving NEORV32's MEI input.
+
+      Interrupt topology (v1.0 — single-accelerator platform):
+        irq_concat/In0 = AXI DMA mm2s_introut  (MM2S completion / error)
+        irq_concat/In1 = AXI DMA s2mm_introut  (S2MM completion / error)
+        irq_concat/In2 = xfft m_axis_status_tvalid  (FFT overflow)
+      All three are OR-reduced into one MEI wire.  The driver ISR
+      distinguishes sources by reading DMASR registers.
+
+      Single-wire MEI limit: this design supports ONE accelerator.
+      Adding a second accelerator (e.g. matrix-multiply, AES) requires
+      replacing irq_concat with a Xilinx AXI INTC IP (PLIC-like) and
+      feeding its single output to MEI while mapping each accelerator's
+      interrupt to a distinct INTC channel.  See "interrupt-architecture"
+      in docs/production_readiness_review.md for the migration plan.

@@ -10,15 +10,18 @@ project(ostomachion VERSION 0.1.0 LANGUAGES C CXX ASM)
 
 target_include_directories(app PRIVATE include)
 
-target_sources(app PRIVATE
-    src/main.cpp
+target_sources(app PRIVATE src/main.cpp)
+
+# ZTest suites — only compiled when ZTEST is enabled
+if(CONFIG_ZTEST)
+  target_sources(app PRIVATE
     tests/test_spi.cpp
     tests/test_i2c.cpp
     tests/test_gpio.cpp
-)
-
-if(CONFIG_FFT_ACCEL)
-  target_sources(app PRIVATE tests/test_fft_accel.cpp)
+  )
+  if(CONFIG_FFT_ACCEL)
+    target_sources(app PRIVATE tests/test_fft_accel.cpp)
+  endif()
 endif()
 
 if(CONFIG_SHELL)
