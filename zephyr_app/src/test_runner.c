@@ -295,6 +295,8 @@ static int fft_test_single_tone(void)
 	return ok ? 0 : -EIO;
 }
 
+#endif /* CONFIG_FFT_ACCEL */
+
 /* ── Suite runners ───────────────────────────────────────────────────────── */
 
 static void run_spi(const struct shell *sh, struct test_result *r)
@@ -319,13 +321,13 @@ static void run_gpio(const struct shell *sh, struct test_result *r)
 	shell_print(sh, "[TEST] gpio: %d passed, %d failed", r->passed, r->failed);
 }
 
+#if defined(CONFIG_FFT_ACCEL)
 static void run_fft(const struct shell *sh, struct test_result *r)
 {
 	TEST_RUN(sh, r, "fft_dc_response",   fft_test_dc_response());
 	TEST_RUN(sh, r, "fft_single_tone",   fft_test_single_tone());
 	shell_print(sh, "[TEST] fft: %d passed, %d failed", r->passed, r->failed);
 }
-
 #endif /* CONFIG_FFT_ACCEL */
 
 /* ── Shell command handlers ──────────────────────────────────────────────── */

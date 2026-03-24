@@ -1,12 +1,22 @@
-# Ostomachion
+<p align="center">
+  <img src="docs/img/logo.png" width="200" alt="Ostomachion logo"/>
+</p>
 
-**A NEORV32 RISC-V Processor + Zephyr RTOS project + custom RTL accelerator pipeline -- targeted to modern C++20 and FPGAs.**
+<h1 align="center">Ostomachion</h1>
 
-https://github.com/stnolting/neorv32 |  https://www.zephyrproject.org/
+<p align="center">
+  <b>NEORV32 RISC-V Processor &middot; Zephyr RTOS &middot; Custom RTL Accelerator Pipeline</b><br/>
+  <i>Targeted to modern C++20 and FPGAs</i>
+</p>
+
+<p align="center">
+  <a href="https://github.com/stnolting/neorv32">NEORV32</a> &middot;
+  <a href="https://www.zephyrproject.org/">Zephyr Project</a>
+</p>
 
 ---
 
-## What is Ostomachion?
+## 🧩 What is Ostomachion?
 
 Ostomachion is Archimedes' dissection puzzle — a grid of fourteen geometric
 pieces that fit together in hundreds of distinct ways.  The name captures the
@@ -22,7 +32,7 @@ without disturbing what already works.
 
 ---
 
-## Architecture
+## 🏗️ Architecture
 
 ```
   ┌──────────────────────────────────────────────────────────────────┐
@@ -32,7 +42,7 @@ without disturbing what already works.
   └────────────────────────┬─────────────────────────────────────────┘
                            │  ostomachion::hal::SpiDevice
                            │  ostomachion::hal::I2cBus
-                           │  ostomachion::hal::GpioOutput
+                           │  ostomachion::hal::GpioOutput / GpioInput
                            │  ostomachion::FftAccel   (: Accel)
   ┌────────────────────────▼─────────────────────────────────────────┐
   │  C++20 HAL  (zephyr_app/include/ostomachion/)                    │
@@ -77,7 +87,7 @@ without disturbing what already works.
 
 ---
 
-## Repository layout
+## 📂 Repository layout
 
 ```
 .
@@ -122,10 +132,9 @@ without disturbing what already works.
     │   ├── ostomachion/
     │   │   ├── accel.hpp             # Generic Accel / AccelOpDesc base (RTTI-free)
     │   │   └── hal/
-    │   │       ├── gpio.hpp          # GpioOutput
+    │   │       ├── gpio.hpp          # GpioOutput + GpioInput
     │   │       ├── spi.hpp           # SpiDevice (std::span API)
     │   │       ├── i2c.hpp           # I2cBus   (std::span API)
-    │   │       ├── gpio_input.hpp   # GpioInput (get / is_active)
     │   │       └── fft_accel.hpp     # FftAccel (: Accel, C++20 RAII wrapper)
     │   └── zephyr/drivers/misc/
     │       └── fft_accel.h           # Public C API: fft_accel_transform(), _get_last_overflow()
@@ -162,7 +171,7 @@ without disturbing what already works.
 
 ---
 
-## Peripheral map
+## 🗺️ Peripheral map
 
 | NEORV32 Generic    | Simulation | Arty A7-100T | MMIO Base    | IRQ             | Zephyr driver            | DT node      |
 |--------------------|------------|--------------|--------------|-----------------|--------------------------|--------------|
@@ -190,22 +199,27 @@ See [Interrupt architecture](#interrupt-architecture) for the multi-accelerator 
 
 ---
 
-## HAL API overview
+## 🔌 HAL API overview
 
 All HAL classes live in `namespace ostomachion` and are header-only.  They are
 zero-overhead wrappers: the compiler sees through them as easily as the
 underlying C calls.
 
-### `GpioOutput`  (`include/ostomachion/hal/gpio.hpp`)
+### `GpioOutput` / `GpioInput`  (`include/ostomachion/hal/gpio.hpp`)
 
 ```cpp
 ostomachion::hal::GpioOutput led{GPIO_DT_SPEC_GET(DT_ALIAS(led0), gpios)};
 led.set(true);   // drive high
 led.toggle();    // toggle
+
+ostomachion::hal::GpioInput btn{GPIO_DT_SPEC_GET(DT_ALIAS(sw0), gpios)};
+bool level  = btn.get();        // raw logical pin level
+bool active = btn.is_active();  // true when pin is in its DTS-defined active state
 ```
 
-Panics at construction if `gpio_pin_configure_dt` fails — a misconfigured
-GPIO is an unrecoverable hardware error.
+Both classes panic at construction if `gpio_pin_configure_dt` fails — a
+misconfigured pin is an unrecoverable hardware error.  `GpioInput` is
+non-copyable to prevent aliasing of the underlying `gpio_dt_spec`.
 
 ### `SpiDevice`  (`include/ostomachion/hal/spi.hpp`)
 
@@ -297,7 +311,7 @@ driver serialises concurrent callers via a mutex.
 
 ---
 
-## Accelerator abstraction
+## ⚡ Accelerator abstraction
 
 `include/ostomachion/accel.hpp` defines the generic platform interface that
 every hardware accelerator exposes:
@@ -337,7 +351,7 @@ Adding a new accelerator type (e.g. matrix multiply):
 
 ---
 
-## Memory model
+## 🧠 Memory model
 
 **There is no heap.**  `CONFIG_HEAP_MEM_POOL_SIZE = 0`.  Any call to `malloc()`
 or `operator new` returns `NULL` / fails immediately.  This is intentional.
@@ -363,7 +377,7 @@ All memory is **statically allocated at compile time**:
 
 ---
 
-## C++20 in an embedded context
+## 🛠️ C++20 in an embedded context
 
 The Zephyr build compiles with `-nostdinc++` — the compiler does **not** search
 GCC's standard C++ headers (`libstdc++`, `libc++`).  Zephyr instead provides a
@@ -398,7 +412,7 @@ Zephyr include chain via `<zephyr/device.h>` rather than `<cerrno>`.
 
 ---
 
-## Continuous integration
+## 🔄 Continuous integration
 
 `.github/workflows/ci.yml` defines five jobs, all triggered on pull requests
 and pushes to `main` / `develop`:
@@ -419,9 +433,9 @@ builds across all developer machines and CI agents.
 
 ---
 
-## Testing
+## 🧪 Testing
 
-### Running the Zephyr ZTEST suite (simulation)
+### 🏃 Running the Zephyr ZTEST suite (simulation)
 
 ```bash
 source ~/.zephyr-venv/bin/activate
@@ -454,7 +468,7 @@ PROJECT EXECUTION SUCCESSFUL
 The `PROJECT EXECUTION SUCCESSFUL` / `FAILED` line is what CI tools
 (including Zephyr's `twister` runner) parse to determine pass/fail.
 
-### How the GHDL testbench validates each suite
+### 🔍 How the GHDL testbench validates each suite
 
 **SPI** (`sim/neorv32_tb.vhd`): MOSI is wired directly to MISO.  Every
 transmitted byte is echoed back unchanged.  The SPI bus monitor logs each
@@ -469,7 +483,7 @@ is modelled with resolved `std_logic` (`'0'` wins; released lines are `'1'`).
 GPIO toggle count is below a threshold at 390 ms of simulated time.  This
 catches hangs where the system boots but never reaches the LED blink loop.
 
-### Bare-metal smoke test
+### 💨 Bare-metal smoke test
 
 ```bash
 make test-baremetal
@@ -479,7 +493,7 @@ Builds a minimal C firmware that toggles GPIO pin 0 and prints a banner
 over UART0 in sim-mode (characters go directly to the GHDL console,
 bypassing the baud-rate generator).
 
-### West Twister
+### 🌀 West Twister
 
 `zephyr_app/tests/testcase.yaml` defines the full test matrix for
 `west twister`:
@@ -498,16 +512,16 @@ Three test configurations are defined:
 
 ---
 
-## Getting started
+## 🚀 Getting started
 
-### System packages
+### 📦 System packages
 
 ```bash
 sudo apt install ghdl ghdl-llvm gtkwave gcc-riscv64-unknown-elf \
                  ninja-build device-tree-compiler cmake python3-venv
 ```
 
-### Zephyr SDK
+### ⚙️ Zephyr SDK
 
 ```bash
 cd ~
@@ -516,7 +530,7 @@ tar xf zephyr-sdk-1.0.0_linux-x86_64_minimal.tar.xz
 cd zephyr-sdk-1.0.0 && ./setup.sh
 ```
 
-### Zephyr workspace (recommended — uses `west.yml` manifest)
+### 🌐 Zephyr workspace (recommended — uses `west.yml` manifest)
 
 ```bash
 python3 -m venv ~/.zephyr-venv
@@ -531,7 +545,7 @@ This clones Zephyr at the pinned SHA (`d465eac074fa`) and the four required
 modules (cmsis, hal_riscv, picolibc, tinycrypt), matching the environment
 used for CI and hardware validation.
 
-### One-shot shell setup (local Zephyr tree + venv)
+### 💻 One-shot shell setup (local Zephyr tree + venv)
 
 If you already keep Zephyr under `~/src/zephyrproject/zephyr` and use
 `~/.zephyr-venv` (as in the simulation example above), source the helper
@@ -552,9 +566,9 @@ Override any of these in the environment before sourcing if your layout differs.
 
 ---
 
-## Extending the platform
+## 🔧 Extending the platform
 
-### Adding a new NEORV32 peripheral (SPI, I2C, TRNG, PWM, …)
+### 🔩 Adding a new NEORV32 peripheral (SPI, I2C, TRNG, PWM, …)
 
 1. **Enable in RTL** — set the corresponding `IO_*_EN` generic in
    `rtl/neorv32_wrapper.vhd`.  Expose the I/O ports and connect them.
@@ -580,7 +594,7 @@ Override any of these in the environment before sourcing if your layout differs.
    to `CMakeLists.txt` inside `if(CONFIG_ZTEST)`, and add a Twister entry
    to `testcase.yaml`.
 
-### Adding a new hardware accelerator
+### ➕ Adding a new hardware accelerator
 
 1. **RTL / IP** — add the IP to `ostomachion_bd.tcl`.  Connect AXI4-Lite
    control, AXI4-Stream data, and IRQ lines.  Update `arty_a7_top.vhd` if
@@ -603,7 +617,7 @@ Override any of these in the environment before sourcing if your layout differs.
 
 ---
 
-## Makefile targets
+## 🎯 Makefile targets
 
 | Target                | Description                                                       |
 |-----------------------|-------------------------------------------------------------------|
@@ -648,7 +662,7 @@ Load the `.bit` via JTAG and open the `.ltx` in Vivado Hardware Manager.
 
 ---
 
-## Design decisions
+## 📐 Design decisions
 
 **Two build targets, one codebase.**
 The project is designed for deployment on real FPGA hardware (Arty A7) with
@@ -709,7 +723,7 @@ a full discussion.  The C++ HAL uses `virtual` dispatch (vtable) but never
 `xbus_err_o` is asserted and the FSM returns to `IDLE`, preventing
 indefinite CPU bus hangs from misconfigured peripherals.
 
-### Interrupt architecture
+### ⚡ Interrupt architecture
 
 The current design uses a **single NEORV32 Machine External Interrupt (MEI)**
 line for all AXI fabric interrupts, aggregated via the AXI INTC (at 0x40010000):
@@ -738,7 +752,7 @@ to `ostomachion_bd.tcl` and the Zephyr driver ISR.
 
 ---
 
-## Known limitations and roadmap
+## 🗺️ Known limitations and roadmap
 
 | Item | Status |
 |------|--------|
@@ -759,7 +773,7 @@ to `ostomachion_bd.tcl` and the Zephyr driver ISR.
 | FFT driver thread safety | **Design constraint** — callers serialised by mutex; single `FftAccel` instance per system recommended |
 | FFT GHDL simulation | **Not supported** — Xilinx encrypted IP is not simulatable in GHDL |
 | AXI INTC for multi-accelerator IRQ | **Done** — `xlconcat` replaced with `axi_intc` in `ostomachion_bd.tcl`; per-channel ISR in `fft_accel.c`; scalable to further accelerators |
-| `GpioInput` HAL class | **Done** — `hal/gpio_input.hpp` with `get()` / `is_active()`, ZTEST coverage in `test_gpio.cpp` |
+| `GpioInput` HAL class | **Done** — merged into `hal/gpio.hpp` with `get()` / `is_active()`, ZTEST coverage in `test_gpio.cpp` |
 | SPI flash boot (bitstream persistence) | **Done** — `write_cfgmem` in `build.tcl`, `make fpga-flash` via `program_flash.tcl`; `BOOT_MODE_SELECT=0` (BROM) for firmware uploads |
 | Watchdog Timer (WDT) software driver | **Done** — `drivers/wdt/wdt_neorv32.c`, DTS binding, `wdt_feed` in LED blink thread, ZTEST coverage |
 | RTL linting in CI | **Done** — `vhdl-lint` CI job (GHDL, ~30 s on ubuntu-latest) |
@@ -774,7 +788,7 @@ to `ostomachion_bd.tcl` and the Zephyr driver ISR.
 
 ---
 
-## NEORV32 version lock
+## 🔒 NEORV32 version lock
 
 This project uses **NEORV32 v1.11.6**, pinned by submodule hash.  Before
 upgrading to any newer version, read the detailed compatibility analysis:
@@ -790,7 +804,7 @@ separate tracked work item post-acceptance.
 
 ---
 
-## Debugging with waveforms
+## 📊 Debugging with waveforms
 
 Every simulation produces `output.ghw` in GHDL's native format:
 
@@ -819,7 +833,7 @@ cat UART0.log
 
 ---
 
-## Troubleshooting
+## 🩺 Troubleshooting
 
 **`image_gen` not found during `make test-zephyr`**
 : Ensure the venv is activated and `ZEPHYR_BASE` is set before running.
@@ -859,7 +873,7 @@ cat UART0.log
 
 ---
 
-## Deploying to Arty A7
+## 🎛️ Deploying to Arty A7
 
 The FPGA build targets the Digilent **Arty A7-100T** (XC7A100T, CSG324 package).
 All required files live in `fpga/arty_a7/`.
@@ -871,7 +885,7 @@ All required files live in `fpga/arty_a7/`.
 > **LUTs 17.21%, BRAMs 47.04%** (WNS +0.292 ns, WHS +0.019 ns at 100 MHz,
 > 0 DRC errors).
 
-### Prerequisites
+### ✅ Prerequisites
 
 | Tool | Minimum version | Notes |
 |------|----------------|-------|
@@ -880,7 +894,7 @@ All required files live in `fpga/arty_a7/`.
 | West / Zephyr SDK | 1.0.0 | Same environment as simulation build |
 | Python 3 | 3.8+ | For `neorv32_upload.py` (UART bootloader) |
 
-### Pin map
+### 📌 Pin map
 
 | Signal | Arty A7 pin | Connector / function |
 |--------|-------------|----------------------|
@@ -900,7 +914,7 @@ All required files live in `fpga/arty_a7/`.
 | `jtag_tdo_o` | N17 | Pmod JC pin 3 |
 | `jtag_tms_i` | P18 | Pmod JC pin 4 |
 
-### One-time bitstream build
+### 🔨 One-time bitstream build
 
 Synthesise, implement, and generate the bitstream:
 
@@ -918,7 +932,7 @@ The build embeds `git describe --tags` and the git hash as the bitstream
 `USERID` property and in `build_id.txt`.  The firmware can log this at boot
 via `CONFIG_OSTOMACHION_HW_BUILD_ID` for hardware/firmware version verification.
 
-### Program the FPGA (volatile — JTAG)
+### ⚡ Program the FPGA (volatile — JTAG)
 
 Load the bitstream into the FPGA's SRAM via JTAG (erased on power-cycle):
 
@@ -928,7 +942,7 @@ make fpga-program
 #                        -c "pld load 0 build/arty_a7/ostomachion_arty_a7.bit" -c shutdown
 ```
 
-### Program the Quad-SPI flash (persistent — survives power-cycle)
+### 💾 Program the Quad-SPI flash (persistent — survives power-cycle)
 
 Program the on-board Micron N25Q128A / MT25QL128 QSPI flash so the FPGA
 auto-configures itself from flash on every power-up:
@@ -942,7 +956,7 @@ make fpga-flash
 After `make fpga-flash`, the board will boot the Ostomachion design automatically
 whenever powered on — no JTAG connection required.
 
-### Iterating on firmware (no re-synthesis)
+### 🔁 Iterating on firmware (no re-synthesis)
 
 After the bitstream is loaded, the NEORV32 BROM bootloader runs at **19200 baud**
 and waits for an executable image.  Upload via:
@@ -957,7 +971,7 @@ python3 neorv32/sw/bootloader/neorv32_upload.py --port /dev/ttyUSB1 \
 
 Subsequent firmware iterations only require `make fpga-fw` — no Vivado run.
 
-### Baud rate note
+### 📡 Baud rate note
 
 | Context | UART baud | Set by |
 |---------|-----------|--------|
@@ -969,7 +983,7 @@ The NEORV32 bootloader (BROM) always runs at 19200 baud before handing off
 to the application; this is a fixed hardware constraint.  The application
 firmware then switches to 115200 baud.
 
-### Interrupt vs. polling drivers
+### 🔀 Interrupt vs. polling drivers
 
 | Mode | Kconfig symbol | Default | Used for |
 |------|---------------|---------|----------|
@@ -980,7 +994,7 @@ Polling mode spins on `SPI_CTRL_BUSY`/`TWI_CTRL_RX_AVAIL`, blocking the
 Zephyr scheduler for the duration of the transfer.  Interrupt-driven mode
 uses FIRQ 6 (SPI) and FIRQ 7 (I2C).
 
-### JTAG debug
+### 🐛 JTAG debug
 
 After the bitstream is loaded and firmware is running, attach GDB via the
 NEORV32 on-chip debugger (OCD) on Pmod JC:
@@ -996,7 +1010,7 @@ riscv64-zephyr-elf-gdb build_zephyr_fpga/zephyr/zephyr.elf \
     -ex "monitor reset halt"
 ```
 
-### Hardware test setup
+### 🔬 Hardware test setup
 
 `make test-hw` builds a dedicated ZTEST image (verbose output, per-subsystem
 logging, 115200 baud) and uploads it via the UART bootloader.
@@ -1062,7 +1076,7 @@ Running TESTSUITE ostomachion_gpio
 TESTSUITE ostomachion_gpio succeeded
 ```
 
-### FFT accelerator test
+### 📈 FFT accelerator test
 
 The FFT accelerator requires the full block-design bitstream (`make fpga-synth`
 + `make fpga-program`).  Build and upload the FFT ZTEST image:

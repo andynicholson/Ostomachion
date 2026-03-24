@@ -19,7 +19,7 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/gpio.h>
 
-#include "ostomachion/hal/gpio_input.hpp"
+#include "ostomachion/hal/gpio.hpp"
 
 // LED DT specs derived from board aliases (led0–led3).
 static const struct gpio_dt_spec k_leds[] = {
