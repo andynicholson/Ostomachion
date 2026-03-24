@@ -42,6 +42,7 @@ sw/test_gpio_uart/*.out
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
+compile_commands.json
 
 # IDE
 .vscode/

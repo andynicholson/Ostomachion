@@ -10,6 +10,8 @@ project(ostomachion VERSION 0.1.0 LANGUAGES C CXX ASM)
 
 target_include_directories(app PRIVATE include)
 
+target_compile_options(app PRIVATE -Werror)
+
 target_sources(app PRIVATE src/main.cpp)
 
 # ZTest suites — only compiled when ZTEST is enabled

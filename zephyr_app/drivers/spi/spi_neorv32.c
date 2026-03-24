@@ -198,18 +198,6 @@ static int neorv32_spi_wait_tx_ready(const struct device *dev)
 	return -ETIMEDOUT;
 }
 
-/* Returns 0 on success, -ETIMEDOUT if the peripheral stays busy too long. */
-static int neorv32_spi_wait_idle(const struct device *dev)
-{
-	for (uint32_t i = 0U; i < SPI_POLL_RETRIES; i++) {
-		if (!(neorv32_spi_reg_read(dev, NEORV32_SPI_CTRL) & SPI_CTRL_BUSY)) {
-			return 0;
-		}
-	}
-	LOG_ERR("SPI BUSY timeout");
-	return -ETIMEDOUT;
-}
-
 static int neorv32_spi_cs_assert(const struct device *dev, uint8_t cs)
 {
 	uint32_t cmd = SPI_DATA_CMD | SPI_DATA_CSEN | (uint32_t)(cs & 0x7U);
@@ -221,6 +209,19 @@ static int neorv32_spi_cs_assert(const struct device *dev, uint8_t cs)
 	}
 	neorv32_spi_reg_write(dev, NEORV32_SPI_DATA, cmd);
 	return 0;
+}
+
+#ifndef CONFIG_SPI_NEORV32_INTERRUPT
+/* Returns 0 on success, -ETIMEDOUT if the peripheral stays busy too long. */
+static int neorv32_spi_wait_idle(const struct device *dev)
+{
+	for (uint32_t i = 0U; i < SPI_POLL_RETRIES; i++) {
+		if (!(neorv32_spi_reg_read(dev, NEORV32_SPI_CTRL) & SPI_CTRL_BUSY)) {
+			return 0;
+		}
+	}
+	LOG_ERR("SPI BUSY timeout");
+	return -ETIMEDOUT;
 }
 
 static int neorv32_spi_cs_deassert(const struct device *dev)
@@ -254,6 +255,7 @@ static int neorv32_spi_transfer_byte(const struct device *dev, uint8_t txd, uint
 	*rxd = (uint8_t)(neorv32_spi_reg_read(dev, NEORV32_SPI_DATA) & 0xFFU);
 	return 0;
 }
+#endif /* !CONFIG_SPI_NEORV32_INTERRUPT (polling helpers) */
 
 /* ---------------------------------------------------------------------------
  * Interrupt-driven transfer path
@@ -346,6 +348,7 @@ static int neorv32_spi_xfer_irq(const struct device *dev, const struct spi_confi
 
 #endif /* CONFIG_SPI_NEORV32_INTERRUPT */
 
+#ifndef CONFIG_SPI_NEORV32_INTERRUPT
 /* ---------------------------------------------------------------------------
  * Polling transfer path (default / simulation)
  * --------------------------------------------------------------------------- */
@@ -400,6 +403,7 @@ xfer_done:
 	spi_context_complete(ctx, dev, err);
 	return err;
 }
+#endif /* !CONFIG_SPI_NEORV32_INTERRUPT */
 
 /* ---------------------------------------------------------------------------
  * Common API entry points

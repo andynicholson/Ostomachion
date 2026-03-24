@@ -148,6 +148,7 @@ static int twi_wait_idle(const struct device *dev)
 	return -ETIMEDOUT;
 }
 
+#ifndef CONFIG_I2C_NEORV32_INTERRUPT
 /* Blocks until an RX FIFO entry is available, then returns it via *val. */
 static int twi_wait_rx(const struct device *dev, uint32_t *val)
 {
@@ -160,7 +161,6 @@ static int twi_wait_rx(const struct device *dev, uint32_t *val)
 	LOG_ERR("TWI RX FIFO empty timeout");
 	return -ETIMEDOUT;
 }
-
 /* Issues a START (or REPEATED-START) condition and waits for bus idle. */
 static int twi_start(const struct device *dev)
 {
@@ -208,6 +208,7 @@ static int twi_rtx(const struct device *dev, uint8_t data_byte, bool mack, uint3
 	neorv32_i2c_reg_write(dev, NEORV32_TWI_DCMD, cmd);
 	return twi_wait_rx(dev, result);
 }
+#endif /* !CONFIG_I2C_NEORV32_INTERRUPT (blocking helpers) */
 
 /* ---------------------------------------------------------------------------
  * Non-blocking variants for the interrupt-driven path
@@ -423,6 +424,7 @@ static int neorv32_i2c_transfer_irq(const struct device *dev, struct i2c_msg *ms
 
 #endif /* CONFIG_I2C_NEORV32_INTERRUPT */
 
+#ifndef CONFIG_I2C_NEORV32_INTERRUPT
 /* ---------------------------------------------------------------------------
  * Polling transfer path (default / simulation)
  * --------------------------------------------------------------------------- */
@@ -521,6 +523,7 @@ done:
 done_no_stop:
 	return ret;
 }
+#endif /* !CONFIG_I2C_NEORV32_INTERRUPT */
 
 /* ---------------------------------------------------------------------------
  * Common API entry points
