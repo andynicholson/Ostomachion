@@ -86,7 +86,9 @@ without disturbing what already works.
 ├── .github/
 │   └── workflows/ci.yml             # GitHub Actions CI (sim, twister, vivado-synth)
 ├── scripts/
-│   └── bin2vhd.py                   # ELF binary → VHDL IMEM image
+│   ├── bin2vhd.py                   # ELF binary → VHDL IMEM image
+│   ├── gen_release_artifacts.sh     # Stage release/<VERSION>/ certification artifacts
+│   └── init_dev_env.sh              # Source to set ZEPHYR_BASE, venv, Vivado PATH
 ├── rtl/
 │   ├── neorv32_wrapper.vhd           # Simulation wrapper around neorv32_top
 │   └── xbus_axi4lite_bridge.vhd      # XBUS (Wishbone) → AXI4-Lite bridge (256-cycle watchdog)
@@ -111,6 +113,7 @@ without disturbing what already works.
     ├── prj_fpga.conf                 # Overlay — FPGA target (IRQ drivers, larger stacks)
     ├── prj_accel.conf                # Overlay — FFT accelerator (CONFIG_FFT_ACCEL=y)
     ├── prj_shell.conf                # Overlay — interactive shell image (no ZTEST)
+    ├── prj_hw_test.conf              # Overlay — verbose hardware test (logging, no I2C slave)
     ├── app.overlay                   # Device Tree — spi0, i2c0 nodes (sim + FPGA base)
     ├── app_fpga.overlay              # Device Tree overlay — 115200 baud, FPGA clocks
     ├── app_accel.overlay             # Device Tree overlay — fft_accel node + IRQ
@@ -122,6 +125,7 @@ without disturbing what already works.
     │   │       ├── gpio.hpp          # GpioOutput
     │   │       ├── spi.hpp           # SpiDevice (std::span API)
     │   │       ├── i2c.hpp           # I2cBus   (std::span API)
+    │   │       ├── gpio_input.hpp   # GpioInput (get / is_active)
     │   │       └── fft_accel.hpp     # FftAccel (: Accel, C++20 RAII wrapper)
     │   └── zephyr/drivers/misc/
     │       └── fft_accel.h           # Public C API: fft_accel_transform(), _get_last_overflow()
@@ -139,7 +143,8 @@ without disturbing what already works.
     │   ├── vendor-prefixes.txt       # "ostomachion" vendor prefix
     │   ├── misc/ostomachion,fft-accel.yaml  # AXI DMA + xfft binding (IRQ topology docs)
     │   ├── spi/neorv32,spi.yaml
-    │   └── i2c/neorv32,twi.yaml
+    │   ├── i2c/neorv32,twi.yaml
+    │   └── wdt/neorv32,wdt.yaml
     └── drivers/
         ├── Kconfig                   # CONFIG_OSTOMACHION_HW_BUILD_ID (version manifest)
         ├── CMakeLists.txt
@@ -149,7 +154,10 @@ without disturbing what already works.
         ├── i2c/i2c_neorv32.c         # I2C driver (polling + IRQ paths, Kconfig-gated)
         ├── i2c/Kconfig               # CONFIG_I2C_NEORV32 / CONFIG_I2C_NEORV32_INTERRUPT
         ├── accel/fft_accel.c         # FFT accelerator driver (DMA, semaphore, overflow ISR)
-        └── accel/Kconfig             # CONFIG_FFT_ACCEL, CONFIG_FFT_ACCEL_TIMEOUT_MS
+        ├── accel/Kconfig             # CONFIG_FFT_ACCEL, CONFIG_FFT_ACCEL_TIMEOUT_MS
+        ├── wdt/wdt_neorv32.c         # Watchdog timer driver (NEORV32 WDT)
+        ├── wdt/Kconfig               # CONFIG_WDT_NEORV32
+        └── wdt/CMakeLists.txt
 ```
 
 ---
@@ -338,7 +346,7 @@ All memory is **statically allocated at compile time**:
 
 | What | Mechanism |
 |------|-----------|
-| FFT sample buffers | `static fft_sample_t g_fft_in[64]` (BSS/data section) |
+| FFT sample buffers | `static fft_sample_t g_fft_in[4096]` (BSS/data section) |
 | Driver state structs | Zephyr `DEVICE_DEFINE` macro (linker section) |
 | Thread stacks | `CONFIG_MAIN_STACK_SIZE`, `CONFIG_SHELL_STACK_SIZE` (link time) |
 | Semaphores, mutexes | `K_SEM_DEFINE`, `K_MUTEX_DEFINE` (static kernel objects) |
@@ -392,7 +400,7 @@ Zephyr include chain via `<zephyr/device.h>` rather than `<cerrno>`.
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` defines three jobs, all triggered on pull requests
+`.github/workflows/ci.yml` defines five jobs, all triggered on pull requests
 and pushes to `main` / `develop`:
 
 | Job | Runner | What it does |
@@ -400,6 +408,8 @@ and pushes to `main` / `develop`:
 | `sim` | `ubuntu-latest` | Builds Zephyr (sim config), runs `make test-zephyr`, asserts `PROJECT EXECUTION SUCCESSFUL` |
 | `twister` | `ubuntu-latest` | Runs `west twister -T zephyr_app/tests` (all configs, `neorv32` sim board) — needs `sim` to pass |
 | `vivado-synth` | `self-hosted [vivado]` | Runs `make fpga-synth && make fpga-check`, uploads `.bit`, `.rpt`, `build_id.txt` — skipped on forks |
+| `vhdl-lint` | `ubuntu-latest` | GHDL `--synth` over custom RTL + NEORV32 core — catches VHDL-2008 type errors in ~30 s |
+| `firmware-analysis` | `ubuntu-latest` | clang-tidy on app sources, `nm --size-sort` memory map, thread analyzer — needs `twister` to pass |
 
 In-progress runs are cancelled when a new commit arrives on the same branch.
 
@@ -456,7 +466,7 @@ each to the console) and returns `0x5A` per read byte.  The open-drain bus
 is modelled with resolved `std_logic` (`'0'` wins; released lines are `'1'`).
 
 **Watchdog**: A separate testbench process asserts a fatal failure if the
-GPIO toggle count is below a threshold at 190 ms of simulated time.  This
+GPIO toggle count is below a threshold at 390 ms of simulated time.  This
 catches hangs where the system boots but never reaches the LED blink loop.
 
 ### Bare-metal smoke test
@@ -656,12 +666,14 @@ and 7 to yield the Zephyr thread between bytes.  The polling fallback
 FIRQ timing dependencies in the testbench.  Both paths are compiled from
 the same source files, gated by `#ifdef`.
 
-**19200 baud for simulation, 115200 for the FPGA application.**
-GHDL evaluates the RTL cycle-by-cycle at ~200 kHz wall-clock speed.  19200
-baud requires ~5200 simulated clock cycles per character — a practical
-trade-off.  The FPGA application overrides this to 115200 baud via
-`app_fpga.overlay`.  The NEORV32 BROM bootloader always runs at 19200 baud
-and cannot be changed without recompiling the bootloader image.
+**115200 baud for both simulation and FPGA application.**
+Both `app.overlay` (simulation base) and `app_fpga.overlay` (FPGA target)
+configure UART0 at 115200 baud; the testbench `sim_uart_rx` monitors at the
+same rate.  The bare-metal smoke test (`sw/test_gpio_uart/`) uses UART
+sim-mode (`UART0_SIM_MODE`), which bypasses the baud-rate generator entirely
+and writes characters directly to the GHDL console.  The NEORV32 BROM
+bootloader always runs at 19200 baud and cannot be changed without
+recompiling the bootloader image.
 
 **`BOOT_MODE_SELECT = 2` for simulation, `0` for FPGA.**
 Mode 2 (boot from pre-initialised IMEM) skips the UART bootloader entirely,
@@ -819,9 +831,9 @@ cat UART0.log
 
 **No UART output in simulation**
 : The bare-metal test uses UART sim-mode (characters go directly to stdout).
-  The Zephyr test uses real 19200-baud serial — look for lines prefixed with
+  The Zephyr test uses real 115200-baud serial — look for lines prefixed with
   `UART0:` in the GHDL console output.  Confirm the testbench `BAUD` generic
-  (19200) matches the firmware's configured baud rate.
+  (115200) matches the firmware's configured baud rate.
 
 **`CONFIG_UART_INTERRUPT_DRIVEN` causes hangs**
 : The application uses polling UART mode (`CONFIG_UART_INTERRUPT_DRIVEN=n`).
@@ -949,7 +961,7 @@ Subsequent firmware iterations only require `make fpga-fw` — no Vivado run.
 
 | Context | UART baud | Set by |
 |---------|-----------|--------|
-| Simulation | 19200 | `app.overlay` (`current-speed = <19200>`) |
+| Simulation | 115200 | `app.overlay` (`current-speed = <115200>`) |
 | NEORV32 bootloader | 19200 | BROM fixed — cannot be changed without recompiling |
 | Application (FPGA) | 115200 | `app_fpga.overlay` (`current-speed = <115200>`) |
 

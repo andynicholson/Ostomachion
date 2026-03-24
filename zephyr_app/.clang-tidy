@@ -1,0 +1,35 @@
+# Ostomachion — clang-tidy configuration for Zephyr embedded C/C++
+#
+# Zephyr builds with -fno-exceptions -fno-rtti -nostdinc++.
+# Many checks that assume a hosted C++ environment are disabled.
+
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-reserved-identifier,
+  clang-analyzer-*,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling,
+  performance-*,
+  readability-*,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-function-cognitive-complexity,
+  -readability-else-after-return,
+  misc-*,
+  -misc-no-recursion,
+  -misc-include-cleaner,
+
+WarningsAsErrors: ''
+
+HeaderFilterRegex: 'zephyr_app/(src|include|drivers|tests)/.*'
+
+CheckOptions:
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case
+  - key: readability-identifier-naming.GlobalConstantCase
+    value: lower_case
+  - key: readability-identifier-naming.MacroDefinitionCase
+    value: UPPER_CASE

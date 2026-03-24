@@ -7,14 +7,15 @@ set proj_root  [file normalize "$script_dir/../.."]
 set build_dir  "$proj_root/build/arty_a7"
 set xpr        "$build_dir/vivado_project/ostomachion_arty_a7.xpr"
 
-if {![file exists $xpr]} {
-    puts "ERROR: No built project found at $xpr"
+set dcp "$build_dir/impl_final.dcp"
+
+if {![file exists $dcp]} {
+    puts "ERROR: No implementation checkpoint found at $dcp"
     puts "ERROR: Run 'make fpga-synth' first."
     exit 1
 }
 
-open_project $xpr
-open_run impl_1
+open_checkpoint $dcp
 
 # ---------------------------------------------------------------------------
 # 1. Timing closure — query via get_timing_paths (works on opened runs)

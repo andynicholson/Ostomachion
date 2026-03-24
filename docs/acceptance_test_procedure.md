@@ -25,7 +25,7 @@ Clone the repository with submodules:
 
 ```bash
 git clone --recurse-submodules <repo-url>
-cd neorv32_ghdl_mvp
+cd ostomachion
 west init -l .
 west update --narrow -o=--depth=1
 ```

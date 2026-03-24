@@ -69,7 +69,7 @@ simulate:
 sw:
 	@echo "=== Building test firmware ==="
 	$(MAKE) -C $(SW_DIR) RISCV_PREFIX=$(RISCV_PREFIX) clean image
-	cp $(SW_DIR)/neorv32_imem_image.vhd test_imem_image.vhd
+	cp $(SW_DIR)/neorv32_application_image.vhd test_imem_image.vhd
 
 # ---------- convenience targets -------------------------------------------
 test-baremetal: sw clean-ghdl

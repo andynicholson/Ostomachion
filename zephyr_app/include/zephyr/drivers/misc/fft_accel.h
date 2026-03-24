@@ -37,7 +37,7 @@ struct fft_sample_t {
  *             any other value returns -EINVAL.
  * @return 0 on success, negative errno on failure:
  *         -ENODEV   device is not ready (init failed or null pointer)
- *         -EINVAL   @p n != 64
+ *         -EINVAL   @p n != 4096
  *         -ETIMEDOUT DMA did not complete within CONFIG_FFT_ACCEL_TIMEOUT_MS
  *         -EIO      DMA reported an error
  */
