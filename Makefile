@@ -79,21 +79,39 @@ test-default: clean-ghdl
 	$(MAKE) SIM_TIME=500us all
 
 # ---------- Zephyr build & test -----------------------------------------------
+# Update the root compile_commands.json symlink so clangd picks up the
+# include paths from whichever Zephyr config was built most recently.
+define update-compile-commands
+	@if [ -f $(1)/compile_commands.json ]; then \
+		ln -sf $(1)/compile_commands.json compile_commands.json; \
+	fi
+endef
+
 zephyr:
 	@echo "=== Building Zephyr app ==="
 	west build -b $(ZEPHYR_BOARD) $(ZEPHYR_APP_DIR) \
 		-d $(ZEPHYR_BUILD_DIR) --pristine=auto \
 		-- -DCMAKE_PROGRAM_PATH=$(IMAGE_GEN_DIR)
 	cp $(ZEPHYR_BUILD_DIR)/zephyr/zephyr.vhd zephyr_imem_image.vhd
+	$(call update-compile-commands,$(ZEPHYR_BUILD_DIR))
+
+ZEPHYR_SIM_TIME ?= 800ms
 
 test-zephyr: zephyr clean-ghdl
-	$(MAKE) IMEM_IMAGE=zephyr_imem_image.vhd SIM_TIME=$(SIM_TIME) all
+	$(MAKE) IMEM_IMAGE=zephyr_imem_image.vhd SIM_TIME=$(ZEPHYR_SIM_TIME) all
+	@if grep -q 'PROJECT EXECUTION SUCCESSFUL' neorv32_tb.UART0_rx.out 2>/dev/null; then \
+		echo "=== PASS: All Zephyr ZTEST suites passed ==="; \
+	else \
+		echo "=== FAIL: 'PROJECT EXECUTION SUCCESSFUL' not found in simulation output ===" >&2; \
+		cat neorv32_tb.UART0_rx.out 2>/dev/null || echo "(no UART output file found)" >&2; \
+		exit 1; \
+	fi
 
 clean-ghdl:
 	@echo "=== Cleaning GHDL artifacts ==="
 	ghdl --clean --work=neorv32 2>/dev/null || true
 	ghdl --clean --work=work    2>/dev/null || true
-	rm -f *.o *.cf output.ghw neorv32_tb UART0.log
+	rm -f *.o *.cf output.ghw neorv32_tb UART0.log neorv32_tb.*.out
 
 clean: clean-ghdl
 	@echo "=== Cleaning SW build ==="
@@ -114,6 +132,7 @@ zephyr-fpga:
 		-- -DCMAKE_PROGRAM_PATH=$(IMAGE_GEN_DIR) \
 		   -DDTC_OVERLAY_FILE="$(CURDIR)/$(ZEPHYR_APP_DIR)/app.overlay;$(CURDIR)/$(ZEPHYR_APP_DIR)/app_fpga.overlay" \
 		   -DOVERLAY_CONFIG="$(CURDIR)/$(ZEPHYR_APP_DIR)/prj.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_fpga.conf"
+	$(call update-compile-commands,$(ZEPHYR_BUILD_FPGA))
 
 ## Synthesise, implement and generate the Arty A7 bitstream via Vivado batch mode.
 ## Requires Vivado to be on PATH or VIVADO variable set.
@@ -152,8 +171,8 @@ fpga-flash: $(MCS_FILE)
 ## Prerequisites: zephyr-fpga must have been built; board must be reset.
 fpga-fw: zephyr-fpga
 	@echo "=== Uploading firmware via NEORV32 UART bootloader ==="
-	python3 $(NEORV32_HOME)/sw/bootloader/neorv32_upload.py \
-		--port $(UART_DEVICE) \
+	bash $(NEORV32_HOME)/sw/image_gen/uart_upload.sh \
+		$(UART_DEVICE) \
 		$(ZEPHYR_BUILD_FPGA)/zephyr/zephyr.bin
 	@echo "=== Firmware upload complete ==="
 
@@ -189,8 +208,8 @@ test-hw:
 		   -DDTC_OVERLAY_FILE="$(CURDIR)/$(ZEPHYR_APP_DIR)/app.overlay;$(CURDIR)/$(ZEPHYR_APP_DIR)/app_fpga.overlay" \
 		   -DOVERLAY_CONFIG="$(CURDIR)/$(ZEPHYR_APP_DIR)/prj.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_fpga.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_hw_test.conf"
 	@echo "=== Uploading hardware test firmware via UART bootloader ==="
-	python3 $(NEORV32_HOME)/sw/bootloader/neorv32_upload.py \
-		--port $(UART_DEVICE) \
+	bash $(NEORV32_HOME)/sw/image_gen/uart_upload.sh \
+		$(UART_DEVICE) \
 		$(ZEPHYR_BUILD_HW_TEST)/zephyr/zephyr.bin
 	@echo "=== Firmware uploaded — connect a terminal at 115200 baud to see results ==="
 
@@ -206,8 +225,8 @@ test-accel-hw:
 		   -DDTC_OVERLAY_FILE="$(CURDIR)/$(ZEPHYR_APP_DIR)/app.overlay;$(CURDIR)/$(ZEPHYR_APP_DIR)/app_fpga.overlay;$(CURDIR)/$(ZEPHYR_APP_DIR)/app_accel.overlay" \
 		   -DOVERLAY_CONFIG="$(CURDIR)/$(ZEPHYR_APP_DIR)/prj.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_fpga.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_accel.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_hw_test.conf"
 	@echo "=== Uploading ZTEST accelerator firmware via UART bootloader ==="
-	python3 $(NEORV32_HOME)/sw/bootloader/neorv32_upload.py \
-		--port $(UART_DEVICE) \
+	bash $(NEORV32_HOME)/sw/image_gen/uart_upload.sh \
+		$(UART_DEVICE) \
 		$(ZEPHYR_BUILD_ACCEL)/zephyr/zephyr.bin
 	@echo "=== Firmware uploaded — connect a terminal at 115200 baud ==="
 
@@ -221,9 +240,10 @@ shell-hw:
 		-- -DCMAKE_PROGRAM_PATH=$(IMAGE_GEN_DIR) \
 		   -DDTC_OVERLAY_FILE="$(CURDIR)/$(ZEPHYR_APP_DIR)/app.overlay;$(CURDIR)/$(ZEPHYR_APP_DIR)/app_fpga.overlay;$(CURDIR)/$(ZEPHYR_APP_DIR)/app_accel.overlay" \
 		   -DOVERLAY_CONFIG="$(CURDIR)/$(ZEPHYR_APP_DIR)/prj.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_fpga.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_shell.conf"
+	$(call update-compile-commands,$(ZEPHYR_BUILD_SHELL))
 	@echo "=== Uploading shell firmware via UART bootloader ==="
-	python3 $(NEORV32_HOME)/sw/bootloader/neorv32_upload.py \
-		--port $(UART_DEVICE) \
+	bash $(NEORV32_HOME)/sw/image_gen/uart_upload.sh \
+		$(UART_DEVICE) \
 		$(ZEPHYR_BUILD_SHELL)/zephyr/zephyr.bin
 	@echo "=== Connect at 115200 baud — type 'help' for available commands ==="
 

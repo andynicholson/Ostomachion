@@ -758,7 +758,7 @@ to `ostomachion_bd.tcl` and the Zephyr driver ISR.
 |------|--------|
 | Interrupt-driven SPI/I2C drivers | **Done** — `CONFIG_SPI_NEORV32_INTERRUPT` / `CONFIG_I2C_NEORV32_INTERRUPT`; enabled by `prj_fpga.conf` |
 | Physical FPGA target (Arty A7-100T) | **Done** — `fpga/arty_a7/` with VHDL top, XDC, Vivado TCL, OpenOCD config |
-| UART bootloader firmware upload | **Done** — `make fpga-fw` via `neorv32_upload.py` |
+| UART bootloader firmware upload | **Done** — `make fpga-fw` via `uart_upload.sh` |
 | JTAG on-chip debug | **Done** — `OCD_EN=true` in FPGA top, `openocd.cfg` + NEORV32 OCD config |
 | Xilinx xfft FFT accelerator | **Done** — 4096-pt, 16-bit, pipelined streaming, `ostomachion_bd.tcl` |
 | FFT overflow detection | **Done** — xfft `ovflo` output wired to IRQ; `fft_accel_get_last_overflow()` |
@@ -892,7 +892,7 @@ All required files live in `fpga/arty_a7/`.
 | Vivado | 2024.1 | Any edition; tested on 2025.1; add to `PATH` or set `VIVADO=` |
 | OpenOCD | 0.12.0 | Must include `cpld/xilinx-xc7.cfg` |
 | West / Zephyr SDK | 1.0.0 | Same environment as simulation build |
-| Python 3 | 3.8+ | For `neorv32_upload.py` (UART bootloader) |
+| Python 3 | 3.8+ | For west, Zephyr build scripts |
 
 ### 📌 Pin map
 
@@ -965,7 +965,7 @@ and waits for an executable image.  Upload via:
 make fpga-fw          # builds FPGA Zephyr image, then uploads
 # or manually:
 make zephyr-fpga      # builds to build_zephyr_fpga/
-python3 neorv32/sw/bootloader/neorv32_upload.py --port /dev/ttyUSB1 \
+bash neorv32/sw/image_gen/uart_upload.sh /dev/ttyUSB1 \
     build_zephyr_fpga/zephyr/zephyr.bin
 ```
 
