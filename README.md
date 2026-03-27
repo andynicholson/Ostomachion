@@ -1,9 +1,6 @@
 <p align="center">
   <img src="docs/img/logo.png" width="200" alt="Ostomachion logo"/>
 </p>
-
-<h1 align="center">Ostomachion</h1>
-
 <p align="center">
   <b>NEORV32 RISC-V Processor &middot; Zephyr RTOS &middot; Custom RTL Accelerator Pipeline</b><br/>
   <i>Targeted to modern C++20 and FPGAs</i>
