@@ -62,17 +62,13 @@ foreach f $soc_files {
 }
 
 # ---------------------------------------------------------------------------
-# Add custom RTL: XBUS bridge (library work)
+# Add upstream NEORV32 XBUS-to-AXI4 bridge (library work)
 # Instantiated by arty_a7_top.vhd — not referenced inside the block design.
 # The BD contains only Xilinx IP; NEORV32 and the bridge live in arty_a7_top.
-# The FFT is provided by the Xilinx xfft IP instantiated in the BD; no
-# custom FFT VHDL files are needed.
 # ---------------------------------------------------------------------------
-set accel_rtl "$proj_root/rtl"
+set bridge_rtl "$proj_root/neorv32/rtl/system_integration/xbus2axi4_bridge.vhd"
 
-add_files -fileset sources_1 [list \
-    "$accel_rtl/xbus_axi4lite_bridge.vhd" \
-]
+add_files -fileset sources_1 [list $bridge_rtl]
 
 # ---------------------------------------------------------------------------
 # Add board-level top (library work) — thin IO primitives wrapper
@@ -101,7 +97,7 @@ add_files -fileset constrs_1 "$fpga_dir/arty_a7.xdc"
 # setting VHDL-2008 on them breaks synthesis (FILE_TYPE mismatch).
 # ---------------------------------------------------------------------------
 set rtl_vhdl2008_files [concat $soc_files [list \
-    "$accel_rtl/xbus_axi4lite_bridge.vhd" \
+    $bridge_rtl                            \
     "$fpga_dir/arty_a7_top.vhd"           \
 ]]
 foreach f $rtl_vhdl2008_files {

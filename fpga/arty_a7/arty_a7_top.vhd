@@ -5,14 +5,14 @@
 --   arty_a7_top (this file)
 --   ├── ostomachion_bd_wrapper  (Vivado-generated; only Xilinx IP inside)
 --   ├── neorv32_top             (RISC-V SoC, library neorv32, std_ulogic ports)
---   ├── xbus_axi4lite_bridge    (XBUS→AXI4-Lite, library work, std_logic ports)
+--   ├── xbus2axi4_bridge        (upstream NEORV32 XBUS→AXI4, std_ulogic XBUS side)
 --   └── IOBUF_SDA / IOBUF_SCL  (open-drain I2C pads, Xilinx primitive)
 --
 -- Type strategy:
 --   Internal AXI and board signals use std_logic / std_logic_vector.
 --   NEORV32 uses std_ulogic / std_ulogic_vector on all ports.
---   Intermediate ulogic signals hold NEORV32 outputs; concurrent assignments
---   convert them to std_logic for the bridge and board I/O.
+--   The upstream xbus2axi4_bridge accepts std_ulogic on the XBUS side natively,
+--   so no type casting is needed for XBUS signals.  AXI side uses std_logic.
 
 library ieee;
 use ieee.std_logic_1164.all;
@@ -68,18 +68,19 @@ architecture rtl of arty_a7_top is
   signal gpio_out_u  : std_ulogic_vector(31 downto 0);
   signal spi_csn_u   : std_ulogic_vector(7 downto 0);
 
-  -- ── NEORV32 XBUS outputs → std_logic for bridge input ────────────────────
+  -- ── NEORV32 XBUS outputs → upstream bridge (native std_ulogic) ───────────
   signal xbus_adr_u  : std_ulogic_vector(31 downto 0);
   signal xbus_wdat_u : std_ulogic_vector(31 downto 0);
   signal xbus_we_u   : std_ulogic;
   signal xbus_sel_u  : std_ulogic_vector(3 downto 0);
   signal xbus_stb_u  : std_ulogic;
-  signal xbus_cyc_u  : std_ulogic;
+  signal xbus_cti_u  : std_ulogic_vector(2 downto 0);
+  signal xbus_tag_u  : std_ulogic_vector(2 downto 0);
 
-  -- ── Bridge XBUS outputs → std_ulogic for NEORV32 input ───────────────────
-  signal xbus_rdat_l : std_logic_vector(31 downto 0);
-  signal xbus_ack_l  : std_logic;
-  signal xbus_err_l  : std_logic;
+  -- ── Bridge XBUS outputs → NEORV32 input (native std_ulogic) ────────────
+  signal xbus_rdat_u : std_ulogic_vector(31 downto 0);
+  signal xbus_ack_u  : std_ulogic;
+  signal xbus_err_u  : std_ulogic;
 
   -- ── TWI split signals (std_ulogic ← NEORV32, std_logic ↔ IOBUF) ─────────
   signal twi_sda_out_u : std_ulogic;
@@ -154,41 +155,60 @@ begin
       s_axi_cpu_rready     => axi_rready
     );
 
-  -- ── XBUS → AXI4-Lite bridge ───────────────────────────────────────────────
-  bridge_i : entity work.xbus_axi4lite_bridge
+  -- ── XBUS → AXI4 bridge (upstream NEORV32, BURST_EN=false for AXI4-Lite BD)
+  bridge_i : entity work.xbus2axi4_bridge
+    generic map (
+      BURST_EN  => false,
+      BURST_LEN => 4
+    )
     port map (
-      aclk          => clk,
-      aresetn       => periph_rstn(0),   -- extract scalar from 1-bit vector
-      -- XBUS inputs: convert NEORV32 std_ulogic_vector → std_logic_vector
-      xbus_adr_i    => std_logic_vector(xbus_adr_u),
-      xbus_dat_i    => std_logic_vector(xbus_wdat_u),
-      xbus_dat_o    => xbus_rdat_l,
-      xbus_we_i     => std_logic(xbus_we_u),
-      xbus_sel_i    => std_logic_vector(xbus_sel_u),
-      xbus_stb_i    => std_logic(xbus_stb_u),
-      xbus_cyc_i    => std_logic(xbus_cyc_u),
-      xbus_ack_o    => xbus_ack_l,
-      xbus_err_o    => xbus_err_l,
-      -- AXI4-Lite master → BD
+      clk           => clk,
+      resetn        => periph_rstn(0),
+      -- XBUS (native std_ulogic — no type casting needed)
+      xbus_adr_i    => xbus_adr_u,
+      xbus_dat_i    => xbus_wdat_u,
+      xbus_cti_i    => xbus_cti_u,
+      xbus_tag_i    => xbus_tag_u,
+      xbus_we_i     => xbus_we_u,
+      xbus_sel_i    => xbus_sel_u,
+      xbus_stb_i    => xbus_stb_u,
+      xbus_dat_o    => xbus_rdat_u,
+      xbus_ack_o    => xbus_ack_u,
+      xbus_err_o    => xbus_err_u,
+      -- AXI4 write address channel (extra AXI4 signals left open; BD is AXI4-Lite)
       m_axi_awaddr  => axi_awaddr,
+      m_axi_awlen   => open,
+      m_axi_awsize  => open,
+      m_axi_awburst => open,
+      m_axi_awcache => open,
       m_axi_awprot  => axi_awprot,
       m_axi_awvalid => axi_awvalid,
       m_axi_awready => axi_awready,
+      -- AXI4 write data channel
       m_axi_wdata   => axi_wdata,
       m_axi_wstrb   => axi_wstrb,
+      m_axi_wlast   => open,
       m_axi_wvalid  => axi_wvalid,
       m_axi_wready  => axi_wready,
-      m_axi_bresp   => axi_bresp,
-      m_axi_bvalid  => axi_bvalid,
-      m_axi_bready  => axi_bready,
+      -- AXI4 read address channel
       m_axi_araddr  => axi_araddr,
+      m_axi_arlen   => open,
+      m_axi_arsize  => open,
+      m_axi_arburst => open,
+      m_axi_arcache => open,
       m_axi_arprot  => axi_arprot,
       m_axi_arvalid => axi_arvalid,
       m_axi_arready => axi_arready,
+      -- AXI4 read data channel
       m_axi_rdata   => axi_rdata,
       m_axi_rresp   => axi_rresp,
+      m_axi_rlast   => '1',
       m_axi_rvalid  => axi_rvalid,
-      m_axi_rready  => axi_rready
+      m_axi_rready  => axi_rready,
+      -- AXI4 write response channel
+      m_axi_bresp   => axi_bresp,
+      m_axi_bvalid  => axi_bvalid,
+      m_axi_bready  => axi_bready
     );
 
   -- ── NEORV32 RISC-V SoC ───────────────────────────────────────────────────
@@ -201,6 +221,7 @@ begin
       DMEM_EN           => true,
       DMEM_SIZE         => 64 * 1024,
       XBUS_EN           => true,
+      XBUS_REGSTAGE_EN  => true,
       RISCV_ISA_C       => true,
       RISCV_ISA_M       => true,
       RISCV_ISA_Zicntr  => true,
@@ -222,18 +243,17 @@ begin
       jtag_tdi_i  => std_ulogic(jtag_tdi_i),
       jtag_tdo_o  => jtag_tdo_u,
       jtag_tms_i  => std_ulogic(jtag_tms_i),
-      -- XBUS outputs (captured as std_ulogic_vector for bridge conversion)
       xbus_adr_o  => xbus_adr_u,
       xbus_dat_o  => xbus_wdat_u,
-      xbus_cti_o  => open,
-      xbus_tag_o  => open,
-      xbus_dat_i  => std_ulogic_vector(xbus_rdat_l),
+      xbus_cti_o  => xbus_cti_u,
+      xbus_tag_o  => xbus_tag_u,
+      xbus_dat_i  => xbus_rdat_u,
       xbus_we_o   => xbus_we_u,
       xbus_sel_o  => xbus_sel_u,
       xbus_stb_o  => xbus_stb_u,
-      xbus_cyc_o  => xbus_cyc_u,
-      xbus_ack_i  => std_ulogic(xbus_ack_l),
-      xbus_err_i  => std_ulogic(xbus_err_l),
+      xbus_cyc_o  => open,
+      xbus_ack_i  => xbus_ack_u,
+      xbus_err_i  => xbus_err_u,
       mext_irq_i  => std_ulogic(mext_irq),  -- single IRQ from AXI INTC
       uart0_txd_o => uart0_txd_u,
       uart0_rxd_i => std_ulogic(uart_rxd_in),

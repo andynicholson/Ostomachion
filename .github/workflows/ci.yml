@@ -214,7 +214,7 @@ jobs:
       - name: Analyze custom RTL and FPGA top
         run: |
           ghdl -i --std=08 --work=work \
-            rtl/xbus_axi4lite_bridge.vhd \
+            neorv32/rtl/system_integration/xbus2axi4_bridge.vhd \
             rtl/neorv32_wrapper.vhd
           ghdl -i --std=08 --work=work \
             fpga/arty_a7/arty_a7_top.vhd

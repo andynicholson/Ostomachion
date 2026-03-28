@@ -64,9 +64,9 @@ without disturbing what already works.
   └────────────────────────┬─────────────────────────────────────────┘
                            │  MMIO reads/writes via sys_read32/write32
   ┌────────────────────────▼─────────────────────────────────────────┐
-  │  FPGA RTL  (NEORV32 v1.11.6  +  XBUS→AXI4-Lite bridge)          │
+  │  FPGA RTL  (NEORV32 v1.11.6  +  upstream XBUS→AXI4 bridge)       │
   │  RISC-V RV32IMAC soft-core, SPI master, TWI master, GPIO, UART  │
-  │  Bridge: rtl/xbus_axi4lite_bridge.vhd  (256-cycle watchdog)     │
+  │  Bridge: neorv32/rtl/system_integration/xbus2axi4_bridge.vhd    │
   │  Top:    fpga/arty_a7/arty_a7_top.vhd  (BUFG, IOBUF, OCD)      │
   └────────────────────────┬─────────────────────────────────────────┘
                            │  AXI4-Lite
@@ -100,8 +100,7 @@ without disturbing what already works.
 │   ├── gen_release_artifacts.sh     # Stage release/<VERSION>/ certification artifacts
 │   └── init_dev_env.sh              # Source to set ZEPHYR_BASE, venv, Vivado PATH
 ├── rtl/
-│   ├── neorv32_wrapper.vhd           # Simulation wrapper around neorv32_top
-│   └── xbus_axi4lite_bridge.vhd      # XBUS (Wishbone) → AXI4-Lite bridge (256-cycle watchdog)
+│   └── neorv32_wrapper.vhd           # Simulation wrapper around neorv32_top
 ├── fpga/
 │   └── arty_a7/
 │       ├── arty_a7_top.vhd           # Arty A7-100T board top (NEORV32 + bridge + BD)
@@ -717,11 +716,11 @@ added to the build target when `CONFIG_ZTEST=y`.
 a full discussion.  The C++ HAL uses `virtual` dispatch (vtable) but never
 `dynamic_cast` or `typeid`, keeping the `-fno-rtti` build clean.
 
-**AXI watchdog in the XBUS bridge.**
-`rtl/xbus_axi4lite_bridge.vhd` includes a 256-cycle timeout in the
-`WR_RESP` and `RD_DATA` FSM states.  If an AXI slave fails to respond,
-`xbus_err_o` is asserted and the FSM returns to `IDLE`, preventing
-indefinite CPU bus hangs from misconfigured peripherals.
+**XBUS bus-access timeout.**
+NEORV32's built-in `XBUS_TIMEOUT` generic (default 255 cycles) auto-terminates
+pending bus accesses that receive no ACK, raising a bus fault exception.  This
+prevents indefinite CPU hangs from misconfigured AXI peripherals.  The upstream
+`xbus2axi4_bridge` relies on this mechanism rather than a bridge-side watchdog.
 
 ### ⚡ Interrupt architecture
 
@@ -763,7 +762,7 @@ to `ostomachion_bd.tcl` and the Zephyr driver ISR.
 | Xilinx xfft FFT accelerator | **Done** — 4096-pt, 16-bit, pipelined streaming, `ostomachion_bd.tcl` |
 | FFT overflow detection | **Done** — xfft `ovflo` output wired to IRQ; `fft_accel_get_last_overflow()` |
 | Configurable DMA timeout | **Done** — `CONFIG_FFT_ACCEL_TIMEOUT_MS` (default 100 ms) |
-| AXI bridge watchdog | **Done** — 256-cycle AXI response timeout in `xbus_axi4lite_bridge.vhd` |
+| AXI bridge timeout | **Done** — NEORV32 `XBUS_TIMEOUT` (255 cycles); upstream `xbus2axi4_bridge` |
 | Generic accelerator abstraction | **Done** — `ostomachion::Accel` / `AccelOpDesc` (RTTI-free type-tag enum) |
 | `twister` integration | **Done** — `testcase.yaml` and three test configurations |
 | West manifest (`west.yml`) | **Done** — pins Zephyr SHA `d465eac074fa` + SDK 1.0.0 |

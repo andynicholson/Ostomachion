@@ -83,11 +83,11 @@ diff <(grep "UART_CTRL" neorv32/sw/lib/include/neorv32_uart.h) \
 ### Risk 2 (MEDIUM): XBUS Protocol Changes
 
 **Current state:**  
-The XBUS-to-AXI4-Lite bridge (`rtl/xbus_axi4lite_bridge.vhd`) is stable in
-v1.11.6. NEORV32's internal bus was reworked at v1.11.3.7, but the XBUS
-external interface at `neorv32_top` was unchanged — XBUS remains a
-Wishbone-compatible bus with `cyc`, `stb`, `we`, `sel`, `adr`, `dat_i`,
-`dat_o`, `ack`, `err`.
+The XBUS bridge now uses the upstream `xbus2axi4_bridge` from
+`neorv32/rtl/system_integration/`.  Since it ships with the submodule,
+protocol changes in future NEORV32 versions will be handled automatically.
+The bridge is instantiated with `BURST_EN => false` (BD is AXI4-Lite)
+and `XBUS_REGSTAGE_EN => true` is set on the NEORV32 top for timing closure.
 
 **Upgrade action required:**  
 After upgrading the submodule, re-run GHDL synthesis over the top-level VHDL:
@@ -206,7 +206,7 @@ git commit -m "chore: bump neorv32 submodule to v1.12.x"
 # 3. Verify VHDL lint (fast feedback, no Vivado needed)
 # (CI vhdl-lint job will catch generic name changes)
 ghdl -i --std=08 --work=neorv32 neorv32/rtl/core/*.vhd
-ghdl -i --std=08 --work=work rtl/xbus_axi4lite_bridge.vhd rtl/neorv32_wrapper.vhd
+ghdl -i --std=08 --work=work neorv32/rtl/system_integration/xbus2axi4_bridge.vhd rtl/neorv32_wrapper.vhd
 ghdl -i --std=08 --work=work fpga/arty_a7/arty_a7_top.vhd
 ghdl -m --std=08 --work=work arty_a7_top
 
