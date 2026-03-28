@@ -10,12 +10,11 @@
  *   uart:~$ test run spi
  *   [TEST] loopback_boundary ... PASS
  *   [TEST] multibyte_loopback ... PASS
- *   [TEST] hold_on_cs         ... PASS
  *   [TEST] stress_16           ... PASS
- *   [TEST] spi: 4 passed, 0 failed
+ *   [TEST] spi: 3 passed, 0 failed
  *
  *   uart:~$ test run all
- *   [TEST] spi: 4/4  i2c: 5/5  gpio: 5/5  fft: 4/4
+ *   [TEST] spi: 3/3  i2c: 2/2  gpio: 2/2  fft: 2/2
  */
 
 #include <zephyr/kernel.h>

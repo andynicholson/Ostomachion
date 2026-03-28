@@ -73,8 +73,7 @@ set_property -dict {CONFIG.CONST_WIDTH {1} CONFIG.CONST_VAL {1}} \
 ## xfft config: 16-bit tdata = {padding[3], SCHED_B[11:0], FWD_INV}
 ## SCHED_B[11:0] = 12 scale bits (one per stage), all 1 = divide-by-2 at every stage.
 ## 0x1FFF = 0001_1111_1111_1111: bits[12:1]=all-scaled, bit[0]=FWD.
-## For 64-pt (6 stages), forward FFT, scale all stages: value = 0x7F = 127
-## (Pipelined streaming 64-pt FFT: C_S_AXIS_CONFIG_TDATA_WIDTH=8)
+## 4096-pt (12 stages), forward FFT, scale all stages: value = 0x1FFF = 8191
 create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 const_fft_cfg
 set_property -dict {CONFIG.CONST_WIDTH {16} CONFIG.CONST_VAL {8191}} \
     [get_bd_cells const_fft_cfg]
@@ -276,7 +275,7 @@ connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXIS_MM2S] \
 connect_bd_intf_net [get_bd_intf_pins xfft_0/m_axis_data] \
                     [get_bd_intf_pins axi_dma_0/S_AXIS_S2MM]
 
-## xfft config stream: hardwired forward FFT, scale all 6 stages
+## xfft config stream: hardwired forward FFT, scale all 12 stages
 connect_bd_net [get_bd_pins const_fft_cfg/dout] \
                [get_bd_pins xfft_0/s_axis_config_tdata]
 connect_bd_net [get_bd_pins const_one/dout] \
@@ -311,11 +310,12 @@ set peripheral_rstn   [get_bd_pins proc_sys_reset_0/peripheral_aresetn]
 ## Interconnect reset → SmartConnect only
 connect_bd_net $interconnect_rstn [get_bd_pins axi_smc/aresetn]
 
-## Peripheral reset → all AXI data-path blocks
+## Peripheral reset → all AXI data-path blocks (including xfft)
 foreach pin {
     axi_dma_0/axi_resetn
     tx_bram_ctrl/s_axi_aresetn
     rx_bram_ctrl/s_axi_aresetn
+    xfft_0/aresetn
     axi_intc_0/s_axi_aresetn
 } {
     connect_bd_net $peripheral_rstn [get_bd_pins $pin]

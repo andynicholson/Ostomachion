@@ -35,7 +35,8 @@ without disturbing what already works.
   ┌──────────────────────────────────────────────────────────────────┐
   │  Application / ZTEST Suites                                      │
   │  (tests/test_spi.cpp, tests/test_i2c.cpp,                        │
-  │   tests/test_gpio.cpp, tests/test_fft_accel.cpp)                 │
+  │   tests/test_gpio.cpp, tests/test_fft_accel.cpp,                 │
+  │   tests/test_wdt.cpp)                                            │
   └────────────────────────┬─────────────────────────────────────────┘
                            │  ostomachion::hal::SpiDevice
                            │  ostomachion::hal::I2cBus
@@ -188,9 +189,10 @@ without disturbing what already works.
 | TX BRAM            | —          | FPGA only    | `0x41000000` | —               | (part of fft_accel)      | `fft_accel`  |
 | RX BRAM ctrl       | —          | FPGA only    | `0x41004000` | —               | (part of fft_accel)      | `fft_accel`  |
 
-\* **Interrupt topology**: three sources are OR-combined into the single NEORV32 MEI line via
-`xlconcat[2:0]`: bit 0 = AXI DMA MM2S complete, bit 1 = AXI DMA S2MM complete, bit 2 = xfft
-overflow.  The driver distinguishes sources by inspecting DMA status registers in the ISR.
+\* **Interrupt topology**: three sources are aggregated into the single NEORV32 MEI line via
+the AXI INTC (0x40010000): channel 0 = AXI DMA MM2S complete, channel 1 = AXI DMA S2MM
+complete, channel 2 = xfft overflow.  The driver ISR reads the INTC ISR register to
+identify pending sources and acknowledges via INTC IAR.
 See [Interrupt architecture](#interrupt-architecture) for the multi-accelerator scalability plan.
 
 ---
@@ -498,13 +500,19 @@ bypassing the baud-rate generator).
 west twister -T zephyr_app/tests --integration -v
 ```
 
-Three test configurations are defined:
+Five CI configurations and two hardware-in-the-loop (HIL) entries are defined:
 
 | Test ID | Config | Board | Type |
 |---------|--------|-------|------|
 | `ostomachion.peripherals.baseline` | `prj.conf` | neorv32 sim | build + run |
-| `ostomachion.fft.compile` | `prj.conf + prj_accel.conf` | neorv32 sim | build only |
-| `ostomachion.shell.compile` | `prj.conf + prj_shell.conf` | neorv32 sim | build only |
+| `ostomachion.fft.compile` | `prj.conf` + FFT extras | neorv32 sim | build only |
+| `ostomachion.shell.compile` | `prj.conf` + shell/FFT extras | neorv32 sim | build only |
+| `ostomachion.wdt.compile` | `prj.conf` + WDT extras | neorv32 sim | build + run |
+| `ostomachion.hw.peripherals` | `prj.conf` + FPGA + hw_test | arty_a7 | HIL (fixture: `arty_a7_hw`) |
+| `ostomachion.hw.fft` | `prj.conf` + FPGA + accel + hw_test | arty_a7 | HIL (fixture: `arty_a7_hw_fft`) |
+
+HIL tests require a self-hosted runner with the `arty_a7` label and a programmed
+bitstream.  They are excluded from `ubuntu-latest` runs via `platform_allow`.
 
 ---
 
@@ -534,7 +542,7 @@ source ~/.zephyr-venv/bin/activate
 pip install west
 west init -m <this-repo-url> --mr main ~/ostomachion_ws
 cd ~/ostomachion_ws && west update
-pip install -r zephyr/scripts/requirements.txt
+pip install -r zephyr/scripts/requirements-base.txt
 ```
 
 This clones Zephyr at the pinned SHA (`d465eac074fa`) and the four required
@@ -731,20 +739,16 @@ INTC channel 2 — xfft overflow (m_axis_status_tvalid)
          OR ────────────────────────────────────────→  NEORV32 mext_irq_i
 ```
 
-The driver ISR distinguishes sources by reading AXI DMA status registers.
-The xfft overflow is detected by the absence of DMA activity when the
-interrupt fires.
+The driver ISR reads the AXI INTC Interrupt Status Register (ISR) to
+identify which channel(s) fired, handles each pending source, and
+acknowledges via the INTC Interrupt Acknowledge Register (IAR).
 
-**Scalability limitation**: adding a second accelerator would require a
-fourth INTC channel, which still maps to the same single MEI line,
-making interrupt source discrimination increasingly complex.
-
-**Expansion for multi-accelerator platforms**: add further accelerators by
-wiring their IRQs to additional AXI INTC channels, mapping each IRQ
-source to its own INTC channel (PLIC-style).  The NEORV32 MEI line becomes
-a single "any pending" signal from the INTC, and the driver reads the INTC
-Interrupt Status Register to identify the source.  This change is isolated
-to `ostomachion_bd.tcl` and the Zephyr driver ISR.
+**Scalability for multi-accelerator platforms**: add further accelerators
+by wiring their IRQs to additional AXI INTC channels.  The NEORV32 MEI
+line remains a single "any pending" signal from the INTC; the driver
+reads the INTC ISR to disambiguate sources without heuristics.  This
+change is isolated to `ostomachion_bd.tcl` (adding channels to the
+`irq_concat_intc` and INTC) and the Zephyr driver ISR.
 
 ---
 
