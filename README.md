@@ -67,7 +67,7 @@ without disturbing what already works.
   │  FPGA RTL  (NEORV32 v1.11.6  +  upstream XBUS→AXI4 bridge)       │
   │  RISC-V RV32IMAC soft-core, SPI master, TWI master, GPIO, UART  │
   │  Bridge: neorv32/rtl/system_integration/xbus2axi4_bridge.vhd    │
-  │  Top:    fpga/arty_a7/arty_a7_top.vhd  (BUFG, IOBUF, OCD)      │
+  │  Top:    fpga/arty_a7/arty_a7_top.vhd  (IOBUF, OCD)            │
   └────────────────────────┬─────────────────────────────────────────┘
                            │  AXI4-Lite
   ┌────────────────────────▼─────────────────────────────────────────┐
@@ -421,7 +421,7 @@ and pushes to `main` / `develop`:
 | `sim` | `ubuntu-latest` | Builds Zephyr (sim config), runs `make test-zephyr`, asserts `PROJECT EXECUTION SUCCESSFUL` |
 | `twister` | `ubuntu-latest` | Runs `west twister -T zephyr_app/tests` (all configs, `neorv32` sim board) — needs `sim` to pass |
 | `vivado-synth` | `self-hosted [vivado]` | Runs `make fpga-synth && make fpga-check`, uploads `.bit`, `.rpt`, `build_id.txt` — skipped on forks |
-| `vhdl-lint` | `ubuntu-latest` | GHDL `--synth` over custom RTL + NEORV32 core — catches VHDL-2008 type errors in ~30 s |
+| `vhdl-lint` | `ubuntu-latest` | GHDL analysis of RTL (NEORV32 core + upstream bridge + FPGA top) — catches VHDL-2008 type errors in ~30 s |
 | `firmware-analysis` | `ubuntu-latest` | clang-tidy on app sources, `nm --size-sort` memory map, thread analyzer — needs `twister` to pass |
 
 In-progress runs are cancelled when a new commit arrives on the same branch.
@@ -599,9 +599,9 @@ Override any of these in the environment before sourcing if your layout differs.
    control, AXI4-Stream data, and IRQ lines.  Update `arty_a7_top.vhd` if
    the `mext_irq` bus needs widening.
 
-2. **AXI bridge** — see [Interrupt architecture](#interrupt-architecture)
-   for the current single-wire MEI limitation and the migration plan to
-   AXI INTC (PLIC-style) for multiple accelerators.
+2. **IRQ wiring** — see [Interrupt architecture](#interrupt-architecture)
+   for the current AXI INTC setup and how to add further interrupt channels
+   for additional accelerators.
 
 3. **DTS binding + overlay** — follow `ostomachion,fft-accel.yaml` and
    `app_accel.overlay`.
@@ -695,9 +695,9 @@ mode 0 (internal BROM bootloader) allows firmware to be uploaded over UART
 without re-synthesising — only `make fpga-fw` is needed for each firmware
 iteration after the initial `make fpga-synth` + `make fpga-program`.
 
-**BUFG and IOBUF in the FPGA top, not the simulation wrapper.**
-`fpga/arty_a7/arty_a7_top.vhd` instantiates Xilinx `BUFG` (clock buffer)
-and `IOBUF` (open-drain I2C) primitives directly.
+**IOBUF in the FPGA top, not the simulation wrapper.**
+`fpga/arty_a7/arty_a7_top.vhd` instantiates Xilinx `IOBUF` (open-drain I2C)
+primitives directly; clock buffering is handled by the MMCM in the block design.
 `rtl/neorv32_wrapper.vhd` remains technology-neutral for simulation.
 
 **`std::span` + `std::byte` in the HAL.**
@@ -755,33 +755,8 @@ to `ostomachion_bd.tcl` and the Zephyr driver ISR.
 
 | Item | Status |
 |------|--------|
-| Interrupt-driven SPI/I2C drivers | **Done** — `CONFIG_SPI_NEORV32_INTERRUPT` / `CONFIG_I2C_NEORV32_INTERRUPT`; enabled by `prj_fpga.conf` |
-| Physical FPGA target (Arty A7-100T) | **Done** — `fpga/arty_a7/` with VHDL top, XDC, Vivado TCL, OpenOCD config |
-| UART bootloader firmware upload | **Done** — `make fpga-fw` via `uart_upload.sh` |
-| JTAG on-chip debug | **Done** — `OCD_EN=true` in FPGA top, `openocd.cfg` + NEORV32 OCD config |
-| Xilinx xfft FFT accelerator | **Done** — 4096-pt, 16-bit, pipelined streaming, `ostomachion_bd.tcl` |
-| FFT overflow detection | **Done** — xfft `ovflo` output wired to IRQ; `fft_accel_get_last_overflow()` |
-| Configurable DMA timeout | **Done** — `CONFIG_FFT_ACCEL_TIMEOUT_MS` (default 100 ms) |
-| AXI bridge timeout | **Done** — NEORV32 `XBUS_TIMEOUT` (255 cycles); upstream `xbus2axi4_bridge` |
-| Generic accelerator abstraction | **Done** — `ostomachion::Accel` / `AccelOpDesc` (RTTI-free type-tag enum) |
-| `twister` integration | **Done** — `testcase.yaml` and three test configurations |
-| West manifest (`west.yml`) | **Done** — pins Zephyr SHA `d465eac074fa` + SDK 1.0.0 |
-| GitHub Actions CI | **Done** — sim, twister, vivado-synth jobs in `.github/workflows/ci.yml` |
-| Debug ILA bitstream | **Done** — `vivado … -tclargs debug` inserts ILA on DMA↔xfft, IRQ nets |
-| Build-ID version manifest | **Done** — git hash embedded in bitstream USERID; `build_id.txt` written; `CONFIG_OSTOMACHION_HW_BUILD_ID` for firmware |
 | FFT driver thread safety | **Design constraint** — callers serialised by mutex; single `FftAccel` instance per system recommended |
 | FFT GHDL simulation | **Not supported** — Xilinx encrypted IP is not simulatable in GHDL |
-| AXI INTC for multi-accelerator IRQ | **Done** — `xlconcat` replaced with `axi_intc` in `ostomachion_bd.tcl`; per-channel ISR in `fft_accel.c`; scalable to further accelerators |
-| `GpioInput` HAL class | **Done** — merged into `hal/gpio.hpp` with `get()` / `is_active()`, ZTEST coverage in `test_gpio.cpp` |
-| SPI flash boot (bitstream persistence) | **Done** — `write_cfgmem` in `build.tcl`, `make fpga-flash` via `program_flash.tcl`; `BOOT_MODE_SELECT=0` (BROM) for firmware uploads |
-| Watchdog Timer (WDT) software driver | **Done** — `drivers/wdt/wdt_neorv32.c`, DTS binding, `wdt_feed` in LED blink thread, ZTEST coverage |
-| RTL linting in CI | **Done** — `vhdl-lint` CI job (GHDL, ~30 s on ubuntu-latest) |
-| Firmware static analysis in CI | **Done** — `firmware-analysis` CI job (clang-tidy + nm memory map + thread analyzer) |
-| Hardware-in-the-loop CI | **Done** — `ostomachion.hw.*` testcase.yaml entries; requires self-hosted runner with label `arty_a7` |
-| Semantic versioning | **Done** — `git describe --tags` in `build_id.txt`; USERID embeds git hash |
-| Certification artifacts | **Done** — `scripts/gen_release_artifacts.sh`, `make fpga-release` |
-| Acceptance Test Procedure | **Done** — `docs/acceptance_test_procedure.md` (ATP-01..ATP-10) |
-| NEORV32 upgrade assessment | **Done** — `docs/neorv32_upgrade_notes.md` (v1.11.6 → v1.12 risk analysis, go/no-go) |
 | 10-bit I2C addressing | **Not supported** — NEORV32 TWI is 7-bit only |
 | Second FPGA board target | **Roadmap** — parameterised `fpga/` layout supports additional boards |
 
@@ -881,7 +856,7 @@ All required files live in `fpga/arty_a7/`.
 > pin-compatible CSG324 package.  The 100T is required because the design
 > uses ~64 RAMB36 (4096-pt xfft IP, AXI DMA, TX/RX BRAMs, NEORV32 IMEM/DMEM)
 > and the 35T provides only 50 RAMB36.  Verified build-time utilisation on 100T:
-> **LUTs 17.21%, BRAMs 47.04%** (WNS +0.292 ns, WHS +0.019 ns at 100 MHz,
+> **LUTs 18.96%, BRAMs 48.52%** (WNS +0.725 ns, WHS +0.007 ns at 100 MHz,
 > 0 DRC errors).
 
 ### ✅ Prerequisites
