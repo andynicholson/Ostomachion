@@ -177,7 +177,9 @@ set_false_path -to [get_cells -hierarchical -filter {NAME =~ *uart_src_sync1*}]
 ## TX FIFO reset: sys_rstn (sys_clk) drives rst on the TX xpm_fifo_async
 ## whose wr_clk is fp_clk.  XPM internally synchronizes the reset across
 ## clock domains; the inter-clock path does not need to be timed.
+## The prog_full logic also has a reset input from this CDC path.
 set_false_path -to [get_cells -hierarchical -filter {NAME =~ *uart_bridge_i/tx_fifo_i*xpm_fifo_rst_inst*}]
+set_false_path -to [get_cells -hierarchical -filter {NAME =~ *uart_bridge_i/tx_fifo_i*prog_full_i*}]
 
 ## ==========================================================================
 ## Bitstream / configuration

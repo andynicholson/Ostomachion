@@ -51,6 +51,10 @@ entity fp_uart_bridge is
     -- RX FIFO entry count (fp_clk domain, for WireOut)
     rx_count   : out std_logic_vector(10 downto 0);
 
+    -- BTPipe flow-control (fp_clk domain)
+    tx_ready   : out std_logic;   -- TX FIFO can accept data (not full)
+    rx_ready   : out std_logic;   -- RX FIFO has data available (not empty)
+
     -- Baud rate divisor (fp_clk domain, from WireIn)
     baud_div   : in  std_logic_vector(15 downto 0)
   );
@@ -78,12 +82,13 @@ architecture rtl of fp_uart_bridge is
   signal rx_valid    : std_logic := '0';
 
   -- RX FIFO (sys_clk write → fp_clk read)
-  signal rxf_wr_en : std_logic;
-  signal rxf_full  : std_logic;
-  signal rxf_rd_en : std_logic;
-  signal rxf_dout  : std_logic_vector(7 downto 0);
-  signal rxf_empty : std_logic;
-  signal rxf_rdcnt : std_logic_vector(10 downto 0);
+  signal rxf_wr_en    : std_logic;
+  signal rxf_full     : std_logic;
+  signal rxf_rd_en    : std_logic;
+  signal rxf_dout     : std_logic_vector(7 downto 0);
+  signal rxf_empty    : std_logic;
+  signal rxf_rdcnt    : std_logic_vector(10 downto 0);
+  signal rxf_valid_r  : std_logic := '0';  -- registered valid flag, aligned with rxf_dout
 
   ---------------------------------------------------------------------------
   -- UART TX — serializes bytes toward NEORV32 uart0_rxd_i
@@ -94,11 +99,12 @@ architecture rtl of fp_uart_bridge is
   signal tx_shift    : std_logic_vector(8 downto 0) := (others => '1');
 
   -- TX FIFO (fp_clk write → sys_clk read, FWFT so data is ready immediately)
-  signal txf_wr_en : std_logic;
-  signal txf_full  : std_logic;
-  signal txf_rd_en : std_logic;
-  signal txf_dout  : std_logic_vector(7 downto 0);
-  signal txf_empty : std_logic;
+  signal txf_wr_en    : std_logic;
+  signal txf_full     : std_logic;
+  signal txf_prog_full : std_logic;
+  signal txf_rd_en    : std_logic;
+  signal txf_dout     : std_logic_vector(7 downto 0);
+  signal txf_empty    : std_logic;
 
 begin
 
@@ -171,8 +177,10 @@ begin
 
   ---------------------------------------------------------------------------
   -- RX Async FIFO: sys_clk (write) → fp_clk (read)
-  -- Standard read mode (latency = 1) matches PipeOut timing requirement:
-  -- data valid one fp_clk cycle after rd_en.
+  -- Standard read mode (latency = 1) matches okPipeOut timing: PipeOut
+  -- asserts po_rd on cycle N and captures po_data on cycle N+1.
+  -- The valid flag rxf_valid_r is registered on the same edge so it
+  -- arrives at po_data(8) aligned with rxf_dout on po_data(7:0).
   ---------------------------------------------------------------------------
   rxf_wr_en <= rx_valid and not rxf_full;
 
@@ -226,16 +234,34 @@ begin
       dbiterr       => open
     );
 
-  -- PipeOut interface: one UART byte per 32-bit pipe word in bits [7:0]
-  rxf_rd_en              <= po_rd;
-  po_data(31 downto 8)   <= (others => '0');
+  -- PipeOut interface: one UART byte per 32-bit pipe word.
+  -- Gate rd_en so empty-FIFO reads don't cause underflow.
+  -- Register the "had data" flag so it arrives on the same cycle as
+  -- rxf_dout (both one fp_clk after po_rd) — matching okPipeOut latency.
+  rxf_rd_en <= po_rd and not rxf_empty;
+
+  process (fp_clk)
+  begin
+    if rising_edge(fp_clk) then
+      rxf_valid_r <= po_rd and not rxf_empty;
+    end if;
+  end process;
+
+  po_data(31 downto 9)   <= (others => '0');
+  po_data(8)             <= rxf_valid_r;
   po_data(7 downto 0)    <= rxf_dout;
   rx_count               <= rxf_rdcnt;
+
+  tx_ready               <= not txf_prog_full;
+  rx_ready               <= not rxf_empty;
 
   ---------------------------------------------------------------------------
   -- TX Async FIFO: fp_clk (write) → sys_clk (read)
   -- FWFT mode so dout is valid as soon as the FIFO is non-empty;
   -- the UART TX process reads when idle and data is available.
+  -- prog_full threshold = 1792 leaves 256 entries free (one BTPipe block).
+  -- This ensures ep_ready deasserts before the FIFO is truly full,
+  -- giving the BTPipeIn controller time to halt without data loss.
   ---------------------------------------------------------------------------
   txf_wr_en <= pi_wr and not txf_full and pi_data(8);
 
@@ -249,13 +275,13 @@ begin
       FIFO_WRITE_DEPTH    => 2048,
       FULL_RESET_VALUE    => 0,
       PROG_EMPTY_THRESH   => 10,
-      PROG_FULL_THRESH    => 10,
+      PROG_FULL_THRESH    => 1792,
       RD_DATA_COUNT_WIDTH => 11,
       READ_DATA_WIDTH     => 8,
       READ_MODE           => "fwft",
       RELATED_CLOCKS      => 0,
       SIM_ASSERT_CHK      => 0,
-      USE_ADV_FEATURES    => "0000",
+      USE_ADV_FEATURES    => "0002",
       WAKEUP_TIME         => 0,
       WRITE_DATA_WIDTH    => 8,
       WR_DATA_COUNT_WIDTH => 11
@@ -276,7 +302,7 @@ begin
       rd_rst_busy   => open,
       overflow      => open,
       underflow     => open,
-      prog_full     => open,
+      prog_full     => txf_prog_full,
       prog_empty    => open,
       almost_full   => open,
       almost_empty  => open,

@@ -108,30 +108,35 @@ and boots correctly.
 
 **Procedure:**
 
-1. Build the FPGA firmware:
+1. Start the UART bridge with FPGA programming (Terminal 1).  The bridge
+   starts at 19200 baud (bootloader) and automatically switches to 115200
+   (firmware) after the upload script signals it:
    ```bash
-   make zephyr-fpga
+   make uart-bridge PROGRAM=1
+   # Note the PTY path (e.g. /dev/pts/3).
+   # The bootloader banner will scroll past in the bridge output.
+   # Do NOT open minicom yet — the upload script needs exclusive
+   # access to the PTY.
    ```
-2. Reset the board and upload within the bootloader's auto-boot window:
+2. Upload firmware (Terminal 2).  Wait for the bootloader's `CMD:>`
+   prompt (visible in the bridge's debug output) before running this:
    ```bash
-   # With UART bridge (USB-C only):
-   # Terminal 1: make uart-bridge        (19200 baud, prints PTY path)
-   # Terminal 2:
    make fpga-fw UART_DEVICE=/dev/pts/3
-
-   # With MC1 USB-UART:
-   make fpga-fw UART_DEVICE=/dev/ttyUSB1
    ```
-3. Switch the terminal to **115200 baud** to see firmware output:
+   When the upload finishes, the bridge automatically switches to 115200.
+3. Open minicom at 115200 baud (Terminal 2, after upload completes):
    ```bash
-   # UART bridge: Ctrl-C in terminal 1, then:
-   make uart-bridge BRIDGE_BAUD=115200
    minicom -D /dev/pts/3 -b 115200
-
-   # MC1 USB-UART:
-   minicom -D /dev/ttyUSB1 -b 115200
    ```
-4. Observe the Zephyr boot banner.
+   The Zephyr boot banner should appear.
+
+   > **Important:** Do not open minicom while the upload is running.
+   > Both minicom and `uart_upload.sh` read from the same PTY; running
+   > them simultaneously causes them to steal bytes from each other.
+
+   > **With MC1 USB-UART:** use
+   > `make fpga-fw UART_DEVICE=/dev/ttyUSB1` then
+   > `minicom -D /dev/ttyUSB1 -b 115200`.
 
 **Expected output (partial):**
 ```
@@ -209,11 +214,20 @@ SUITE PASS
 
 **Procedure:**
 
-1. After firmware boots (ATP-02), observe the on-board LEDs D1–D8.
-2. LED D1 (gpio[0]) should blink at approximately **1 Hz** (500 ms on/off)
-   driven by the `led_blink_thread`.
+1. Build and upload the hardware test firmware:
+   ```bash
+   # Terminal 1 (bridge must already be running from ATP-01/02, or restart it):
+   make uart-bridge PROGRAM=1
+   # Terminal 2:
+   make test-hw UART_DEVICE=/dev/pts/3
+   ```
+2. After upload, the bridge switches to 115200 baud automatically.
+   Switch minicom to 115200 (`Ctrl-A P` → 115200) and observe the
+   GPIO test suite output.
+3. Visually confirm LED D1 (gpio[0]) blinks at approximately **1 Hz**
+   (500 ms on/off) on the XEM7310 module.
 
-**Expected output (UART):**
+**Expected output (UART at 115200 baud):**
 ```
 Running test suite ostomachion_gpio
 Running test test_gpio_device_ready...PASSED
@@ -228,8 +242,8 @@ SUITE PASS
 ```
 
 **Pass Criterion:**
-- GPIO ZTEST suite passes (UART output via `make uart-bridge` PTY or MC1 adapter).
-- LED D1 visible blink at ~1 Hz on the XEM7310 module during normal operation. ✓
+- GPIO ZTEST suite passes (all tests PASSED in UART output). ✓
+- LED D1 visible blink at ~1 Hz on the XEM7310 module. ✓
 
 ---
 

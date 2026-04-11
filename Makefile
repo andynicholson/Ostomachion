@@ -186,14 +186,15 @@ fpga-flash: $(BIT_FILE)
 ## The PTY path is printed on startup, e.g. /dev/pts/3.  Use it as:
 ##   make fpga-fw UART_DEVICE=/dev/pts/3
 ##   minicom -D /dev/pts/3 -b 19200
-BRIDGE_BAUD ?= 19200
+BRIDGE_BAUD       ?= 19200
+BRIDGE_BAUD_AFTER ?= 115200
 
 uart-bridge:
 	@echo "=== Starting FrontPanel UART bridge ($(BRIDGE_BAUD) baud) ==="
 ifdef PROGRAM
-	python3 scripts/uart_bridge.py --baud $(BRIDGE_BAUD) --program $(BIT_FILE) $(BRIDGE_ARGS)
+	python3 scripts/uart_bridge.py --baud $(BRIDGE_BAUD) --baud-after $(BRIDGE_BAUD_AFTER) --program $(BIT_FILE) $(BRIDGE_ARGS)
 else
-	python3 scripts/uart_bridge.py --baud $(BRIDGE_BAUD) $(BRIDGE_ARGS)
+	python3 scripts/uart_bridge.py --baud $(BRIDGE_BAUD) --baud-after $(BRIDGE_BAUD_AFTER) $(BRIDGE_ARGS)
 endif
 
 ## Upload Zephyr firmware to the NEORV32 bootloader over UART.
@@ -208,8 +209,12 @@ fpga-fw: zephyr-fpga
 	@echo "=== Uploading firmware via NEORV32 UART bootloader ==="
 	bash $(NEORV32_HOME)/sw/image_gen/uart_upload.sh \
 		$(UART_DEVICE) \
-		$(ZEPHYR_BUILD_FPGA)/zephyr/zephyr.bin
+		$(ZEPHYR_BUILD_FPGA)/zephyr/zephyr_exe.bin
 	@echo "=== Firmware upload complete ==="
+	@if [ -f /tmp/uart_bridge.pid ]; then \
+		kill -USR1 "$$(cat /tmp/uart_bridge.pid)" 2>/dev/null && \
+		echo "=== Signalled UART bridge to switch baud ===" || true; \
+	fi
 
 ## Stage release certification artifacts into release/<VERSION>/.
 ## Requires: fpga-synth must have completed successfully.
@@ -250,7 +255,7 @@ test-hw:
 	@echo "=== Uploading hardware test firmware via UART bootloader ==="
 	bash $(NEORV32_HOME)/sw/image_gen/uart_upload.sh \
 		$(UART_DEVICE) \
-		$(ZEPHYR_BUILD_HW_TEST)/zephyr/zephyr.bin
+		$(ZEPHYR_BUILD_HW_TEST)/zephyr/zephyr_exe.bin
 	@echo "=== Firmware uploaded — connect a terminal at 115200 baud to see results ==="
 
 ## Build automated ZTEST image with FFT accelerator support and upload.
@@ -267,7 +272,7 @@ test-accel-hw:
 	@echo "=== Uploading ZTEST accelerator firmware via UART bootloader ==="
 	bash $(NEORV32_HOME)/sw/image_gen/uart_upload.sh \
 		$(UART_DEVICE) \
-		$(ZEPHYR_BUILD_ACCEL)/zephyr/zephyr.bin
+		$(ZEPHYR_BUILD_ACCEL)/zephyr/zephyr_exe.bin
 	@echo "=== Firmware uploaded — connect a terminal at 115200 baud ==="
 
 ## Build interactive shell firmware with FFT commands and upload.
@@ -284,7 +289,7 @@ shell-hw:
 	@echo "=== Uploading shell firmware via UART bootloader ==="
 	bash $(NEORV32_HOME)/sw/image_gen/uart_upload.sh \
 		$(UART_DEVICE) \
-		$(ZEPHYR_BUILD_SHELL)/zephyr/zephyr.bin
+		$(ZEPHYR_BUILD_SHELL)/zephyr/zephyr_exe.bin
 	@echo "=== Connect at 115200 baud — type 'help' for available commands ==="
 
 ## NOTE: FFT simulation target removed.

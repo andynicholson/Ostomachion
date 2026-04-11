@@ -8,7 +8,7 @@
 --   ├── neorv32_top             (RISC-V SoC, library neorv32, std_ulogic ports)
 --   ├── xbus2axi4_bridge        (upstream NEORV32 XBUS→AXI4, std_ulogic XBUS side)
 --   ├── IOBUF_SDA / IOBUF_SCL  (open-drain I2C pads, Xilinx primitive)
---   ├── okHost + okWireIn/Out + okPipeIn/Out  (FrontPanel USB interface)
+--   ├── okHost + okWireIn/Out + okBTPipeIn/Out  (FrontPanel USB interface)
 --   └── fp_uart_bridge          (UART ↔ FrontPanel Pipes, async FIFOs)
 --
 -- Target: xc7a200tfbg484-1  (Opal Kelly XEM7310-A200)
@@ -142,21 +142,25 @@ architecture rtl of xem7310_top is
   );
   end component;
 
-  component okPipeIn port (
-    okHE       : in  std_logic_vector(112 downto 0);
-    okEH       : out std_logic_vector(64 downto 0);
-    ep_addr    : in  std_logic_vector(7 downto 0);
-    ep_dataout : out std_logic_vector(31 downto 0);
-    ep_write   : out std_logic
+  component okBTPipeIn port (
+    okHE           : in  std_logic_vector(112 downto 0);
+    okEH           : out std_logic_vector(64 downto 0);
+    ep_addr        : in  std_logic_vector(7 downto 0);
+    ep_write       : out std_logic;
+    ep_blockstrobe : out std_logic;
+    ep_dataout     : out std_logic_vector(31 downto 0);
+    ep_ready       : in  std_logic
   );
   end component;
 
-  component okPipeOut port (
-    okHE      : in  std_logic_vector(112 downto 0);
-    okEH      : out std_logic_vector(64 downto 0);
-    ep_addr   : in  std_logic_vector(7 downto 0);
-    ep_datain : in  std_logic_vector(31 downto 0);
-    ep_read   : out std_logic
+  component okBTPipeOut port (
+    okHE           : in  std_logic_vector(112 downto 0);
+    okEH           : out std_logic_vector(64 downto 0);
+    ep_addr        : in  std_logic_vector(7 downto 0);
+    ep_read        : out std_logic;
+    ep_blockstrobe : out std_logic;
+    ep_datain      : in  std_logic_vector(31 downto 0);
+    ep_ready       : in  std_logic
   );
   end component;
 
@@ -187,13 +191,15 @@ architecture rtl of xem7310_top is
   signal wo20_data    : std_logic_vector(31 downto 0);
   signal rx_count     : std_logic_vector(10 downto 0);
 
-  -- PipeIn 0x80: host → NEORV32 UART data
+  -- BTPipeIn 0x80: host → NEORV32 UART data (block-throttled)
   signal pi80_data    : std_logic_vector(31 downto 0);
   signal pi80_write   : std_logic;
+  signal pi80_ready   : std_logic;
 
-  -- PipeOut 0xA0: NEORV32 UART data → host
+  -- BTPipeOut 0xA0: NEORV32 UART data → host (block-throttled)
   signal poA0_data    : std_logic_vector(31 downto 0);
   signal poA0_read    : std_logic;
+  signal poA0_ready   : std_logic;
 
   -- UART bridge outputs (system clock domain)
   signal bridge_uart_rx : std_logic;
@@ -432,24 +438,28 @@ begin
       ep_datain => wo20_data
     );
 
-  -- PipeIn 0x80: host → NEORV32 UART data
-  pi80_i : okPipeIn
+  -- BTPipeIn 0x80: host → NEORV32 UART data (block-throttled, hardware flow control)
+  pi80_i : okBTPipeIn
     port map (
-      okHE       => okHE,
-      okEH       => okEHx(1*65+64 downto 1*65),
-      ep_addr    => x"80",
-      ep_dataout => pi80_data,
-      ep_write   => pi80_write
+      okHE           => okHE,
+      okEH           => okEHx(1*65+64 downto 1*65),
+      ep_addr        => x"80",
+      ep_write       => pi80_write,
+      ep_blockstrobe => open,
+      ep_dataout     => pi80_data,
+      ep_ready       => pi80_ready
     );
 
-  -- PipeOut 0xA0: NEORV32 UART data → host
-  poA0_i : okPipeOut
+  -- BTPipeOut 0xA0: NEORV32 UART data → host (block-throttled, hardware flow control)
+  poA0_i : okBTPipeOut
     port map (
-      okHE      => okHE,
-      okEH      => okEHx(2*65+64 downto 2*65),
-      ep_addr   => x"A0",
-      ep_datain => poA0_data,
-      ep_read   => poA0_read
+      okHE           => okHE,
+      okEH           => okEHx(2*65+64 downto 2*65),
+      ep_addr        => x"A0",
+      ep_read        => poA0_read,
+      ep_blockstrobe => open,
+      ep_datain      => poA0_data,
+      ep_ready       => poA0_ready
     );
 
   -- OR all endpoint-to-host buses
@@ -473,6 +483,8 @@ begin
       pi_data   => pi80_data,
       pi_wr     => pi80_write,
       rx_count  => rx_count,
+      tx_ready  => pi80_ready,
+      rx_ready  => poA0_ready,
       baud_div  => fp_baud_div
     );
 
