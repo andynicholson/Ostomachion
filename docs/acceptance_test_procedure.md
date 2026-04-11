@@ -140,12 +140,16 @@ and boots correctly.
 
 **Expected output (partial):**
 ```
-*** Booting Zephyr OS build v3.x.x ***
-Ostomachion platform — build: v1.0.0 (git: abc1234e, ...)
-[00:00:00.001,000] <inf> fft_accel: FFT accelerator (xfft) initialised, ...
+*** Booting Zephyr OS build v4.x.x ***
+Running TESTSUITE ostomachion_gpio
+===================================================================
+START - test_gpio_device_ready
+ PASS - test_gpio_device_ready in 0.002 seconds
+...
 ```
 
-**Pass Criterion:** Zephyr boot banner visible, no panic/assertion. ✓
+**Pass Criterion:** Zephyr boot banner visible, ZTEST output appears,
+no panic/assertion. ✓
 
 ---
 

@@ -80,6 +80,8 @@ def open_device(serial: str | None = None):
         print(f"ERROR: OpenBySerial failed (error code {rc}).", file=sys.stderr)
         sys.exit(1)
 
+    dev.SetTimeout(120000)
+
     print(f"Device : {dev.GetDeviceID()}")
     print(f"Serial : {dev.GetSerialNumber()}")
     print(f"FW ver : {dev.GetDeviceMajorVersion()}.{dev.GetDeviceMinorVersion()}")
