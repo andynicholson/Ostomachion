@@ -23,8 +23,9 @@ roadmap planning.
 
 | Reason | Details |
 |--------|---------|
-| Timing closure verified | Build verified at +0.292 ns WNS / +0.019 ns WHS on xc7a100tcsg324-1 |
+| Timing closure verified | Build verified at +0.292 ns WNS / +0.019 ns WHS on xc7a200tfbg484-1 |
 | Zephyr driver compatibility | **Upstream (Zephyr tree):** `uart_neorv32`, `gpio_neorv32` (NEORV32 board BSP). **This repo (out-of-tree):** `spi_neorv32`, `i2c_neorv32`, `wdt_neorv32`, FFT accel — all verified / maintained against v1.11.6 |
+| FrontPanel UART bridge | `fp_uart_bridge.vhd` intercepts NEORV32 UART0 signals — verify UART port names after upgrade |
 | Submodule hash | Pinned in `.gitmodules`; deterministic builds guaranteed |
 | No known regressions | CI and hardware acceptance tests have passed on this version |
 
@@ -38,7 +39,7 @@ and represent the "delta absorbed" when v1.11.6 was adopted.
 
 | Version | Change | Impact on Ostomachion |
 |---------|--------|-----------------------|
-| v1.11.5.8 | `IMEM_EN`/`IMEM_SIZE`/`DMEM_EN`/`DMEM_SIZE` generics renamed | **Already handled** in v1.11.6; `arty_a7_top.vhd` uses current names |
+| v1.11.5.8 | `IMEM_EN`/`IMEM_SIZE`/`DMEM_EN`/`DMEM_SIZE` generics renamed | **Already handled** in v1.11.6; `xem7310_top.vhd` uses current names |
 | v1.11.3.7 | Internal bus protocol reworked | XBUS remains stable at `neorv32_top` boundary; bridge is unaffected |
 | v1.11.4.8 | Hardware spinlocks removed | Not used by this platform |
 | v1.11.4.7 | `mcause` CSR now read-only | Not written by application code |
@@ -101,7 +102,7 @@ catch any XBUS port signature changes before committing to re-synthesis.
 
 **Current state (v1.11.6):**
 
-| Generic | Type | Value in arty_a7_top.vhd |
+| Generic | Type | Value in xem7310_top.vhd |
 |---------|------|--------------------------|
 | `CLOCK_FREQUENCY` | natural | 100_000_000 |
 | `BOOT_MODE_SELECT` | natural range 0..2 | 0 |
@@ -207,8 +208,8 @@ git commit -m "chore: bump neorv32 submodule to v1.12.x"
 # (CI vhdl-lint job will catch generic name changes)
 ghdl -i --std=08 --work=neorv32 neorv32/rtl/core/*.vhd
 ghdl -i --std=08 --work=work neorv32/rtl/system_integration/xbus2axi4_bridge.vhd rtl/neorv32_wrapper.vhd
-ghdl -i --std=08 --work=work fpga/arty_a7/arty_a7_top.vhd
-ghdl -m --std=08 --work=work arty_a7_top
+ghdl -i --std=08 --work=work fpga/xem7310/fp_uart_bridge.vhd fpga/xem7310/xem7310_top.vhd
+ghdl -m --std=08 --work=work xem7310_top
 
 # 4. Verify UART driver register compatibility
 diff <(grep "UART_CTRL" neorv32/sw/lib/include/neorv32_uart.h | sort) \

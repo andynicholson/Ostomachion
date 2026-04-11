@@ -18,23 +18,30 @@ ZEPHYR_BUILD_DIR = build_zephyr
 ZEPHYR_BOARD     = neorv32/neorv32/minimalboot
 IMAGE_GEN_DIR    = $(CURDIR)/neorv32/sw/image_gen
 
-# ---------- FPGA / Arty A7 settings ------------------------------------------
+# ---------- FPGA / Opal Kelly XEM7310-A200 settings ---------------------------
 # Override on the command line, e.g.: make fpga-synth VIVADO=/opt/Xilinx/Vivado/2024.1/bin/vivado
 VIVADO      ?= vivado
 OPENOCD     ?= openocd
-UART_DEVICE ?= /dev/ttyUSB1
+UART_DEVICE ?= /dev/ttyUSB0
 
-FPGA_DIR             = fpga/arty_a7
+# FrontPanel SDK paths — auto-detected from FRONTPANEL_DIR, or override directly.
+FRONTPANEL_DIR ?= $(wildcard /home/andy/OpalKelly/FrontPanel-Ubuntu24.04LTS-x64-5.3.6)
+FP_PYTHON_DIR  ?= $(FRONTPANEL_DIR)/API/Python
+FP_LIB_DIR     ?= $(FRONTPANEL_DIR)/API
+export PYTHONPATH    := $(FP_PYTHON_DIR)$(if $(PYTHONPATH),:$(PYTHONPATH))
+export LD_LIBRARY_PATH := $(FP_LIB_DIR)$(if $(LD_LIBRARY_PATH),:$(LD_LIBRARY_PATH))
+
+FPGA_DIR             = fpga/xem7310
 ZEPHYR_BUILD_FPGA    = build_zephyr_fpga
 ZEPHYR_BUILD_HW_TEST = build_zephyr_hw_test
 ZEPHYR_BUILD_ACCEL   = build_zephyr_accel_test
 ZEPHYR_BUILD_SHELL   = build_zephyr_shell
-BIT_FILE             = build/arty_a7/ostomachion_arty_a7.bit
-MCS_FILE             = build/arty_a7/ostomachion_arty_a7.mcs
+BIT_FILE             = build/xem7310/ostomachion_xem7310.bit
+MCS_FILE             = build/xem7310/ostomachion_xem7310.mcs
 
 .PHONY: all analyze simulate clean sw test-baremetal test-default test-zephyr zephyr \
         zephyr-fpga fpga-synth fpga-program fpga-flash fpga-fw fpga-check fpga-release \
-        test-hw test-accel-hw shell-hw
+        test-hw test-accel-hw shell-hw uart-bridge
 
 # ---------- default flow (uses the image baked into neorv32/rtl/core) ------
 all: analyze simulate
@@ -120,7 +127,7 @@ clean: clean-ghdl
 	rm -rf $(ZEPHYR_BUILD_DIR) $(ZEPHYR_BUILD_FPGA) $(ZEPHYR_BUILD_HW_TEST) \
 	       $(ZEPHYR_BUILD_ACCEL) $(ZEPHYR_BUILD_SHELL)
 
-# ---------- FPGA targets (Arty A7) -------------------------------------------
+# ---------- FPGA targets (Opal Kelly XEM7310-A200) ----------------------------
 
 ## Build Zephyr firmware for the FPGA target.
 ## Applies app_fpga.overlay (115200 baud) and prj_fpga.conf (IRQ drivers,
@@ -134,41 +141,69 @@ zephyr-fpga:
 		   -DOVERLAY_CONFIG="$(CURDIR)/$(ZEPHYR_APP_DIR)/prj.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_fpga.conf"
 	$(call update-compile-commands,$(ZEPHYR_BUILD_FPGA))
 
-## Synthesise, implement and generate the Arty A7 bitstream via Vivado batch mode.
+## Synthesise, implement and generate the XEM7310-A200 bitstream via Vivado.
 ## Requires Vivado to be on PATH or VIVADO variable set.
-## Output: build/arty_a7/ostomachion_arty_a7.bit
+## Output: build/xem7310/ostomachion_xem7310.bit
 fpga-synth:
 	@echo "=== Running Vivado batch build ==="
-	mkdir -p build/arty_a7
+	mkdir -p build/xem7310
 	@command -v "$(VIVADO)" >/dev/null 2>&1 || { echo "ERROR: '$(VIVADO)' not found — install Vivado and add to PATH or set VIVADO=/path/to/vivado"; exit 1; }
-	bash -o pipefail -c '$(VIVADO) -mode batch -source $(FPGA_DIR)/build.tcl 2>&1 | tee build/arty_a7/build.log'
+	bash -o pipefail -c '$(VIVADO) -mode batch -source $(FPGA_DIR)/build.tcl 2>&1 | tee build/xem7310/build.log'
 	@echo "=== Bitstream: $(BIT_FILE) ==="
 
-## Program the Arty A7 bitstream over JTAG using OpenOCD.
-## The bitstream is loaded into SRAM (volatile; erased on power-cycle).
-## Requires OpenOCD ≥ 0.12 with Xilinx support and the Digilent FTDI driver.
+## Program the XEM7310-A200 bitstream over USB using the Opal Kelly
+## FrontPanel Python API.  The board must be connected via USB-C.
+## Requires: FrontPanel SDK installed, 'ok' Python package importable.
 fpga-program: $(BIT_FILE)
-	@echo "=== Programming Arty A7 via JTAG ==="
-	$(OPENOCD) -f $(FPGA_DIR)/openocd.cfg \
-		-c "pld load 0 $(BIT_FILE)" \
-		-c shutdown
+	@echo "=== Programming XEM7310-A200 via FrontPanel USB ==="
+	python3 scripts/fpga_program.py $(BIT_FILE)
 
-## Write the bitstream to the on-board Quad-SPI flash for persistent boot.
+## Write the bitstream to the on-board SPI flash for persistent boot.
+## Uses the FrontPanel FlashLoader utility from the FrontPanel SDK.
 ## After this operation the FPGA loads the design automatically on every
 ## power-up without needing fpga-program.
-## Requires: fpga-synth must have been run (produces the .mcs file).
-## Requires: Vivado on PATH and JTAG cable connected.
-fpga-flash: $(MCS_FILE)
-	@echo "=== Programming Arty A7 Quad-SPI flash via Vivado ==="
-	$(VIVADO) -mode batch -source $(FPGA_DIR)/program_flash.tcl \
-		-tclargs $(MCS_FILE) \
-		| tee build/arty_a7/flash_program.log
+## Requires: FrontPanel SDK installed (FlashLoader in PATH or SDK bin dir).
+fpga-flash: $(BIT_FILE)
+	@echo "=== Programming XEM7310-A200 SPI flash via FrontPanel ==="
+	FlashLoader --bitfile $(BIT_FILE)
 	@echo "=== Flash programming complete — FPGA will auto-boot on next power-up ==="
+
+## Start the FrontPanel UART-over-USB bridge.
+## Creates a PTY (pseudo-terminal) that minicom or the bootloader upload
+## script can use as UART_DEVICE.  Runs in the foreground; Ctrl-C to stop.
+##
+## Usage:
+##   make uart-bridge                       # 19200 baud (bootloader)
+##   make uart-bridge BRIDGE_BAUD=115200    # application baud
+##   make uart-bridge PROGRAM=1             # program FPGA first, then bridge
+##
+## With PROGRAM=1 the script creates the PTY, programs the FPGA, then starts
+## bridging — all on one USB handle.  This avoids the race where fpga-program
+## and uart-bridge can't share the FrontPanel USB device simultaneously.
+## Connect minicom to the PTY path BEFORE the FPGA finishes programming to
+## capture the bootloader banner.
+##
+## The PTY path is printed on startup, e.g. /dev/pts/3.  Use it as:
+##   make fpga-fw UART_DEVICE=/dev/pts/3
+##   minicom -D /dev/pts/3 -b 19200
+BRIDGE_BAUD ?= 19200
+
+uart-bridge:
+	@echo "=== Starting FrontPanel UART bridge ($(BRIDGE_BAUD) baud) ==="
+ifdef PROGRAM
+	python3 scripts/uart_bridge.py --baud $(BRIDGE_BAUD) --program $(BIT_FILE) $(BRIDGE_ARGS)
+else
+	python3 scripts/uart_bridge.py --baud $(BRIDGE_BAUD) $(BRIDGE_ARGS)
+endif
 
 ## Upload Zephyr firmware to the NEORV32 bootloader over UART.
 ## The NEORV32 BROM bootloader listens at 19200 baud on UART0 immediately
 ## after reset.  Use this target for firmware iteration without re-synthesising.
 ## Prerequisites: zephyr-fpga must have been built; board must be reset.
+##
+## Without MC1 access, start the UART bridge first:
+##   Terminal 1:  make uart-bridge                    (prints PTY path)
+##   Terminal 2:  make fpga-fw UART_DEVICE=/dev/pts/N
 fpga-fw: zephyr-fpga
 	@echo "=== Uploading firmware via NEORV32 UART bootloader ==="
 	bash $(NEORV32_HOME)/sw/image_gen/uart_upload.sh \
@@ -191,13 +226,18 @@ fpga-check:
 	$(VIVADO) -mode batch -source $(FPGA_DIR)/check_build.tcl
 	@echo "=== Quality check complete ==="
 
-## Build hardware test firmware and upload to the Arty A7 via UART bootloader.
+## Build hardware test firmware and upload to the XEM7310-A200 via UART bootloader.
 ## Combines prj.conf + prj_fpga.conf + prj_hw_test.conf (verbose output, logs,
-## no I2C slave by default).  Override UART_DEVICE if your board is on a
+## no I2C slave by default).  Override UART_DEVICE if your adapter is on a
 ## different port.  Bitstream must already be programmed via fpga-program.
 ##
-## Hardware test setup:
-##   SPI loopback : jumper Pmod JA pin 2 (MOSI, B11) → pin 3 (MISO, A11)
+## Without MC1 access, use the FrontPanel UART bridge:
+##   Terminal 1:  make uart-bridge                    (prints PTY path)
+##   Terminal 2:  make test-hw UART_DEVICE=/dev/pts/N
+##   Terminal 3:  make uart-bridge BRIDGE_BAUD=115200 (for test output)
+##
+## Hardware test setup (requires MC1 for SPI/I2C):
+##   SPI loopback : jumper MC1-28 (MOSI, W6) → MC1-29 (MISO, U5)
 ##   I2C slave    : add CONFIG_TEST_I2C_SLAVE_ADDR=<addr> to skip gracefully
 ##   UART output  : minicom -D $(UART_DEVICE) -b 115200
 test-hw:

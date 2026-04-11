@@ -9,7 +9,7 @@
 //
 // Note on NEORV32 GPIO INPUT register:
 //   The NEORV32 GPIO peripheral has separate OUTPUT and INPUT registers.
-//   gpio_pin_get_dt() reads the INPUT register; on the Arty A7, the LEDs
+//   gpio_pin_get_dt() reads the INPUT register; on the XEM7310-A200, the LEDs
 //   are output-only with no feedback path to the INPUT pins.  Therefore
 //   GpioInput tests verify correct API behaviour (no errors, no panics) and
 //   that the returned level is deterministic (always low for unconfigured

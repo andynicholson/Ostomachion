@@ -6,7 +6,7 @@
 #
 # The neorv32 simulator platform is used for build verification and basic
 # configuration coverage.  Hardware-in-the-loop tests require a physical
-# Arty A7 board connected to a self-hosted runner.
+# XEM7310-A200 board connected to a self-hosted runner.
 
 tests:
   # ── SPI / I2C / GPIO baseline (builds for neorv32 sim target) ───────────
@@ -59,22 +59,22 @@ tests:
     harness_config:
       fixture: neorv32_sim
 
-  # ── Hardware-in-the-Loop (HIL) — requires Arty A7 self-hosted runner ─────
+  # ── Hardware-in-the-Loop (HIL) — requires XEM7310-A200 self-hosted runner ──
   #
-  # These configurations run the full test suite on a physical Arty A7-100T
+  # These configurations run the full test suite on a physical XEM7310-A200
   # board.  Prerequisites:
-  #   1. A self-hosted GitHub Actions runner with label "arty_a7" registered
+  #   1. A self-hosted GitHub Actions runner with label "xem7310" registered
   #      on the repository (see docs/acceptance_test_procedure.md §Runner).
   #   2. The Ostomachion bitstream must be programmed via 'make fpga-flash'
   #      before the runner starts the HIL tests.
   #   3. Zephyr firmware is uploaded automatically via the NEORV32 bootloader
-  #      (BOOT_MODE_SELECT=0) at 19200 baud on the first UART port.
+  #      (BOOT_MODE_SELECT=0) at 19200 baud on the external UART adapter.
   #
   # These tests are tagged [hw] so they can be excluded from CI-only runs:
   #   west twister -T zephyr_app/tests --exclude-tag hw
   #
   ostomachion.hw.peripherals:
-    platform_allow: arty_a7
+    platform_allow: xem7310
     build_only: false
     tags: [hw, spi, i2c, gpio, wdt]
     extra_configs:
@@ -89,10 +89,10 @@ tests:
       - OVERLAY_CONFIG=prj.conf;prj_fpga.conf;prj_hw_test.conf
     harness: ztest
     harness_config:
-      fixture: arty_a7_hw
+      fixture: xem7310_hw
 
   ostomachion.hw.fft:
-    platform_allow: arty_a7
+    platform_allow: xem7310
     build_only: false
     tags: [hw, fft, accelerator]
     extra_configs:
@@ -108,4 +108,4 @@ tests:
       - OVERLAY_CONFIG=prj.conf;prj_fpga.conf;prj_accel.conf;prj_hw_test.conf
     harness: ztest
     harness_config:
-      fixture: arty_a7_hw_fft
+      fixture: xem7310_hw_fft

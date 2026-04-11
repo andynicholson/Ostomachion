@@ -4,7 +4,7 @@
 // NEORV32 WDT test suite for Ostomachion.
 //
 // Tests the NEORV32 Watchdog Timer driver (CONFIG_WDT_NEORV32=y).
-// The WDT hardware must be enabled (IO_WDT_EN=true in arty_a7_top.vhd).
+// The WDT hardware must be enabled (IO_WDT_EN=true in xem7310_top.vhd).
 //
 // These tests verify:
 //   - Device readiness via device_is_ready()

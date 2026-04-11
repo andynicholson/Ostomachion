@@ -1,24 +1,19 @@
-## Ostomachion — Vivado non-interactive build script
-## Usage: vivado -mode batch -source fpga/arty_a7/build.tcl
+## Ostomachion — Vivado non-interactive build script (XEM7310-A200)
+## Usage: vivado -mode batch -source fpga/xem7310/build.tcl
 ##   Normal production build:
-##     vivado -mode batch -source fpga/arty_a7/build.tcl
+##     vivado -mode batch -source fpga/xem7310/build.tcl
 ##   Debug build with ILA probes:
-##     vivado -mode batch -source fpga/arty_a7/build.tcl -tclargs debug
+##     vivado -mode batch -source fpga/xem7310/build.tcl -tclargs debug
 ##
 ## Produces:
-##   build/arty_a7/ostomachion_arty_a7.bit        (production bitstream)
-##   build/arty_a7/ostomachion_arty_a7.mcs        (Quad-SPI flash image)
-##   build/arty_a7/ostomachion_arty_a7_debug.bit  (ILA debug, if -tclargs debug)
-##   build/arty_a7/build_id.txt                   (version + git hash)
-##   build/arty_a7/timing_summary.rpt             (setup/hold analysis)
-##   build/arty_a7/utilization.rpt                (LUT/BRAM/IO counts)
-##   build/arty_a7/drc.rpt                        (design rule violations)
-##
-## The script resolves paths relative to the project root, which is assumed
-## to be two levels above this script's location:
-##   fpga/arty_a7/build.tcl  →  project root = [file dirname [file dirname ...]]
+##   build/xem7310/ostomachion_xem7310.bit        (production bitstream)
+##   build/xem7310/ostomachion_xem7310.mcs        (SPI flash image)
+##   build/xem7310/ostomachion_xem7310_debug.bit  (ILA debug, if -tclargs debug)
+##   build/xem7310/build_id.txt                   (version + git hash)
+##   build/xem7310/timing_summary.rpt             (setup/hold analysis)
+##   build/xem7310/utilization.rpt                (LUT/BRAM/IO counts)
+##   build/xem7310/drc.rpt                        (design rule violations)
 
-## Set DEBUG_BUILD=1 if "debug" is passed as the first Tcl argument.
 set DEBUG_BUILD 0
 if {[llength $argv] > 0 && [lindex $argv 0] eq "debug"} {
     set DEBUG_BUILD 1
@@ -30,9 +25,9 @@ if {[llength $argv] > 0 && [lindex $argv 0] eq "debug"} {
 # ---------------------------------------------------------------------------
 set script_dir  [file dirname [file normalize [info script]]]
 set proj_root   [file normalize "$script_dir/../.."]
-set build_dir   "$proj_root/build/arty_a7"
+set build_dir   "$proj_root/build/xem7310"
 set neorv32_rtl "$proj_root/neorv32/rtl/core"
-set fpga_dir    "$proj_root/fpga/arty_a7"
+set fpga_dir    "$proj_root/fpga/xem7310"
 
 file mkdir $build_dir
 
@@ -40,18 +35,15 @@ puts "INFO: Project root : $proj_root"
 puts "INFO: Build output : $build_dir"
 
 # ---------------------------------------------------------------------------
-# Create Vivado project
+# Create Vivado project — xc7a200tfbg484-1 (Opal Kelly XEM7310-A200)
 # ---------------------------------------------------------------------------
-create_project ostomachion_arty_a7 "$build_dir/vivado_project" \
-    -part xc7a100tcsg324-1 -force
+create_project ostomachion_xem7310 "$build_dir/vivado_project" \
+    -part xc7a200tfbg484-1 -force
 
 set_property TARGET_LANGUAGE VHDL [current_project]
 
 # ---------------------------------------------------------------------------
 # Add NEORV32 core sources (library neorv32)
-# Discovered by glob so the list stays correct when the submodule is updated.
-# neorv32_application_image.vhd carries the default empty image; in the FPGA
-# flow BOOT_MODE_SELECT=0 means the bootloader is used, so this is included.
 # ---------------------------------------------------------------------------
 set soc_files [lsort [glob "$neorv32_rtl/*.vhd"]]
 puts "INFO: Found [llength $soc_files] NEORV32 core files in $neorv32_rtl"
@@ -63,25 +55,67 @@ foreach f $soc_files {
 
 # ---------------------------------------------------------------------------
 # Add upstream NEORV32 XBUS-to-AXI4 bridge (library work)
-# Instantiated by arty_a7_top.vhd — not referenced inside the block design.
-# The BD contains only Xilinx IP; NEORV32 and the bridge live in arty_a7_top.
 # ---------------------------------------------------------------------------
 set bridge_rtl "$proj_root/neorv32/rtl/system_integration/xbus2axi4_bridge.vhd"
 
 add_files -fileset sources_1 [list $bridge_rtl]
 
 # ---------------------------------------------------------------------------
-# Add board-level top (library work) — thin IO primitives wrapper
+# Add board-level top and UART bridge (library work)
 # ---------------------------------------------------------------------------
-add_files -fileset sources_1 "$fpga_dir/arty_a7_top.vhd"
-set_property TOP arty_a7_top [get_filesets sources_1]
+add_files -fileset sources_1 [list \
+    "$fpga_dir/xem7310_top.vhd"  \
+    "$fpga_dir/fp_uart_bridge.vhd" \
+]
+set_property TOP xem7310_top [get_filesets sources_1]
+
+# ---------------------------------------------------------------------------
+# FrontPanel HDL library (Opal Kelly SDK)
+# The SDK ships okLibrary.vhd (component declarations) and Verilog endpoint
+# modules under FrontPanelHDL/<board>/Vivado-<year>/.
+# Set FRONTPANEL_DIR to the SDK root before running this script.
+# FrontPanel host-interface pin constraints are in xem7310.xdc (not from SDK).
+# ---------------------------------------------------------------------------
+set fp_dir ""
+if {[info exists ::env(FRONTPANEL_DIR)]} {
+    set fp_dir $::env(FRONTPANEL_DIR)
+} elseif {[info exists ::env(OKFP_SDK)]} {
+    set fp_dir $::env(OKFP_SDK)
+}
+
+if {$fp_dir eq ""} {
+    puts "ERROR: FRONTPANEL_DIR environment variable not set."
+    puts "       Set it to the Opal Kelly FrontPanel SDK installation root."
+    puts "       Example: export FRONTPANEL_DIR=/opt/FrontPanel"
+    exit 1
+}
+
+# Locate the HDL sources — SDK layout: FrontPanelHDL/<board>/Vivado-<year>/
+set fp_hdl ""
+foreach board [list "XEM7310-A200" "XEM7310"] {
+    foreach vdir [lsort -decreasing [glob -nocomplain "$fp_dir/FrontPanelHDL/$board/Vivado-*"]] {
+        if {[file exists "$vdir/okLibrary.vhd"]} {
+            set fp_hdl $vdir
+            break
+        }
+    }
+    if {$fp_hdl ne ""} { break }
+}
+
+if {$fp_hdl eq ""} {
+    puts "ERROR: okLibrary.vhd not found under $fp_dir/FrontPanelHDL/XEM7310-A200/"
+    puts "       Expected layout: FrontPanelHDL/XEM7310-A200/Vivado-<year>/okLibrary.vhd"
+    puts "       Ensure the FrontPanel SDK is installed correctly."
+    exit 1
+}
+puts "INFO: FrontPanel HDL : $fp_hdl"
+
+# Add VHDL library (component declarations) and all Verilog sources
+add_files -fileset sources_1 [glob "$fp_hdl/*.vhd"]
+add_files -fileset sources_1 [glob "$fp_hdl/*.v"]
 
 # ---------------------------------------------------------------------------
 # Create the IP Integrator block design
-# This sources ostomachion_bd.tcl which instantiates all IPs, connects
-# clocks/resets, wires up the AXI fabric, and calls make_wrapper.
-# The resulting ostomachion_bd_wrapper.vhd is added to sources_1 by the
-# BD script; arty_a7_top remains the synthesis top.
 # ---------------------------------------------------------------------------
 puts "INFO: Creating IP Integrator block design..."
 source "$fpga_dir/ostomachion_bd.tcl"
@@ -89,16 +123,15 @@ source "$fpga_dir/ostomachion_bd.tcl"
 # ---------------------------------------------------------------------------
 # Add XDC constraints
 # ---------------------------------------------------------------------------
-add_files -fileset constrs_1 "$fpga_dir/arty_a7.xdc"
+add_files -fileset constrs_1 "$fpga_dir/xem7310.xdc"
 
 # ---------------------------------------------------------------------------
-# Set VHDL-2008 only for NEORV32 core files and our custom RTL.
-# DO NOT apply to Xilinx IP-generated files — they use VHDL-93/2000 and
-# setting VHDL-2008 on them breaks synthesis (FILE_TYPE mismatch).
+# Set VHDL-2008 for NEORV32 core files and custom RTL only.
 # ---------------------------------------------------------------------------
 set rtl_vhdl2008_files [concat $soc_files [list \
     $bridge_rtl                            \
-    "$fpga_dir/arty_a7_top.vhd"           \
+    "$fpga_dir/xem7310_top.vhd"           \
+    "$fpga_dir/fp_uart_bridge.vhd"        \
 ]]
 foreach f $rtl_vhdl2008_files {
     set_property FILE_TYPE {VHDL 2008} [get_files $f]
@@ -106,31 +139,22 @@ foreach f $rtl_vhdl2008_files {
 
 # ---------------------------------------------------------------------------
 # Synthesis
-# launch_runs synth_1 handles the OOC dependency chain automatically:
-#   – synthesises each BD sub-IP as an OOC checkpoint
-#   – then synthesises the BD wrapper and the top-level design
-# Verbose mode is enabled on the synthesis run step so detailed messages
-# appear in the run log ($build_dir/vivado_project/.../synth_1/runme.log).
 # ---------------------------------------------------------------------------
-## Synthesis verbose output goes to synth_1/runme.log in the project run dir.
-## The direct implementation commands below use -verbose for console output.
-
 puts "INFO: ── Synthesis (launch_runs) ───────────────────────────────────────"
 launch_runs synth_1 -jobs 4
 wait_on_run synth_1
 
 if {[get_property PROGRESS [get_runs synth_1]] ne "100%"} {
     puts "ERROR: Synthesis failed — see:"
-    puts "  $build_dir/vivado_project/ostomachion_arty_a7.runs/synth_1/runme.log"
+    puts "  $build_dir/vivado_project/ostomachion_xem7310.runs/synth_1/runme.log"
     exit 1
 }
 puts "INFO: Synthesis complete."
 
-# Open the synthesised checkpoint so implementation commands work in-memory.
 open_run synth_1 -name synth_1
 
 # ---------------------------------------------------------------------------
-# Implementation — direct commands with -verbose for real-time diagnostics
+# Implementation
 # ---------------------------------------------------------------------------
 puts "INFO: ── Optimisation ───────────────────────────────────────────────────"
 opt_design -verbose
@@ -144,44 +168,36 @@ phys_opt_design -verbose
 puts "INFO: ── Routing ────────────────────────────────────────────────────────"
 route_design -verbose
 
+puts "INFO: ── Physical optimisation (post-route) ───────────────────────────"
+phys_opt_design -verbose
+
 puts "INFO: ── Save implementation checkpoint ────────────────────────────────"
 write_checkpoint -force "$build_dir/impl_final.dcp"
 puts "INFO: Checkpoint saved to $build_dir/impl_final.dcp"
 
 # ---------------------------------------------------------------------------
 # Optional ILA debug build
-# When DEBUG_BUILD=1 (pass -tclargs debug), insert ILA cores on key nets
-# and produce a separate debug bitstream.  The production bitstream is
-# written first so a failing debug insertion does not block deployment.
 # ---------------------------------------------------------------------------
 if {$DEBUG_BUILD} {
     puts "INFO: ── ILA insertion (debug build) ────────────────────────────────"
 
-    ## Mark key nets for ILA capture.
-    ## AXI-Stream between AXI DMA MM2S output and xfft input
-    set mm2s_nets [get_nets -hierarchical -filter {NAME =~ *M_AXIS_MM2S*} -quiet]
-    ## AXI-Stream between xfft output and AXI DMA S2MM input
-    set s2mm_nets [get_nets -hierarchical -filter {NAME =~ *S_AXIS_S2MM*} -quiet]
-    ## DMA status register outputs (interrupt lines)
-    set irq_nets  [get_nets -hierarchical -filter {NAME =~ *introut*} -quiet]
-    ## xfft overflow status
+    set mm2s_nets  [get_nets -hierarchical -filter {NAME =~ *M_AXIS_MM2S*} -quiet]
+    set s2mm_nets  [get_nets -hierarchical -filter {NAME =~ *S_AXIS_S2MM*} -quiet]
+    set irq_nets   [get_nets -hierarchical -filter {NAME =~ *introut*} -quiet]
     set ovflo_nets [get_nets -hierarchical -filter {NAME =~ *m_axis_status*} -quiet]
 
     foreach net [concat $mm2s_nets $s2mm_nets $irq_nets $ovflo_nets] {
         set_property MARK_DEBUG true [get_nets $net]
     }
 
-    ## Implement the ILA cores using the Vivado debug flow
     implement_debug_core
     write_debug_probes -force "$build_dir/debug_probes.ltx"
     puts "INFO: Debug probes written to $build_dir/debug_probes.ltx"
-    puts "INFO: Load this .ltx file in Vivado Hardware Manager alongside the debug bitstream."
 
     write_bitstream \
         -force \
-        "$build_dir/ostomachion_arty_a7_debug.bit"
-    puts "INFO: Debug bitstream → $build_dir/ostomachion_arty_a7_debug.bit"
-    puts "INFO: Use with debug_probes.ltx in Vivado Hardware Manager."
+        "$build_dir/ostomachion_xem7310_debug.bit"
+    puts "INFO: Debug bitstream → $build_dir/ostomachion_xem7310_debug.bit"
 }
 
 # ---------------------------------------------------------------------------
@@ -199,7 +215,6 @@ report_utilization \
 report_drc \
     -file "$build_dir/drc.rpt"
 
-# Gate on DRC errors: any ERROR-level violation must block bitstream deployment.
 set drc_str [report_drc -return_string -quiet]
 if {[regexp {ERROR} $drc_str]} {
     puts "ERROR: DRC violations detected — see $build_dir/drc.rpt"
@@ -209,20 +224,17 @@ if {[regexp {ERROR} $drc_str]} {
 puts "INFO: DRC clean — no errors found."
 
 # ---------------------------------------------------------------------------
-# Build ID — capture git semver tag + hash + timestamp, embed in bitstream
-# USER_CODE, and write to build_id.txt for firmware/field version matching.
+# Build ID
 # ---------------------------------------------------------------------------
 set git_hash    "unknown"
 set git_version "unknown"
 catch {
     set git_hash    [string trim [exec git -C $proj_root describe --always --dirty --abbrev=8]]
-    # Try for an annotated/lightweight tag first (e.g. v1.0.0 or v1.0.0-3-gabc1234)
     set git_version [string trim [exec git -C $proj_root describe --tags --always --dirty --abbrev=8]]
 }
 set build_ts  [clock format [clock seconds] -format {%Y%m%d_%H%M%S}]
 set build_id  "${git_version} (git: ${git_hash}, built: ${build_ts})"
 
-# USERID must be an 8-character hex string (32-bit).  Pad / truncate the hash.
 set id_clean [string map {- "" g ""} $git_hash]
 set id_clean [string range "${id_clean}00000000" 0 7]
 set_property BITSTREAM.CONFIG.USERID "0x${id_clean}" [current_design]
@@ -234,47 +246,47 @@ puts "INFO: Build ID : $build_id"
 puts "INFO: USERID   : 0x${id_clean}  (readable via JTAG config status register)"
 
 # ---------------------------------------------------------------------------
-# SPI configuration mode — required for write_cfgmem (Quad-SPI flash)
-# The Arty A7-100T has a Micron N25Q128A (MT25QL128) on-board Quad-SPI flash.
-# Setting these properties before write_bitstream embeds them in the bitstream
-# so that the FPGA auto-configures from flash on every power cycle once
-# 'make fpga-flash' has been run.
+# Bitstream — USB-programmable (FrontPanel ConfigureFPGA / make fpga-program)
+# No CONFIG_MODE override: defaults to SelectMAP which FrontPanel expects.
+# ---------------------------------------------------------------------------
+puts "INFO: ── Bitstream (USB) ─────────────────────────────────────────────────"
+write_bitstream \
+    -force \
+    -verbose \
+    "$build_dir/ostomachion_xem7310.bit"
+
+puts "INFO: USB bitstream → $build_dir/ostomachion_xem7310.bit"
+
+# ---------------------------------------------------------------------------
+# Flash bitstream + MCS — for 'make fpga-flash' persistent boot from SPI flash.
+# XEM7310-A200 has a 16 MiB FPGA configuration flash (SPIx4).
+# The SPI properties must be set AFTER the USB bitstream is written so they
+# don't pollute the USB-programmable .bit file (CONFIG_MODE SPIx4 causes
+# DoneNotHigh when programmed via FrontPanel USB).
 # ---------------------------------------------------------------------------
 set_property BITSTREAM.CONFIG.SPI_BUSWIDTH 4        [current_design]
 set_property BITSTREAM.CONFIG.SPI_FALL_EDGE Yes     [current_design]
 set_property BITSTREAM.CONFIG.CONFIGRATE 33         [current_design]
 set_property CONFIG_MODE SPIx4                      [current_design]
 
-# ---------------------------------------------------------------------------
-# Bitstream
-# ---------------------------------------------------------------------------
-puts "INFO: ── Bitstream ──────────────────────────────────────────────────────"
+puts "INFO: ── Bitstream (SPI flash) ───────────────────────────────────────────"
 write_bitstream \
     -force \
-    -verbose \
-    "$build_dir/ostomachion_arty_a7.bit"
+    "$build_dir/ostomachion_xem7310_flash.bit"
 
-puts "INFO: Production bitstream → $build_dir/ostomachion_arty_a7.bit"
-
-# ---------------------------------------------------------------------------
-# Quad-SPI flash image (MCS) — for 'make fpga-flash' persistent programming
-# Generates a Vivado-compatible MCS configuration memory file for the
-# Micron MT25QL128 / N25Q128A on-board Quad-SPI flash (16 MB, SPIx4).
-# Use with program_flash.tcl / 'make fpga-flash' to survive power cycles.
-# ---------------------------------------------------------------------------
 puts "INFO: ── Flash image (MCS) ───────────────────────────────────────────────"
 write_cfgmem \
     -format mcs \
     -interface SPIx4 \
     -size 16 \
-    -loadbit "up 0x00000000 $build_dir/ostomachion_arty_a7.bit" \
+    -loadbit "up 0x00000000 $build_dir/ostomachion_xem7310_flash.bit" \
     -force \
-    "$build_dir/ostomachion_arty_a7.mcs"
-puts "INFO: Flash image → $build_dir/ostomachion_arty_a7.mcs"
-puts "INFO: Run 'make fpga-flash' to program the on-board Quad-SPI flash."
+    "$build_dir/ostomachion_xem7310.mcs"
+puts "INFO: Flash image → $build_dir/ostomachion_xem7310.mcs"
+puts "INFO: Run 'make fpga-flash' to program the on-board SPI flash."
 
 # ---------------------------------------------------------------------------
-# Post-build quality gates (timing closure check)
+# Post-build quality gates
 # ---------------------------------------------------------------------------
 puts "INFO: Running post-build quality checks..."
 
@@ -297,7 +309,6 @@ if {$whs eq "" || [expr {$whs < 0}]} {
     set timing_ok 0
 }
 
-# --- Resource headroom -------------------------------------------------------
 proc parse_util_pct {rpt keyword} {
     foreach line [split $rpt "\n"] {
         if {[string match "*${keyword}*" $line]} {
@@ -321,7 +332,6 @@ foreach {res pct limit} [list "LUT" $pct_luts 80  "BRAM" $pct_brams 85] {
     }
 }
 
-# --- Summary -----------------------------------------------------------------
 if {$timing_ok} {
     puts "INFO: ============================================"
     puts "INFO:  BUILD QUALITY GATES PASSED"

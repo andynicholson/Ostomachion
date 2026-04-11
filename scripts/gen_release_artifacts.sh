@@ -15,7 +15,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-BUILD_DIR="$PROJ_ROOT/build/arty_a7"
+BUILD_DIR="$PROJ_ROOT/build/xem7310"
 
 # ── Determine version ────────────────────────────────────────────────────────
 if [[ $# -ge 1 ]]; then
@@ -33,8 +33,8 @@ mkdir -p "$RELEASE_DIR"
 
 # ── Required build outputs ───────────────────────────────────────────────────
 required_files=(
-    "$BUILD_DIR/ostomachion_arty_a7.bit"
-    "$BUILD_DIR/ostomachion_arty_a7.mcs"
+    "$BUILD_DIR/ostomachion_xem7310.bit"
+    "$BUILD_DIR/ostomachion_xem7310.mcs"
     "$BUILD_DIR/timing_summary.rpt"
     "$BUILD_DIR/utilization.rpt"
     "$BUILD_DIR/drc.rpt"
@@ -92,8 +92,8 @@ NEORV32   : v1.11.6 (submodule, see .gitmodules)
 
 Contents
 --------
-ostomachion_arty_a7.bit  — FPGA bitstream (Arty A7-100T)
-ostomachion_arty_a7.mcs  — Quad-SPI flash image (program with 'make fpga-flash')
+ostomachion_xem7310.bit  — FPGA bitstream (Opal Kelly XEM7310-A200)
+ostomachion_xem7310.mcs  — SPI flash image (program with 'make fpga-flash')
 timing_summary.rpt       — Vivado timing closure report (WNS/WHS must be >= 0)
 utilization.rpt          — FPGA resource utilisation
 drc.rpt                  — Design Rule Check (must show 0 errors)

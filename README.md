@@ -65,20 +65,21 @@ without disturbing what already works.
   │  FPGA RTL  (NEORV32 v1.11.6  +  upstream XBUS→AXI4 bridge)       │
   │  RISC-V RV32IMAC soft-core, SPI master, TWI master, GPIO, UART  │
   │  Bridge: neorv32/rtl/system_integration/xbus2axi4_bridge.vhd    │
-  │  Top:    fpga/arty_a7/arty_a7_top.vhd  (IOBUF, OCD)            │
+  │  Top:    fpga/xem7310/xem7310_top.vhd  (IBUFDS, IOBUF, OCD)    │
+  │  FrontPanel UART bridge: fp_uart_bridge.vhd  (Pipe ↔ UART CDC)  │
   └────────────────────────┬─────────────────────────────────────────┘
                            │  AXI4-Lite
   ┌────────────────────────▼─────────────────────────────────────────┐
-  │  Xilinx IP Subsystem  (fpga/arty_a7/ostomachion_bd.tcl)          │
+  │  Xilinx IP Subsystem  (fpga/xem7310/ostomachion_bd.tcl)          │
   │  • AXI SmartConnect (axi_smc) + AXI DMA (axi_dma_0)             │
   │  • TX BRAM (0x41000000) ── xfft IP (4096-pt, 16-bit) ── RX BRAM │
   │  • RX BRAM controller (0x41004000)                               │
   │  • AXI INTC (0x40010000): ch0=MM2S, ch1=S2MM, ch2=ovflo → MEI  │
-  │  • MMCM clocking, proc_sys_reset                                 │
+  │  • MMCM clocking (200 MHz LVDS → 100 MHz), proc_sys_reset       │
   └────────────────────────┬─────────────────────────────────────────┘
                            │  (physical I/O pins / GHDL stimulus)
   ┌────────────────────────▼─────────────────────────────────────────┐
-  │  Hardware (Arty A7-100T) / GHDL Simulation  (sim/neorv32_tb.vhd) │
+  │  Hardware (XEM7310-A200) / GHDL Simulation  (sim/neorv32_tb.vhd) │
   │  SPI loopback, I2C slave model, UART monitor, watchdog           │
   └──────────────────────────────────────────────────────────────────┘
 ```
@@ -96,19 +97,23 @@ without disturbing what already works.
 ├── scripts/
 │   ├── bin2vhd.py                   # ELF binary → VHDL IMEM image
 │   ├── gen_release_artifacts.sh     # Stage release/<VERSION>/ certification artifacts
-│   └── init_dev_env.sh              # Source to set ZEPHYR_BASE, venv, Vivado PATH
+│   ├── init_dev_env.sh              # Source to set ZEPHYR_BASE, venv, Vivado PATH
+│   └── uart_bridge.py              # FrontPanel UART-over-USB bridge (PTY ↔ Pipes)
 ├── rtl/
 │   └── neorv32_wrapper.vhd           # Simulation wrapper around neorv32_top
 ├── fpga/
-│   └── arty_a7/
-│       ├── arty_a7_top.vhd           # Arty A7-100T board top (NEORV32 + bridge + BD)
-│       ├── arty_a7.xdc               # Vivado pin + timing constraints (XC7A100T)
-│       ├── build.tcl                 # Non-interactive Vivado batch script
+│   └── xem7310/
+│       ├── xem7310_top.vhd           # XEM7310-A200 board top (IBUFDS, NEORV32 + bridge + BD + FP)
+│       ├── fp_uart_bridge.vhd        # FrontPanel UART bridge (UART TX/RX + async FIFOs + Pipes)
+│       ├── xem7310.xdc               # Vivado pin + timing constraints (XC7A200T)
+│       ├── build.tcl                 # Non-interactive Vivado batch script (loads FP SDK)
 │       │                             #   production: make fpga-synth
 │       │                             #   debug ILA:  vivado … -tclargs debug
 │       ├── ostomachion_bd.tcl        # IP Integrator block design (AXI DMA, xfft, BRAMs)
 │       ├── check_build.tcl           # Post-build quality gates (timing, utilisation, DRC)
-│       └── openocd.cfg               # JTAG bitstream programming (OpenOCD)
+│       ├── program_jtag.tcl          # JTAG bitstream programming (fallback, requires MC2 cable)
+│       ├── program_flash.tcl         # SPI flash programming (persistent boot)
+│       └── openocd.cfg               # NEORV32 OCD debug (external JTAG adapter)
 ├── sim/
 │   ├── neorv32_tb.vhd                # GHDL testbench (clock, reset, bus monitors)
 │   └── sim_uart_rx.vhd               # UART character decoder
@@ -170,7 +175,7 @@ without disturbing what already works.
 
 ## 🗺️ Peripheral map
 
-| NEORV32 Generic    | Simulation | Arty A7-100T | MMIO Base    | IRQ             | Zephyr driver            | DT node      |
+| NEORV32 Generic    | Simulation | XEM7310-A200 | MMIO Base    | IRQ             | Zephyr driver            | DT node      |
 |--------------------|------------|--------------|--------------|-----------------|--------------------------|--------------|
 | `IO_GPIO_NUM`      | 8          | 8            | `0xFFFFFFC0` | —               | `neorv32,gpio`           | (board)      |
 | `IO_UART0_EN`      | true       | true         | `0xFFFFFFE0` | FIRQ 2          | `neorv32,uart`           | (board)      |
@@ -508,10 +513,10 @@ Five CI configurations and two hardware-in-the-loop (HIL) entries are defined:
 | `ostomachion.fft.compile` | `prj.conf` + FFT extras | neorv32 sim | build only |
 | `ostomachion.shell.compile` | `prj.conf` + shell/FFT extras | neorv32 sim | build only |
 | `ostomachion.wdt.compile` | `prj.conf` + WDT extras | neorv32 sim | build + run |
-| `ostomachion.hw.peripherals` | `prj.conf` + FPGA + hw_test | arty_a7 | HIL (fixture: `arty_a7_hw`) |
-| `ostomachion.hw.fft` | `prj.conf` + FPGA + accel + hw_test | arty_a7 | HIL (fixture: `arty_a7_hw_fft`) |
+| `ostomachion.hw.peripherals` | `prj.conf` + FPGA + hw_test | xem7310 | HIL (fixture: `xem7310_hw`) |
+| `ostomachion.hw.fft` | `prj.conf` + FPGA + accel + hw_test | xem7310 | HIL (fixture: `xem7310_hw_fft`) |
 
-HIL tests require a self-hosted runner with the `arty_a7` label and a programmed
+HIL tests require a self-hosted runner with the `xem7310` label and a programmed
 bitstream.  They are excluded from `ubuntu-latest` runs via `platform_allow`.
 
 ---
@@ -601,7 +606,7 @@ Override any of these in the environment before sourcing if your layout differs.
 ### ➕ Adding a new hardware accelerator
 
 1. **RTL / IP** — add the IP to `ostomachion_bd.tcl`.  Connect AXI4-Lite
-   control, AXI4-Stream data, and IRQ lines.  Update `arty_a7_top.vhd` if
+   control, AXI4-Stream data, and IRQ lines.  Update `xem7310_top.vhd` if
    the `mext_irq` bus needs widening.
 
 2. **IRQ wiring** — see [Interrupt architecture](#interrupt-architecture)
@@ -635,8 +640,9 @@ Override any of these in the environment before sourcing if your layout differs.
 | `make clean-ghdl`     | Remove GHDL artifacts (keeps firmware)                            |
 | `make clean`          | Full clean (GHDL + firmware + all Zephyr build dirs)              |
 | `make fpga-synth`         | Vivado: synthesise + implement + bitstream + MCS flash image      |
-| `make fpga-program`       | Load bitstream onto Arty A7 via JTAG (OpenOCD) — volatile        |
-| `make fpga-flash`         | Program on-board Quad-SPI flash — persistent across power cycles  |
+| `make fpga-program`       | Load bitstream onto XEM7310-A200 via FrontPanel USB — volatile    |
+| `make fpga-flash`         | Program on-board SPI flash via FrontPanel — persistent            |
+| `make uart-bridge`        | Start FrontPanel UART-over-USB bridge (PTY for minicom/upload)    |
 | `make fpga-fw`            | Build + upload FPGA Zephyr firmware via UART bootloader           |
 | `make fpga-check`         | Post-build quality gates (timing, utilisation, DRC)               |
 | `make fpga-release VERSION=v1.0.0` | Stage certification artifacts in `release/v1.0.0/`     |
@@ -655,11 +661,11 @@ For a **debug ILA bitstream** (Integrated Logic Analyser probes on
 AXI-Stream DMA↔xfft and interrupt nets), invoke Vivado directly:
 
 ```bash
-mkdir -p build/arty_a7
-vivado -mode batch -source fpga/arty_a7/build.tcl -tclargs debug \
-    | tee build/arty_a7/build_debug.log
-# outputs: build/arty_a7/ostomachion_arty_a7_debug.bit
-#          build/arty_a7/debug_probes.ltx
+mkdir -p build/xem7310
+vivado -mode batch -source fpga/xem7310/build.tcl -tclargs debug \
+    | tee build/xem7310/build_debug.log
+# outputs: build/xem7310/ostomachion_xem7310_debug.bit
+#          build/xem7310/debug_probes.ltx
 ```
 
 Load the `.bit` via JTAG and open the `.ltx` in Vivado Hardware Manager.
@@ -669,7 +675,7 @@ Load the `.bit` via JTAG and open the `.ltx` in Vivado Hardware Manager.
 ## 📐 Design decisions
 
 **Two build targets, one codebase.**
-The project is designed for deployment on real FPGA hardware (Arty A7) with
+The project is designed for deployment on real FPGA hardware (XEM7310-A200) with
 GHDL simulation as a fast development and regression tool.  The same Zephyr
 firmware, out-of-tree drivers, and C++20 HAL compile for both targets.
 Target-specific differences are isolated to a VHDL top-level file, a DTS
@@ -695,14 +701,15 @@ recompiling the bootloader image.
 
 **`BOOT_MODE_SELECT = 2` for simulation, `0` for FPGA.**
 Mode 2 (boot from pre-initialised IMEM) skips the UART bootloader entirely,
-avoiding a multi-second UART negotiation on every GHDL run.  On the Arty A7,
+avoiding a multi-second UART negotiation on every GHDL run.  On the XEM7310-A200,
 mode 0 (internal BROM bootloader) allows firmware to be uploaded over UART
 without re-synthesising — only `make fpga-fw` is needed for each firmware
 iteration after the initial `make fpga-synth` + `make fpga-program`.
 
-**IOBUF in the FPGA top, not the simulation wrapper.**
-`fpga/arty_a7/arty_a7_top.vhd` instantiates Xilinx `IOBUF` (open-drain I2C)
-primitives directly; clock buffering is handled by the MMCM in the block design.
+**IOBUF and IBUFDS in the FPGA top, not the simulation wrapper.**
+`fpga/xem7310/xem7310_top.vhd` instantiates Xilinx `IBUFDS` (200 MHz LVDS
+clock) and `IOBUF` (open-drain I2C) primitives directly; the MMCM in the
+block design converts 200 MHz to the 100 MHz system clock.
 `rtl/neorv32_wrapper.vhd` remains technology-neutral for simulation.
 
 **`std::span` + `std::byte` in the HAL.**
@@ -759,7 +766,7 @@ change is isolated to `ostomachion_bd.tcl` (adding channels to the
 | FFT driver thread safety | **Design constraint** — callers serialised by mutex; single `FftAccel` instance per system recommended |
 | FFT GHDL simulation | **Not supported** — Xilinx encrypted IP is not simulatable in GHDL |
 | 10-bit I2C addressing | **Not supported** — NEORV32 TWI is 7-bit only |
-| Second FPGA board target | **Roadmap** — parameterised `fpga/` layout supports additional boards |
+| Additional FPGA board targets | **Roadmap** — parameterised `fpga/` layout supports additional boards |
 
 ---
 
@@ -848,46 +855,56 @@ cat UART0.log
 
 ---
 
-## 🎛️ Deploying to Arty A7
+## 🎛️ Deploying to XEM7310-A200
 
-The FPGA build targets the Digilent **Arty A7-100T** (XC7A100T, CSG324 package).
-All required files live in `fpga/arty_a7/`.
+The FPGA build targets the Opal Kelly **XEM7310-A200** (XC7A200T, FBG484 package).
+All required files live in `fpga/xem7310/`.
 
-> **Board variant note:** The Arty A7-100T and A7-35T share the same PCB and
-> pin-compatible CSG324 package.  The 100T is required because the design
-> uses ~64 RAMB36 (4096-pt xfft IP, AXI DMA, TX/RX BRAMs, NEORV32 IMEM/DMEM)
-> and the 35T provides only 50 RAMB36.  Verified build-time utilisation on 100T:
-> **LUTs 18.96%, BRAMs 48.52%** (WNS +0.725 ns, WHS +0.007 ns at 100 MHz,
-> 0 DRC errors).
+> **Board note:** The XEM7310-A200 is a USB 3.0 FPGA integration module with
+> 134,600 LUTs and 730 Block RAM tiles — significantly larger than the Artix-7
+> A100T.  The design's BRAM utilisation is well within the available resources.
+> FPGA configuration and communication uses the **Opal Kelly FrontPanel SDK**
+> over USB-C (the on-board USB interface is *not* compatible with Vivado JTAG).
+> A **FrontPanel UART bridge** (`fp_uart_bridge.vhd`) routes the NEORV32 UART
+> through FrontPanel Pipe endpoints so that the bootloader and firmware console
+> are accessible over USB-C without needing the MC1 expansion header.  Run
+> `make uart-bridge` to create a virtual serial port (PTY) that minicom and
+> the bootloader upload script can connect to.
+> Eight on-board LEDs (D1–D8, Bank 14, LVCMOS15) are directly wired to the
+> FPGA for visual bring-up.  Expansion I/O (UART, SPI, I2C, NEORV32 OCD JTAG)
+> is routed through MC1/MC2 connectors and requires a carrier board or
+> breakout for access.
 
 ### ✅ Prerequisites
 
 | Tool | Minimum version | Notes |
 |------|----------------|-------|
 | Vivado | 2024.1 | Any edition; tested on 2025.1; add to `PATH` or set `VIVADO=` |
-| OpenOCD | 0.12.0 | Must include `cpld/xilinx-xc7.cfg` |
+| Opal Kelly FrontPanel SDK | — | Free download from [opalkelly.com](https://www.opalkelly.com); set `FRONTPANEL_DIR` env var to SDK root |
 | West / Zephyr SDK | 1.0.0 | Same environment as simulation build |
-| Python 3 | 3.8+ | For west, Zephyr build scripts |
+| Python 3 | 3.8+ | For west, Zephyr build scripts, FrontPanel `ok` module, UART bridge |
+| External USB-UART adapter | — | *(optional)* FTDI TTL-232R-3V3 on MC1 — not needed with UART bridge |
 
 ### 📌 Pin map
 
-| Signal | Arty A7 pin | Connector / function |
-|--------|-------------|----------------------|
-| `sys_clk` | E3 | 100 MHz LVCMOS33 oscillator |
-| `ck_rst` | C2 | BTN RESET (active-low) |
-| `uart_txd_out` | D10 | USB-UART TX (FTDI FT2232HQ) |
-| `uart_rxd_in` | A9 | USB-UART RX |
-| `led[0..3]` | H5/J5/T9/T10 | On-board green LEDs LD0–LD3 |
-| `spi_clk_o` | G13 | Pmod JA pin 1 (SCK) |
-| `spi_dat_o` | B11 | Pmod JA pin 2 (MOSI) |
-| `spi_dat_i` | A11 | Pmod JA pin 3 (MISO) |
-| `spi_csn_o` | D12 | Pmod JA pin 4 (CS0) |
-| `twi_sda` | E15 | Pmod JB pin 1 — **needs 4.7 kΩ pull-up to 3V3** |
-| `twi_scl` | E16 | Pmod JB pin 2 — **needs 4.7 kΩ pull-up to 3V3** |
-| `jtag_tck_i` | K17 | Pmod JC pin 1 |
-| `jtag_tdi_i` | M18 | Pmod JC pin 2 |
-| `jtag_tdo_o` | N17 | Pmod JC pin 3 |
-| `jtag_tms_i` | P18 | Pmod JC pin 4 |
+| Signal | FPGA pin | Location / function |
+|--------|----------|---------------------|
+| `sys_clk_p` | W11 | 200 MHz LVDS oscillator (+), on-board, Bank 13 |
+| `sys_clk_n` | W12 | 200 MHz LVDS oscillator (−), on-board, Bank 13 |
+| `led[0]`–`led[7]` | A13–B17 | **On-board LEDs D1–D8** (Bank 14, LVCMOS15, active-low HW, inverted in RTL) |
+| `ext_rstn` | AB7 | MC1-37 — active-low external reset |
+| `uart_txd_out` | W9 | MC1-15 — UART TX (external USB-UART adapter) |
+| `uart_rxd_in` | Y9 | MC1-17 — UART RX |
+| `spi_clk_o` | T5 | MC1-27 — SPI SCK |
+| `spi_dat_o` | W6 | MC1-28 — SPI MOSI |
+| `spi_dat_i` | U5 | MC1-29 — SPI MISO |
+| `spi_csn_o` | W5 | MC1-30 — SPI CS0 |
+| `twi_sda` | AA5 | MC1-31 — I2C SDA — **needs 4.7 kΩ pull-up to 3V3** |
+| `twi_scl` | AB5 | MC1-33 — I2C SCL — **needs 4.7 kΩ pull-up to 3V3** |
+| `jtag_tck_i` | P5 | MC2-15 — NEORV32 OCD TCK |
+| `jtag_tdi_i` | P4 | MC2-17 — NEORV32 OCD TDI |
+| `jtag_tdo_o` | N4 | MC2-19 — NEORV32 OCD TDO |
+| `jtag_tms_i` | P6 | MC2-16 — NEORV32 OCD TMS |
 
 ### 🔨 One-time bitstream build
 
@@ -895,10 +912,10 @@ Synthesise, implement, and generate the bitstream:
 
 ```bash
 make fpga-synth
-# equivalent to: vivado -mode batch -source fpga/arty_a7/build.tcl
-# output: build/arty_a7/ostomachion_arty_a7.bit   (FPGA bitstream)
-#         build/arty_a7/ostomachion_arty_a7.mcs   (Quad-SPI flash image)
-#         build/arty_a7/build_id.txt              (semver + git hash + timestamp)
+# equivalent to: vivado -mode batch -source fpga/xem7310/build.tcl
+# output: build/xem7310/ostomachion_xem7310.bit   (FPGA bitstream)
+#         build/xem7310/ostomachion_xem7310.mcs   (SPI flash image)
+#         build/xem7310/build_id.txt              (semver + git hash + timestamp)
 ```
 
 Build time is typically 10–20 minutes on a modern workstation.
@@ -907,41 +924,63 @@ The build embeds `git describe --tags` and the git hash as the bitstream
 `USERID` property and in `build_id.txt`.  The firmware can log this at boot
 via `CONFIG_OSTOMACHION_HW_BUILD_ID` for hardware/firmware version verification.
 
-### ⚡ Program the FPGA (volatile — JTAG)
+### ⚡ Program the FPGA (volatile — FrontPanel USB)
 
-Load the bitstream into the FPGA's SRAM via JTAG (erased on power-cycle):
+Load the bitstream into the FPGA's SRAM via the Opal Kelly FrontPanel SDK
+over USB-C (erased on power-cycle).  Requires the FrontPanel SDK installed
+and the `ok` Python module importable:
 
 ```bash
 make fpga-program
-# equivalent to: openocd -f fpga/arty_a7/openocd.cfg \
-#                        -c "pld load 0 build/arty_a7/ostomachion_arty_a7.bit" -c shutdown
+# uses FrontPanel Python API: ok.FrontPanel().ConfigureFPGA(...)
+# board must be connected via USB-C
 ```
 
-### 💾 Program the Quad-SPI flash (persistent — survives power-cycle)
+On success the 8 on-board LEDs (D1–D8) should show the NEORV32 GPIO state
+immediately — LED D1 blinks at ~1 Hz once the firmware's `led_blink_thread`
+starts.
 
-Program the on-board Micron N25Q128A / MT25QL128 QSPI flash so the FPGA
-auto-configures itself from flash on every power-up:
+### 💾 Program the SPI flash (persistent — survives power-cycle)
+
+Program the on-board SPI configuration flash so the FPGA auto-configures
+itself from flash on every power-up:
 
 ```bash
 make fpga-flash
-# uses fpga/arty_a7/program_flash.tcl via Vivado batch mode
-# Arty A7 must be connected via USB-JTAG; takes ~60 seconds
+# uses FrontPanel FlashLoader utility; board must be connected via USB-C
 ```
 
 After `make fpga-flash`, the board will boot the Ostomachion design automatically
-whenever powered on — no JTAG connection required.
+whenever powered on — no USB connection required.
 
 ### 🔁 Iterating on firmware (no re-synthesis)
 
 After the bitstream is loaded, the NEORV32 BROM bootloader runs at **19200 baud**
-and waits for an executable image.  Upload via:
+and waits for an executable image.
+
+**With FrontPanel UART bridge (USB-C only, no MC1 needed):**
 
 ```bash
-make fpga-fw          # builds FPGA Zephyr image, then uploads
-# or manually:
-make zephyr-fpga      # builds to build_zephyr_fpga/
-bash neorv32/sw/image_gen/uart_upload.sh /dev/ttyUSB1 \
-    build_zephyr_fpga/zephyr/zephyr.bin
+# Terminal 1 — start the bridge at 19200 baud (bootloader speed)
+make uart-bridge
+# note the PTY path printed, e.g. /dev/pts/3
+
+# Terminal 2 — upload firmware through the bridge
+make fpga-fw UART_DEVICE=/dev/pts/3
+
+# After upload, restart the bridge at application speed to see output:
+# Terminal 1: Ctrl-C, then:
+make uart-bridge BRIDGE_BAUD=115200
+
+# Terminal 2 — connect minicom to the bridge PTY
+minicom -D /dev/pts/3 -b 115200
+```
+
+**With external USB-UART adapter on MC1:**
+
+```bash
+make fpga-fw UART_DEVICE=/dev/ttyUSB1
+minicom -D /dev/ttyUSB1 -b 115200
 ```
 
 Subsequent firmware iterations only require `make fpga-fw` — no Vivado run.
@@ -972,11 +1011,12 @@ uses FIRQ 6 (SPI) and FIRQ 7 (I2C).
 ### 🐛 JTAG debug
 
 After the bitstream is loaded and firmware is running, attach GDB via the
-NEORV32 on-chip debugger (OCD) on Pmod JC:
+NEORV32 on-chip debugger (OCD) on MC2 (pins 15–19).  An external JTAG adapter
+(e.g. FTDI C232HM) must be connected to these pins:
 
 ```bash
 # Terminal 1 — OpenOCD server
-openocd -f fpga/arty_a7/openocd.cfg \
+openocd -f fpga/xem7310/openocd.cfg \
         -f neorv32/sw/openocd/openocd_neorv32.cfg
 
 # Terminal 2 — GDB client
@@ -990,16 +1030,21 @@ riscv64-zephyr-elf-gdb build_zephyr_fpga/zephyr/zephyr.elf \
 `make test-hw` builds a dedicated ZTEST image (verbose output, per-subsystem
 logging, 115200 baud) and uploads it via the UART bootloader.
 
-#### 1. SPI loopback jumper
+> **USB-C only (no MC1)?**  Use the FrontPanel UART bridge for firmware upload
+> and test output.  SPI loopback (ATP-04) and I2C tests (ATP-05) will be
+> skipped since those pins are on MC1.  GPIO, FFT, WDT, and bootloader tests
+> work with the bridge alone.
 
-Fit a jumper between **Pmod JA pin 2** (MOSI, `B11`) and **pin 3** (MISO,
-`A11`):
+#### 1. SPI loopback jumper *(requires MC1 access)*
+
+Fit a jumper between **MC1-28** (MOSI, `W6`) and **MC1-29** (MISO, `U5`)
+on the carrier board:
 
 ```
-Pmod JA header (looking at the board)
- pin 1  pin 2  pin 3  pin 4
-  VCC   MOSI   MISO   SCK   ...
-          └──── jumper ───┘
+MC1 connector (SPI pins)
+ pin 27  pin 28  pin 29  pin 30
+  SCK    MOSI    MISO    CS0
+           └──── jumper ───┘
 ```
 
 #### 2. I2C slave (optional)
@@ -1015,15 +1060,24 @@ make test-hw EXTRA_CONF="CONFIG_TEST_I2C_SLAVE_ADDR=72"
 #### 3. Run the hardware tests
 
 ```bash
+# With USB-UART on MC1:
 make test-hw UART_DEVICE=/dev/ttyUSB1
+
+# With FrontPanel UART bridge (no MC1):
+# Terminal 1:  make uart-bridge                     (19200 for upload)
+# Terminal 2:  make test-hw UART_DEVICE=/dev/pts/N
+# After upload, restart bridge at 115200 for output.
 ```
 
 #### 4. Reading test output
 
 ```bash
+# With USB-UART on MC1:
 minicom -D /dev/ttyUSB1 -b 115200 --noinit
-# or
-screen /dev/ttyUSB1 115200
+
+# With FrontPanel UART bridge:
+make uart-bridge BRIDGE_BAUD=115200
+# then: minicom -D /dev/pts/N -b 115200
 ```
 
 Expected output (all tests passing):

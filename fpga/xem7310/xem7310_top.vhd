@@ -1,12 +1,24 @@
--- Ostomachion — Arty A7-100T board-level top
+-- Ostomachion — Opal Kelly XEM7310-A200 board-level top
 -- Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
 --
 -- Architecture:
---   arty_a7_top (this file)
+--   xem7310_top (this file)
+--   ├── IBUFDS              (LVDS→single-ended for 200 MHz onboard oscillator)
 --   ├── ostomachion_bd_wrapper  (Vivado-generated; only Xilinx IP inside)
 --   ├── neorv32_top             (RISC-V SoC, library neorv32, std_ulogic ports)
 --   ├── xbus2axi4_bridge        (upstream NEORV32 XBUS→AXI4, std_ulogic XBUS side)
---   └── IOBUF_SDA / IOBUF_SCL  (open-drain I2C pads, Xilinx primitive)
+--   ├── IOBUF_SDA / IOBUF_SCL  (open-drain I2C pads, Xilinx primitive)
+--   ├── okHost + okWireIn/Out + okPipeIn/Out  (FrontPanel USB interface)
+--   └── fp_uart_bridge          (UART ↔ FrontPanel Pipes, async FIFOs)
+--
+-- Target: xc7a200tfbg484-1  (Opal Kelly XEM7310-A200)
+-- Clock:  200 MHz LVDS oscillator → IBUFDS → MMCM (in BD) → 100 MHz system clock
+--
+-- Pin assignments:
+--   On-board LEDs D1-D8 (Bank 14, LVCMOS15) — active-low, accent inverted in RTL
+--   MC1 (Bank 34, LVCMOS33) for UART / SPI / I2C / Reset
+--   MC2 (Bank 35, LVCMOS33) for the NEORV32 on-chip debugger JTAG
+-- See xem7310.xdc for the complete pin map.
 --
 -- Type strategy:
 --   Internal AXI and board signals use std_logic / std_logic_vector.
@@ -23,37 +35,52 @@ use unisim.vcomponents.all;
 library neorv32;
 use neorv32.neorv32_package.all;
 
-entity arty_a7_top is
+entity xem7310_top is
   port (
-    sys_clk      : in    std_logic;
-    ck_rst       : in    std_logic;
+    -- 200 MHz LVDS oscillator (W11/W12, Bank 13)
+    sys_clk_p    : in    std_logic;
+    sys_clk_n    : in    std_logic;
 
+    -- Active-low external reset (active-low, directly from MC1 connector)
+    ext_rstn     : in    std_logic;
+
+    -- UART (MC1, Bank 34)
     uart_txd_out : out   std_logic;
     uart_rxd_in  : in    std_logic;
 
-    led          : out   std_logic_vector(3 downto 0);
+    -- On-board LEDs D1–D8 (Bank 14, LVCMOS15, active-low hardware)
+    led          : out   std_logic_vector(7 downto 0);
 
+    -- SPI master (MC1, Bank 34)
     spi_clk_o    : out   std_logic;
     spi_dat_o    : out   std_logic;
     spi_dat_i    : in    std_logic;
     spi_csn_o    : out   std_logic;
 
+    -- I2C / TWI open-drain (MC1, Bank 34)
     twi_sda      : inout std_logic;
     twi_scl      : inout std_logic;
 
+    -- NEORV32 on-chip debugger JTAG (MC2, Bank 35)
     jtag_tck_i   : in    std_logic;
     jtag_tdi_i   : in    std_logic;
     jtag_tdo_o   : out   std_logic;
-    jtag_tms_i   : in    std_logic
-  );
-end entity arty_a7_top;
+    jtag_tms_i   : in    std_logic;
 
-architecture rtl of arty_a7_top is
+    -- FrontPanel USB controller (directly wired to Cypress FX3 on XEM7310)
+    okUH         : in    std_logic_vector(4 downto 0);
+    okHU         : out   std_logic_vector(2 downto 0);
+    okUHU        : inout std_logic_vector(31 downto 0);
+    okAA         : inout std_logic
+  );
+end entity xem7310_top;
+
+architecture rtl of xem7310_top is
+
+  -- ── LVDS → single-ended clock ───────────────────────────────────────────
+  signal sys_clk_se : std_logic;
 
   -- ── BD outputs ───────────────────────────────────────────────────────────
-  -- clk_o is STD_LOGIC (scalar clock from MMCM)
-  -- periph_resetn_o is STD_LOGIC_VECTOR(0 to 0) — proc_sys_reset bus output
-  -- mext_irq_o is STD_LOGIC — single IRQ from AXI INTC (channel 0=MM2S, 1=S2MM, 2=xfft ovflo)
   signal clk         : std_logic;
   signal periph_rstn : std_logic_vector(0 downto 0);
   signal mext_irq    : std_logic;
@@ -88,6 +115,90 @@ architecture rtl of arty_a7_top is
   signal twi_sda_in_l  : std_logic;
   signal twi_scl_in_l  : std_logic;
 
+  -- ── FrontPanel components (from okLibrary.vhd in FrontPanel SDK) ─────────
+  component okHost port (
+    okUH  : in    std_logic_vector(4 downto 0);
+    okHU  : out   std_logic_vector(2 downto 0);
+    okUHU : inout std_logic_vector(31 downto 0);
+    okAA  : inout std_logic;
+    okClk : out   std_logic;
+    okHE  : out   std_logic_vector(112 downto 0);
+    okEH  : in    std_logic_vector(64 downto 0)
+  );
+  end component;
+
+  component okWireIn port (
+    okHE       : in  std_logic_vector(112 downto 0);
+    ep_addr    : in  std_logic_vector(7 downto 0);
+    ep_dataout : out std_logic_vector(31 downto 0)
+  );
+  end component;
+
+  component okWireOut port (
+    okHE      : in  std_logic_vector(112 downto 0);
+    okEH      : out std_logic_vector(64 downto 0);
+    ep_addr   : in  std_logic_vector(7 downto 0);
+    ep_datain : in  std_logic_vector(31 downto 0)
+  );
+  end component;
+
+  component okPipeIn port (
+    okHE       : in  std_logic_vector(112 downto 0);
+    okEH       : out std_logic_vector(64 downto 0);
+    ep_addr    : in  std_logic_vector(7 downto 0);
+    ep_dataout : out std_logic_vector(31 downto 0);
+    ep_write   : out std_logic
+  );
+  end component;
+
+  component okPipeOut port (
+    okHE      : in  std_logic_vector(112 downto 0);
+    okEH      : out std_logic_vector(64 downto 0);
+    ep_addr   : in  std_logic_vector(7 downto 0);
+    ep_datain : in  std_logic_vector(31 downto 0);
+    ep_read   : out std_logic
+  );
+  end component;
+
+  component okWireOR
+    generic (N : natural);
+    port (
+      okEH  : out std_logic_vector(64 downto 0);
+      okEHx : in  std_logic_vector(N*65-1 downto 0)
+    );
+  end component;
+
+  -- ── FrontPanel signals ─────────────────────────────────────────────────
+  constant FP_EP_COUNT : natural := 3;  -- WireOut + PipeIn + PipeOut
+
+  signal fp_clk       : std_logic;
+  signal okHE         : std_logic_vector(112 downto 0);
+  signal okEH         : std_logic_vector(64 downto 0);
+  signal okEHx        : std_logic_vector(FP_EP_COUNT*65-1 downto 0);
+
+  -- WireIn 0x00: bits [15:0] = baud divisor, bit [16] = UART source select
+  signal wi00_data    : std_logic_vector(31 downto 0);
+  signal fp_baud_div  : std_logic_vector(15 downto 0);
+  signal uart_src_sel_fp : std_logic;
+  signal uart_src_sync1 : std_logic := '0';
+  signal uart_src_sync2 : std_logic := '0';
+
+  -- WireOut 0x20: RX FIFO entry count
+  signal wo20_data    : std_logic_vector(31 downto 0);
+  signal rx_count     : std_logic_vector(10 downto 0);
+
+  -- PipeIn 0x80: host → NEORV32 UART data
+  signal pi80_data    : std_logic_vector(31 downto 0);
+  signal pi80_write   : std_logic;
+
+  -- PipeOut 0xA0: NEORV32 UART data → host
+  signal poA0_data    : std_logic_vector(31 downto 0);
+  signal poA0_read    : std_logic;
+
+  -- UART bridge outputs (system clock domain)
+  signal bridge_uart_rx : std_logic;
+  signal neorv32_uart_rxd : std_logic;
+
   -- ── AXI4-Lite bus (bridge master ↔ BD slave, all std_logic) ──────────────
   signal axi_awaddr  : std_logic_vector(31 downto 0);
   signal axi_awprot  : std_logic_vector(2 downto 0);
@@ -111,13 +222,40 @@ architecture rtl of arty_a7_top is
 
 begin
 
+  -- ── LVDS differential-to-single-ended clock buffer ──────────────────────
+  -- External termination is provided on the XEM7310 PCB; DIFF_TERM=FALSE
+  -- is set in the XDC constraints.
+  clk_ibufds : IBUFDS
+    port map (
+      I  => sys_clk_p,
+      IB => sys_clk_n,
+      O  => sys_clk_se
+    );
+
   -- ── Board outputs from NEORV32 std_ulogic ────────────────────────────────
-  uart_txd_out <= std_logic(uart0_txd_u);
+  uart_txd_out <= std_logic(uart0_txd_u);  -- MC1 pin (dual-path with bridge)
   spi_clk_o    <= std_logic(spi_clk_u);
   spi_dat_o    <= std_logic(spi_mosi_u);
   jtag_tdo_o   <= std_logic(jtag_tdo_u);
-  led          <= std_logic_vector(gpio_out_u(3 downto 0));
+  led          <= not std_logic_vector(gpio_out_u(7 downto 0));
   spi_csn_o    <= std_logic(spi_csn_u(0));
+
+  -- ── UART RX mux: FrontPanel bridge (default) or MC1 pin ────────────────
+  -- WireIn 0x00, bit 16: '0' = bridge (default), '1' = MC1 external adapter
+  fp_baud_div    <= wi00_data(15 downto 0);
+  uart_src_sel_fp <= wi00_data(16);
+
+  -- Double-register uart_src_sel from fp_clk into sys_clk (quasi-static CDC)
+  process (clk)
+  begin
+    if rising_edge(clk) then
+      uart_src_sync1 <= uart_src_sel_fp;
+      uart_src_sync2 <= uart_src_sync1;
+    end if;
+  end process;
+
+  neorv32_uart_rxd <= bridge_uart_rx when uart_src_sync2 = '0'
+                      else uart_rxd_in;
 
   -- ── I2C / TWI open-drain pads ─────────────────────────────────────────────
   IOBUF_SDA : IOBUF
@@ -129,11 +267,11 @@ begin
   -- ── Block design (Xilinx IP subsystem) ───────────────────────────────────
   bd_i : entity work.ostomachion_bd_wrapper
     port map (
-      sys_clk              => sys_clk,
-      ck_rst               => ck_rst,
+      sys_clk              => sys_clk_se,
+      ck_rst               => ext_rstn,
       clk_o                => clk,
-      periph_resetn_o      => periph_rstn,   -- STD_LOGIC_VECTOR(0 to 0)
-      mext_irq_o           => mext_irq,     -- STD_LOGIC — AXI INTC combined IRQ
+      periph_resetn_o      => periph_rstn,
+      mext_irq_o           => mext_irq,
       s_axi_cpu_awaddr     => axi_awaddr,
       s_axi_cpu_awprot     => axi_awprot,
       s_axi_cpu_awvalid    => axi_awvalid,
@@ -164,7 +302,6 @@ begin
     port map (
       clk           => clk,
       resetn        => periph_rstn(0),
-      -- XBUS (native std_ulogic — no type casting needed)
       xbus_adr_i    => xbus_adr_u,
       xbus_dat_i    => xbus_wdat_u,
       xbus_cti_i    => xbus_cti_u,
@@ -175,7 +312,6 @@ begin
       xbus_dat_o    => xbus_rdat_u,
       xbus_ack_o    => xbus_ack_u,
       xbus_err_o    => xbus_err_u,
-      -- AXI4 write address channel (extra AXI4 signals left open; BD is AXI4-Lite)
       m_axi_awaddr  => axi_awaddr,
       m_axi_awlen   => open,
       m_axi_awsize  => open,
@@ -184,13 +320,11 @@ begin
       m_axi_awprot  => axi_awprot,
       m_axi_awvalid => axi_awvalid,
       m_axi_awready => axi_awready,
-      -- AXI4 write data channel
       m_axi_wdata   => axi_wdata,
       m_axi_wstrb   => axi_wstrb,
       m_axi_wlast   => open,
       m_axi_wvalid  => axi_wvalid,
       m_axi_wready  => axi_wready,
-      -- AXI4 read address channel
       m_axi_araddr  => axi_araddr,
       m_axi_arlen   => open,
       m_axi_arsize  => open,
@@ -199,13 +333,11 @@ begin
       m_axi_arprot  => axi_arprot,
       m_axi_arvalid => axi_arvalid,
       m_axi_arready => axi_arready,
-      -- AXI4 read data channel
       m_axi_rdata   => axi_rdata,
       m_axi_rresp   => axi_rresp,
       m_axi_rlast   => '1',
       m_axi_rvalid  => axi_rvalid,
       m_axi_rready  => axi_rready,
-      -- AXI4 write response channel
       m_axi_bresp   => axi_bresp,
       m_axi_bvalid  => axi_bvalid,
       m_axi_bready  => axi_bready
@@ -215,7 +347,7 @@ begin
   neorv32_i : entity neorv32.neorv32_top
     generic map (
       CLOCK_FREQUENCY   => 100_000_000,
-      BOOT_MODE_SELECT  => 0,          -- BROM bootloader (firmware via UART; or pre-flash BOOT_MODE_SELECT=1)
+      BOOT_MODE_SELECT  => 0,
       IMEM_EN           => true,
       IMEM_SIZE         => 128 * 1024,
       DMEM_EN           => true,
@@ -234,11 +366,11 @@ begin
       IO_TWI_EN         => true,
       IO_TWI_FIFO       => 32,
       IO_GPIO_NUM       => 8,
-      IO_WDT_EN         => true        -- watchdog: feed via Zephyr wdt_feed() / CONFIG_WDT_NEORV32
+      IO_WDT_EN         => true
     )
     port map (
       clk_i       => std_ulogic(clk),
-      rstn_i      => std_ulogic(periph_rstn(0)),  -- extract scalar from 1-bit vector
+      rstn_i      => std_ulogic(periph_rstn(0)),
       jtag_tck_i  => std_ulogic(jtag_tck_i),
       jtag_tdi_i  => std_ulogic(jtag_tdi_i),
       jtag_tdo_o  => jtag_tdo_u,
@@ -254,9 +386,9 @@ begin
       xbus_cyc_o  => open,
       xbus_ack_i  => xbus_ack_u,
       xbus_err_i  => xbus_err_u,
-      mext_irq_i  => std_ulogic(mext_irq),  -- single IRQ from AXI INTC
+      mext_irq_i  => std_ulogic(mext_irq),
       uart0_txd_o => uart0_txd_u,
-      uart0_rxd_i => std_ulogic(uart_rxd_in),
+      uart0_rxd_i => std_ulogic(neorv32_uart_rxd),
       uart0_rtsn_o => open,
       gpio_o      => gpio_out_u,
       spi_clk_o   => spi_clk_u,
@@ -267,6 +399,81 @@ begin
       twi_sda_i   => std_ulogic(twi_sda_in_l),
       twi_scl_o   => twi_scl_out_u,
       twi_scl_i   => std_ulogic(twi_scl_in_l)
+    );
+
+  -- ── FrontPanel Host Interface ─────────────────────────────────────────────
+  fp_host_i : okHost
+    port map (
+      okUH  => okUH,
+      okHU  => okHU,
+      okUHU => okUHU,
+      okAA  => okAA,
+      okClk => fp_clk,
+      okHE  => okHE,
+      okEH  => okEH
+    );
+
+  -- WireIn 0x00: [15:0] baud divisor, [16] UART source select
+  wi00_i : okWireIn
+    port map (
+      okHE       => okHE,
+      ep_addr    => x"00",
+      ep_dataout => wi00_data
+    );
+
+  -- WireOut 0x20: [10:0] RX FIFO byte count
+  wo20_data <= (31 downto 11 => '0') & rx_count;
+
+  wo20_i : okWireOut
+    port map (
+      okHE      => okHE,
+      okEH      => okEHx(0*65+64 downto 0*65),
+      ep_addr   => x"20",
+      ep_datain => wo20_data
+    );
+
+  -- PipeIn 0x80: host → NEORV32 UART data
+  pi80_i : okPipeIn
+    port map (
+      okHE       => okHE,
+      okEH       => okEHx(1*65+64 downto 1*65),
+      ep_addr    => x"80",
+      ep_dataout => pi80_data,
+      ep_write   => pi80_write
+    );
+
+  -- PipeOut 0xA0: NEORV32 UART data → host
+  poA0_i : okPipeOut
+    port map (
+      okHE      => okHE,
+      okEH      => okEHx(2*65+64 downto 2*65),
+      ep_addr   => x"A0",
+      ep_datain => poA0_data,
+      ep_read   => poA0_read
+    );
+
+  -- OR all endpoint-to-host buses
+  wireor_i : okWireOR
+    generic map (N => FP_EP_COUNT)
+    port map (
+      okEH  => okEH,
+      okEHx => okEHx
+    );
+
+  -- ── FrontPanel UART Bridge ──────────────────────────────────────────────
+  uart_bridge_i : entity work.fp_uart_bridge
+    port map (
+      sys_clk   => clk,
+      sys_rstn  => periph_rstn(0),
+      uart_tx_i => std_logic(uart0_txd_u),
+      uart_rx_o => bridge_uart_rx,
+      fp_clk    => fp_clk,
+      po_data   => poA0_data,
+      po_rd     => poA0_read,
+      pi_data   => pi80_data,
+      pi_wr     => pi80_write,
+      rx_count  => rx_count,
+      baud_div  => fp_baud_div
     );
 
 end architecture rtl;

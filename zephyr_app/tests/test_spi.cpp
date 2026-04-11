@@ -3,9 +3,8 @@
 //
 // SPI loopback test suite for Ostomachion.
 //
-// Hardware setup (Arty A7): fit a jumper between Pmod JA pin 2 (MOSI, B11)
-// and pin 3 (MISO, A11).  This is the same physical test used for production
-// SPI bringup.
+// Hardware setup (XEM7310-A200): fit a jumper between MC1-28 (MOSI, W6)
+// and MC1-29 (MISO, U5).  Requires MC1 expansion header access.
 //
 // Simulation: the GHDL testbench wires MOSI directly to MISO, so all
 // loopback assertions hold without any jumper.

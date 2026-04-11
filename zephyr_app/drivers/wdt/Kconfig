@@ -9,7 +9,7 @@ config WDT_NEORV32
 	help
 	  Enable the out-of-tree Zephyr driver for the NEORV32 WDT peripheral.
 	  Requires IO_WDT_EN=true in the NEORV32 top-level generic map (set in
-	  fpga/arty_a7/arty_a7_top.vhd for the production FPGA target).
+	  fpga/xem7310/xem7310_top.vhd for the production FPGA target).
 
 	  The driver implements the Zephyr watchdog API (wdt_install_timeout,
 	  wdt_setup, wdt_feed, wdt_disable).  Only reset mode is supported;
