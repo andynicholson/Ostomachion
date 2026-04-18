@@ -145,11 +145,18 @@ launch_runs synth_1 -jobs 4
 wait_on_run synth_1
 
 if {[get_property PROGRESS [get_runs synth_1]] ne "100%"} {
-    puts "ERROR: Synthesis failed — see:"
+    puts "ERROR: Synthesis did not complete — see:"
     puts "  $build_dir/vivado_project/ostomachion_xem7310.runs/synth_1/runme.log"
     exit 1
 }
-puts "INFO: Synthesis complete."
+# PROGRESS reaches 100% even for a failed run; STATUS is the authoritative indicator.
+set synth_status [get_property STATUS [get_runs synth_1]]
+if {![string match "*Complete*" $synth_status]} {
+    puts "ERROR: Synthesis failed (STATUS=\"$synth_status\") — see:"
+    puts "  $build_dir/vivado_project/ostomachion_xem7310.runs/synth_1/runme.log"
+    exit 1
+}
+puts "INFO: Synthesis complete (STATUS=\"$synth_status\")."
 
 open_run synth_1 -name synth_1
 

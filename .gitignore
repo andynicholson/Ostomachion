@@ -28,6 +28,9 @@ clockInfo.txt
 build/
 vivado*
 
+#clangd
+.cache
+
 # SW build artifacts
 sw/test_gpio_uart/*.elf
 sw/test_gpio_uart/*.bin
@@ -47,6 +50,9 @@ compile_commands.json
 # IDE
 .vscode/
 .cursor/
+
+# Local scratch (file or directory at repo root)
+/TMP
 
 # OS
 .DS_Store

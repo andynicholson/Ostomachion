@@ -18,7 +18,7 @@ create_clock -period 5.000 -name sys_clk [get_ports sys_clk_p]
 ## ==========================================================================
 ## Reset (active-low, directly from MC1 connector pin 37)
 ## ==========================================================================
-set_property -dict {PACKAGE_PIN AB7 IOSTANDARD LVCMOS33} [get_ports ext_rstn]
+set_property -dict {PACKAGE_PIN AB7 IOSTANDARD LVCMOS33 PULLUP TRUE} [get_ports ext_rstn]
 
 ## ==========================================================================
 ## UART (MC1, Bank 34)
@@ -180,6 +180,10 @@ set_false_path -to [get_cells -hierarchical -filter {NAME =~ *uart_src_sync1*}]
 ## The prog_full logic also has a reset input from this CDC path.
 set_false_path -to [get_cells -hierarchical -filter {NAME =~ *uart_bridge_i/tx_fifo_i*xpm_fifo_rst_inst*}]
 set_false_path -to [get_cells -hierarchical -filter {NAME =~ *uart_bridge_i/tx_fifo_i*prog_full_i*}]
+## WireOut 0x21 diagnostic probes: sys_clk domain signals sampled by fp_clk
+## inside okWireOut.  FrontPanel WireOut values are quasi-static (host reads
+## them on demand), so no timing closure is required on this CDC path.
+set_false_path -to [get_cells -hierarchical -filter {NAME =~ *wo21_i*}]
 
 ## ==========================================================================
 ## Bitstream / configuration

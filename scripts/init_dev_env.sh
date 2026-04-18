@@ -15,6 +15,8 @@
 #   OSTOMACHION_ZEPHYR_WORKSPACE  default: ~/src/zephyrproject  (contains zephyr/ + .west)
 #   ZEPHYR_SDK_INSTALL_DIR        default: ~/zephyr-sdk-1.0.0
 #   OSTOMACHION_VIVADO_SETTINGS   default: /tools/Xilinx/2025.1/Vivado/settings64.sh
+#   FRONTPANEL_DIR                default: auto-detected from ~/OpalKelly/FrontPanel-*
+#                                           (required for make fpga-synth, make uart-bridge)
 #
 # shellcheck shell=bash
 
@@ -31,6 +33,18 @@ _OSTO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${OSTOMACHION_ZEPHYR_WORKSPACE:=${HOME}/src/zephyrproject}"
 : "${ZEPHYR_SDK_INSTALL_DIR:=${HOME}/zephyr-sdk-1.0.0}"
 : "${OSTOMACHION_VIVADO_SETTINGS:=/tools/Xilinx/2025.1/Vivado/settings64.sh}"
+
+# Auto-detect FrontPanel SDK root from ~/OpalKelly/FrontPanel-* if not already set.
+# The glob matches any installed version/platform string; sort -V picks the newest
+# when multiple versions are present.
+if [[ -z "${FRONTPANEL_DIR:-}" ]]; then
+	# Trailing slash restricts the glob to directories only, avoiding .tgz files.
+	_fp_candidates=( "${HOME}/OpalKelly"/FrontPanel-*/ )
+	if [[ -d "${_fp_candidates[-1]}" ]]; then
+		FRONTPANEL_DIR="${_fp_candidates[-1]%/}"  # strip trailing slash
+	fi
+	unset _fp_candidates
+fi
 
 _ZEPHYR_BASE="${OSTOMACHION_ZEPHYR_WORKSPACE}/zephyr"
 
@@ -79,6 +93,17 @@ else
 	echo "      make fpga-synth will fail until it exists or OSTOMACHION_VIVADO_SETTINGS is set." >&2
 fi
 
+# FrontPanel SDK — export if a valid directory was found or provided; warn otherwise.
+# Non-fatal: Zephyr firmware builds do not need the SDK; only fpga-synth and uart-bridge do.
+if [[ -n "${FRONTPANEL_DIR:-}" && -d "${FRONTPANEL_DIR}" ]]; then
+	export FRONTPANEL_DIR
+else
+	echo "WARN: FrontPanel SDK not found (FRONTPANEL_DIR=${FRONTPANEL_DIR:-<unset>})" >&2
+	echo "      Install from opalkelly.com and set FRONTPANEL_DIR to the SDK root." >&2
+	echo "      make fpga-synth and make uart-bridge will fail without it." >&2
+	unset FRONTPANEL_DIR
+fi
+
 echo "Ostomachion dev environment ready:"
 echo "  OSTOMACHION_ROOT          = ${OSTOMACHION_ROOT}"
 echo "  ZEPHYR_BASE               = ${ZEPHYR_BASE}"
@@ -89,6 +114,11 @@ if [[ "${_VIVADO_ENV_OK}" -eq 1 ]]; then
 	echo "  Vivado (PATH)             = ${OSTOMACHION_VIVADO_SETTINGS} (sourced)"
 else
 	echo "  Vivado (PATH)             = (not configured)"
+fi
+if [[ -n "${FRONTPANEL_DIR:-}" ]]; then
+	echo "  FRONTPANEL_DIR            = ${FRONTPANEL_DIR}"
+else
+	echo "  FRONTPANEL_DIR            = (not found — fpga-synth and uart-bridge will fail)"
 fi
 echo ""
 echo "Next:  cd \"\${OSTOMACHION_ROOT}\" && make zephyr-fpga"

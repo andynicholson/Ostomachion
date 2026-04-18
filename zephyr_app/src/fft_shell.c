@@ -24,6 +24,7 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/misc/fft_accel.h>
+#include <zephyr/sys/sys_io.h>
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -188,12 +189,59 @@ static int cmd_fft_sine(const struct shell *sh, size_t argc, char **argv)
 	uint32_t peak_mag;
 	int peak_bin = fft_peak(g_fft_out, FFT_N, &peak_mag);
 
-	/* Guard against target_bin=0: peak_bin >= -1 would always be true */
-	int lo = (target_bin > 0) ? (target_bin - 1) : 0;
-	bool pass = (peak_bin >= lo && peak_bin <= target_bin + 1);
+	/* A real cosine has a symmetric spectrum: equal peaks at target_bin and
+	 * its mirror at FFT_N - target_bin.  Either bin is a valid result. */
+	int lo     = (target_bin > 0) ? (target_bin - 1) : 0;
+	int mirror = FFT_N - target_bin;
+	bool pass = (peak_bin >= lo        && peak_bin <= target_bin + 1) ||
+		    (peak_bin >= mirror - 1 && peak_bin <= mirror + 1);
 	shell_print(sh,
 		    "[FFT] Done in %u us.  Peak bin: %d  magnitude: %u  %s",
 		    us, peak_bin, peak_mag, pass ? "PASS" : "FAIL");
+
+	/* ── Pipeline-latency diagnostic ─────────────────────────────────────
+	 * Theory: the xfft pipelined streaming core asserts m_axis_data_tvalid
+	 * immediately, outputting L zeros while the pipeline fills.  The DMA
+	 * S2MM captures those L zeros before X[0] arrives, shifting the output
+	 * by L positions: X[target_bin] lands at out[L + target_bin].
+	 *
+	 * Print selected bins to confirm/deny this:
+	 *   out[0]          — should be 0 if shifted (pipeline-fill zero)
+	 *   out[target_bin] — should be 0 if shifted (still in garbage range)
+	 *   out[peak_bin]   — the actual observed maximum
+	 *   out[peak_bin - target_bin] — if shift = L this equals X[0]; its
+	 *                    magnitude should be near zero for a pure cosine
+	 *   out[mirror]     — should be 0 (mirror beyond capture window if shifted)
+	 */
+	int shift_probe = peak_bin - target_bin;
+	shell_print(sh, "[FFT-DIAG] out[   0]: re=%6d im=%6d mag=%u",
+		    g_fft_out[0].re, g_fft_out[0].im,
+		    fft_magnitude(g_fft_out[0].re, g_fft_out[0].im));
+	if (target_bin > 0 && target_bin < FFT_N) {
+		shell_print(sh, "[FFT-DIAG] out[%4d]: re=%6d im=%6d mag=%u  (target)",
+			    target_bin,
+			    g_fft_out[target_bin].re, g_fft_out[target_bin].im,
+			    fft_magnitude(g_fft_out[target_bin].re,
+					  g_fft_out[target_bin].im));
+	}
+	if (shift_probe > 0 && shift_probe < FFT_N) {
+		shell_print(sh, "[FFT-DIAG] out[%4d]: re=%6d im=%6d mag=%u  (peak-target=shift probe X[0]?)",
+			    shift_probe,
+			    g_fft_out[shift_probe].re, g_fft_out[shift_probe].im,
+			    fft_magnitude(g_fft_out[shift_probe].re,
+					  g_fft_out[shift_probe].im));
+	}
+	shell_print(sh, "[FFT-DIAG] out[%4d]: re=%6d im=%6d mag=%u  (peak)",
+		    peak_bin,
+		    g_fft_out[peak_bin].re, g_fft_out[peak_bin].im, peak_mag);
+	if (mirror > 0 && mirror < FFT_N) {
+		shell_print(sh, "[FFT-DIAG] out[%4d]: re=%6d im=%6d mag=%u  (mirror)",
+			    mirror,
+			    g_fft_out[mirror].re, g_fft_out[mirror].im,
+			    fft_magnitude(g_fft_out[mirror].re,
+					  g_fft_out[mirror].im));
+	}
+
 	return pass ? 0 : -EIO;
 }
 
@@ -244,6 +292,98 @@ static int cmd_fft_run(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+/* ── "fft diag" — pipeline latency probe ────────────────────────────────── */
+
+static int cmd_fft_diag(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(fft_accel));
+	if (!device_is_ready(dev)) {
+		shell_error(sh, "fft_accel not ready");
+		return -ENODEV;
+	}
+
+	/* DC input: FFT should give a single peak at bin 0.
+	 * If the xfft pipeline fills with zeros before X[0] appears (pipeline
+	 * latency shift), the DC peak will NOT be at out[0] — it will be at
+	 * out[L] where L is the pipeline latency (number of garbage zero samples
+	 * captured before the first valid FFT output). */
+	for (int i = 0; i < FFT_N; i++) {
+		g_fft_in[i].re = 16384;
+		g_fft_in[i].im = 0;
+	}
+
+	shell_print(sh, "[FFT-DIAG] DC input, searching for peak across all bins...");
+
+	int rc = fft_accel_transform(dev, g_fft_in, g_fft_out, FFT_N);
+	if (rc != 0) {
+		shell_error(sh, "[FFT] transform failed: %d", rc);
+		return rc;
+	}
+
+	uint32_t peak_mag;
+	int peak_bin = fft_peak(g_fft_out, FFT_N, &peak_mag);
+
+	/* Read RX BRAM[0..7] directly — bypasses the driver's BRAM skip so we
+	 * can see exactly what the DMA wrote, independent of any skip offset. */
+	static const uintptr_t rx_bram =
+		DT_REG_ADDR_BY_NAME(DT_NODELABEL(fft_accel), rx_bram);
+	shell_print(sh, "[FFT-DIAG] Raw RX BRAM[0..7] (direct read, no skip):");
+	for (int k = 0; k < 8; k++) {
+		uint32_t w  = sys_read32(rx_bram + k * 4);
+		int16_t  re = (int16_t)(w & 0xFFFFu);
+		int16_t  im = (int16_t)(w >> 16);
+		uint32_t m  = fft_magnitude(re, im);
+		shell_print(sh, "  BRAM[%d]: 0x%08x  re=%6d im=%6d mag=%u",
+			    k, w, re, im, m);
+	}
+
+	/* Print out[0..7] unconditionally so we can see where the DC energy lands
+	 * regardless of where fft_peak reports the maximum. */
+	shell_print(sh, "[FFT-DIAG] out[0..7] (via driver, with skip applied):");
+	for (int k = 0; k < 8; k++) {
+		uint32_t m = fft_magnitude(g_fft_out[k].re, g_fft_out[k].im);
+		shell_print(sh, "  out[%4d]: re=%6d im=%6d mag=%u",
+			    k, g_fft_out[k].re, g_fft_out[k].im, m);
+	}
+
+	/* Print bin 0 and the actual peak (they should be the same). */
+	shell_print(sh, "[FFT-DIAG] out[   0]: re=%6d im=%6d mag=%u  (expected DC peak)",
+		    g_fft_out[0].re, g_fft_out[0].im,
+		    fft_magnitude(g_fft_out[0].re, g_fft_out[0].im));
+	shell_print(sh, "[FFT-DIAG] out[%4d]: re=%6d im=%6d mag=%u  (actual peak)",
+		    peak_bin,
+		    g_fft_out[peak_bin].re, g_fft_out[peak_bin].im, peak_mag);
+
+	/* Print a window of 8 bins around the actual peak. */
+	int lo = (peak_bin > 4) ? (peak_bin - 4) : 0;
+	int hi = (peak_bin + 4 < FFT_N) ? (peak_bin + 4) : FFT_N - 1;
+	shell_print(sh, "[FFT-DIAG] Bins %d..%d around peak:", lo, hi);
+	for (int k = lo; k <= hi; k++) {
+		uint32_t m = fft_magnitude(g_fft_out[k].re, g_fft_out[k].im);
+		shell_print(sh, "  out[%4d]: re=%6d im=%6d mag=%u%s",
+			    k, g_fft_out[k].re, g_fft_out[k].im, m,
+			    (k == peak_bin) ? " ← PEAK" : "");
+	}
+
+	/* PASS requires peak at bin 0 AND dominant magnitude (> 10× any other bin).
+	 * A vacuous "PASS" where all bins are ~0 and peak_bin happens to be 0
+	 * would mean the DC energy is missing entirely. */
+	uint32_t bin0_mag = fft_magnitude(g_fft_out[0].re, g_fft_out[0].im);
+	uint32_t max_other = 0;
+	for (int k = 1; k < FFT_N; k++) {
+		uint32_t m = fft_magnitude(g_fft_out[k].re, g_fft_out[k].im);
+		if (m > max_other) max_other = m;
+	}
+	bool pass = (peak_bin == 0) && (bin0_mag > max_other * 10);
+	shell_print(sh, "[FFT-DIAG] DC peak at bin %d  mag=%u  max_other=%u  %s",
+		    peak_bin, peak_mag, max_other,
+		    pass ? "PASS" : "FAIL");
+	return pass ? 0 : -EIO;
+}
+
 /* ── Shell command registration ──────────────────────────────────────────── */
 
 SHELL_STATIC_SUBCMD_SET_CREATE(fft_sub,
@@ -256,6 +396,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(fft_sub,
 	SHELL_CMD_ARG(dc,   NULL,
 		      "fft dc                  — DC input, verify bin 0",
 		      cmd_fft_dc,   1, 0),
+	SHELL_CMD_ARG(diag, NULL,
+		      "fft diag                — DC input, find pipeline latency shift",
+		      cmd_fft_diag, 1, 0),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(fft, &fft_sub, "FFT hardware accelerator", NULL);

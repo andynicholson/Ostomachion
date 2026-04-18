@@ -25,6 +25,10 @@ starts reading.
 FrontPanel endpoint map (matching xem7310_top.vhd):
     WireIn    0x00  [15:0] baud divisor, [16] UART source (0=bridge, 1=MC1)
     WireOut   0x20  [10:0] RX FIFO entry count
+    WireOut   0x21  [2:0]  FFT/DMA diagnostic probes
+                      [0] M_AXIS_MM2S_TVALID  (1 = DMA sending data to xfft)
+                      [1] s_axis_data_TREADY  (1 = xfft accepting input)
+                      [2] periph_rstn         (1 = peripherals out of reset)
     BTPipeIn  0x80  host → NEORV32 UART data  (block-throttled, ep_ready = not full)
     BTPipeOut 0xA0  NEORV32 UART data → host  (block-throttled, ep_ready = not empty)
 """
@@ -43,8 +47,32 @@ PID_FILE = "/tmp/uart_bridge.pid"
 
 EP_WIREIN_CFG  = 0x00
 EP_WIREOUT_CNT = 0x20
+EP_WIREOUT_FFT = 0x21
 EP_PIPEIN_TX   = 0x80
 EP_PIPEOUT_RX  = 0xA0
+
+# WireOut 0x21 bit decode (bit 2 = periph_rstn, bit 1 = s_axis_data_tready, bit 0 = mm2s_tvalid)
+_FFT_DBG = {
+    0b000: "in-reset",
+    0b001: "in-reset  DMA-sending",
+    0b010: "in-reset  xfft-ready",
+    0b011: "in-reset  DMA-sending  xfft-ready",
+    0b100: "idle",
+    0b101: "DMA-sending / xfft-stall  →  xfft not accepting (xfft init issue)",
+    0b110: "xfft-ready / DMA-stall  →  AXI-BRAM read stall or DMA not yet armed",
+    0b111: "DATA FLOWING  (DMA→xfft handshake active)",
+}
+
+
+def decode_fft_debug(val: int) -> str:
+    bits = val & 0x7
+    rst  = (bits >> 2) & 1
+    rdy  = (bits >> 1) & 1
+    vld  = bits & 1
+    msg  = _FFT_DBG.get(bits, "???")
+    return f"WireOut 0x21 = 0b{bits:03b}  rst={rst} tready={rdy} tvalid={vld}  {msg}"
+
+
 
 PIPE_WORD_BYTES = 4
 BT_BLOCK_SIZE = 1024  # BTPipe block size (USB 3.0, power-of-2, 16..16384)
@@ -96,6 +124,7 @@ def set_baud(dev, baud: int, uart_src: int = 0):
     dev.UpdateWireIns()
     actual_baud = SYS_CLK_HZ / (divisor + 1)
     print(f"Baud   : {baud} (divisor={divisor}, actual={actual_baud:.0f})")
+
 
 
 def get_rx_count(dev) -> int:
@@ -227,6 +256,8 @@ def main():
     current_baud = args.baud
     set_baud(dev, current_baud, args.uart_src)
 
+    last_fft_dbg = None
+
     try:
         while True:
             if baud_switch_pending[0]:
@@ -237,8 +268,13 @@ def main():
                 sys.stdout.flush()
 
             # RX: check FIFO count first to avoid blocking on an empty BTPipeOut.
+            # UpdateWireOuts is called inside get_rx_count; piggyback 0x21.
             rx_data = b""
             rx_count = get_rx_count(dev)
+            fft_dbg = dev.GetWireOutValue(EP_WIREOUT_FFT) & 0x7
+            if fft_dbg != last_fft_dbg:
+                print(f"[FFT-DBG] {decode_fft_debug(fft_dbg)}", flush=True)
+                last_fft_dbg = fft_dbg
             if rx_count > 0:
                 rx_data = read_uart_bytes(dev)
                 if rx_data:

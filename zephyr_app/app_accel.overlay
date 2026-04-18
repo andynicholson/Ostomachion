@@ -10,8 +10,10 @@
  *
  * Address map (XBUS region 0x40000000–0x4FFFFFFF):
  *   0x40000000  AXI DMA control registers    64 B   (AXI4-Lite)
- *   0x41000000  TX BRAM                      16 KB  (AXI4-Full)
- *   0x41004000  RX BRAM                      16 KB  (AXI4-Full)
+ *   0x40010000  AXI INTC                    128 B   (AXI4-Lite)
+ *   0x40020000  AXI GPIO (xfft reset)       128 B   (AXI4-Lite)
+ *   0x41000000  TX BRAM                      32 KB  (AXI4-Full)
+ *   0x41008000  RX BRAM                      32 KB  (AXI4-Full)
  *
  * The FFT core is the Xilinx xfft IP instantiated in the block design.
  * It has no AXI4-Lite slave; it is driven purely via AXI4-Stream by the
@@ -26,13 +28,17 @@
 	soc {
 		fft_accel: fft-accel@40000000 {
 			compatible = "ostomachion,fft-accel";
-			/* reg-names:  dma         tx_bram     rx_bram     intc        */
+			/* reg-names:  dma         tx_bram     rx_bram     intc        gpio        */
 			reg = <0x40000000 0x40>,
-			      <0x41000000 0x4000>,
-			      <0x41004000 0x4000>,
-			      <0x40010000 0x80>;
-			reg-names = "dma", "tx_bram", "rx_bram", "intc";
-			bram-size = <16384>;
+			      <0x41000000 0x8000>,
+			      <0x41008000 0x8000>,
+			      <0x40010000 0x80>,
+			      <0x40020000 0x80>;
+			reg-names = "dma", "tx_bram", "rx_bram", "intc", "gpio";
+			/* bram-size is the DMA transfer length for one RX transfer:
+			 * 1 phantom word + N=4096 output samples = 4097 × 4 = 16388 bytes.
+			 * Both BRAMs are 8192 words (32 KB) deep; the upper words are unused. */
+			bram-size = <16388>;
 			/* AXI INTC IRQ output → NEORV32 MEI line (INTC IRQ 11) */
 			interrupts = <11>;
 			interrupt-parent = <&intc>;

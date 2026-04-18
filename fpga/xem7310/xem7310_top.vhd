@@ -173,7 +173,7 @@ architecture rtl of xem7310_top is
   end component;
 
   -- ── FrontPanel signals ─────────────────────────────────────────────────
-  constant FP_EP_COUNT : natural := 3;  -- WireOut + PipeIn + PipeOut
+  constant FP_EP_COUNT : natural := 4;  -- WireOut×2 + PipeIn + PipeOut
 
   signal fp_clk       : std_logic;
   signal okHE         : std_logic_vector(112 downto 0);
@@ -190,6 +190,14 @@ architecture rtl of xem7310_top is
   -- WireOut 0x20: RX FIFO entry count
   signal wo20_data    : std_logic_vector(31 downto 0);
   signal rx_count     : std_logic_vector(10 downto 0);
+
+  -- WireOut 0x21: FFT/DMA diagnostic probes
+  --   [0] = fft_dbg_mm2s_tvalid   (DMA M_AXIS_MM2S TVALID, 1 = DMA sending)
+  --   [1] = fft_dbg_s_data_tready (xfft s_axis_data TREADY, 1 = xfft accepting)
+  --   [2] = periph_rstn(0)        (active-high reset-released indicator)
+  signal wo21_data              : std_logic_vector(31 downto 0);
+  signal fft_dbg_mm2s_tvalid   : std_logic;
+  signal fft_dbg_s_data_tready : std_logic;
 
   -- BTPipeIn 0x80: host → NEORV32 UART data (block-throttled)
   signal pi80_data    : std_logic_vector(31 downto 0);
@@ -248,8 +256,8 @@ begin
 
   -- ── UART RX mux: FrontPanel bridge (default) or MC1 pin ────────────────
   -- WireIn 0x00, bit 16: '0' = bridge (default), '1' = MC1 external adapter
-  fp_baud_div    <= wi00_data(15 downto 0);
-  uart_src_sel_fp <= wi00_data(16);
+  fp_baud_div      <= wi00_data(15 downto 0);
+  uart_src_sel_fp  <= wi00_data(16);
 
   -- Double-register uart_src_sel from fp_clk into sys_clk (quasi-static CDC)
   process (clk)
@@ -295,8 +303,10 @@ begin
       s_axi_cpu_arready    => axi_arready,
       s_axi_cpu_rdata      => axi_rdata,
       s_axi_cpu_rresp      => axi_rresp,
-      s_axi_cpu_rvalid     => axi_rvalid,
-      s_axi_cpu_rready     => axi_rready
+      s_axi_cpu_rvalid         => axi_rvalid,
+      s_axi_cpu_rready         => axi_rready,
+      fft_dbg_mm2s_tvalid      => fft_dbg_mm2s_tvalid,
+      fft_dbg_s_data_tready    => fft_dbg_s_data_tready
     );
 
   -- ── XBUS → AXI4 bridge (upstream NEORV32, BURST_EN=false for AXI4-Lite BD)
@@ -436,6 +446,22 @@ begin
       okEH      => okEHx(0*65+64 downto 0*65),
       ep_addr   => x"20",
       ep_datain => wo20_data
+    );
+
+  -- WireOut 0x21: FFT/DMA diagnostic probes (sampled in FrontPanel clock domain)
+  --   [0] = M_AXIS_MM2S TVALID  (1 = DMA is sending data to xfft)
+  --   [1] = s_axis_data TREADY  (1 = xfft is accepting input data)
+  --   [2] = periph_rstn(0)      (1 = peripherals out of reset)
+  wo21_data <= (31 downto 3 => '0') & periph_rstn(0)
+                                    & fft_dbg_s_data_tready
+                                    & fft_dbg_mm2s_tvalid;
+
+  wo21_i : okWireOut
+    port map (
+      okHE      => okHE,
+      okEH      => okEHx(3*65+64 downto 3*65),
+      ep_addr   => x"21",
+      ep_datain => wo21_data
     );
 
   -- BTPipeIn 0x80: host → NEORV32 UART data (block-throttled, hardware flow control)

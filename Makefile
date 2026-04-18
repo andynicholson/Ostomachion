@@ -125,7 +125,7 @@ clean: clean-ghdl
 	$(MAKE) -C $(SW_DIR) RISCV_PREFIX=$(RISCV_PREFIX) clean 2>/dev/null || true
 	rm -f test_imem_image.vhd zephyr_imem_image.vhd
 	rm -rf $(ZEPHYR_BUILD_DIR) $(ZEPHYR_BUILD_FPGA) $(ZEPHYR_BUILD_HW_TEST) \
-	       $(ZEPHYR_BUILD_ACCEL) $(ZEPHYR_BUILD_SHELL)
+	       $(ZEPHYR_BUILD_ACCEL) $(ZEPHYR_BUILD_SHELL) $(ZEPHYR_APP_DIR)/build
 
 # ---------- FPGA targets (Opal Kelly XEM7310-A200) ----------------------------
 

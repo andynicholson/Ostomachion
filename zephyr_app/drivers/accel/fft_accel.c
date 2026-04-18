@@ -5,8 +5,8 @@
  * Device tree compatible: "ostomachion,fft-accel"
  *
  * Hardware overview:
- *   - TX BRAM (0x41000000, 16 KB): CPU word-writes input samples
- *   - RX BRAM (0x41004000, 16 KB): CPU word-reads output samples
+ *   - TX BRAM (0x41000000, 32 KB): CPU word-writes input samples
+ *   - RX BRAM (0x41008000, 32 KB): CPU word-reads output samples
  *   - AXI DMA (0x40000000):        streams TX BRAM → Xilinx xfft IP → RX BRAM
  *
  * The FFT core is the Xilinx xfft IP (PG109), pipelined streaming, 4096-point,
@@ -49,6 +49,9 @@
 LOG_MODULE_REGISTER(fft_accel, CONFIG_FFT_ACCEL_LOG_LEVEL);
 
 #define DT_DRV_COMPAT ostomachion_fft_accel
+
+/* ── AXI GPIO register offsets (Xilinx PG144) ───────────────────────────── */
+#define GPIO_DATA  0x00  /* GPIO data output register (bit 0 = xfft_aresetn) */
 
 /* ── AXI DMA register offsets (simple/register-direct mode) ─────────────── */
 #define DMA_MM2S_DMACR  0x00  /* MM2S DMA Control Register   */
@@ -95,12 +98,13 @@ LOG_MODULE_REGISTER(fft_accel, CONFIG_FFT_ACCEL_LOG_LEVEL);
 /* ── Driver config / data structs ──────────────────────────────────────── */
 
 struct fft_accel_config {
-	uintptr_t dma_base;     /* AXI DMA base address   */
-	uintptr_t tx_bram_base; /* TX BRAM base address   */
-	uintptr_t rx_bram_base; /* RX BRAM base address   */
-	uintptr_t intc_base;    /* AXI INTC base address  */
-	uint32_t  bram_size;    /* BRAM size in bytes     */
-	uint32_t  irq_num;      /* NEORV32 mext IRQ line  */
+	uintptr_t dma_base;     /* AXI DMA base address          */
+	uintptr_t tx_bram_base; /* TX BRAM base address          */
+	uintptr_t rx_bram_base; /* RX BRAM base address          */
+	uintptr_t intc_base;    /* AXI INTC base address         */
+	uintptr_t gpio_base;    /* AXI GPIO base (xfft reset)    */
+	uint32_t  bram_size;    /* BRAM size in bytes            */
+	uint32_t  irq_num;      /* NEORV32 mext IRQ line         */
 };
 
 struct fft_accel_data {
@@ -134,23 +138,39 @@ static inline uint32_t intc_rd(const struct fft_accel_config *cfg, uint32_t off)
 	return sys_read32(cfg->intc_base + off);
 }
 
+static inline void gpio_wr(const struct fft_accel_config *cfg,
+			   uint32_t off, uint32_t val)
+{
+	sys_write32(val, cfg->gpio_base + off);
+}
+
+static inline uint32_t gpio_rd(const struct fft_accel_config *cfg, uint32_t off)
+{
+	return sys_read32(cfg->gpio_base + off);
+}
+
 /**
  * dma_reset_channel() — pulse software reset and poll until the bit clears.
  *
  * The AXI DMA spec says the reset bit is self-clearing, but does not
  * guarantee the exact number of AXI clock cycles.  Polling avoids a
  * race where DMA_CR_RS is written before the reset completes.
+ *
+ * @return 0 on success, -ETIMEDOUT if the reset bit does not clear within
+ *         DMA_RESET_POLL_MAX microseconds.  The caller must abort on timeout
+ *         because a partially-reset DMA has undefined internal state.
  */
-static void dma_reset_channel(const struct fft_accel_config *cfg, uint32_t cr_reg)
+static int dma_reset_channel(const struct fft_accel_config *cfg, uint32_t cr_reg)
 {
 	dma_wr(cfg, cr_reg, DMA_CR_RESET);
 	for (int i = 0; i < DMA_RESET_POLL_MAX; i++) {
 		if (!(dma_rd(cfg, cr_reg) & DMA_CR_RESET)) {
-			return;
+			return 0;
 		}
 		k_busy_wait(1);
 	}
-	LOG_WRN("DMA channel reset timed out (cr_reg=0x%02x)", cr_reg);
+	LOG_ERR("DMA channel reset timed out (cr_reg=0x%02x)", cr_reg);
+	return -ETIMEDOUT;
 }
 
 /* ── IRQ handler ─────────────────────────────────────────────────────────── */
@@ -177,15 +197,10 @@ static void fft_accel_isr(const struct device *dev)
 	/* Read INTC ISR: bit N is set if channel N has a pending interrupt */
 	uint32_t isr = intc_rd(cfg, INTC_ISR);
 
-	/* Acknowledge all pending channels immediately via IAR (write-1-to-clear).
-	 * Acknowledging before processing is safe for level-sensitive sources
-	 * because the DMA DMASR bits are self-latching until cleared separately. */
-	intc_wr(cfg, INTC_IAR, isr);
-
 	/* ── Channel 0: DMA MM2S (source data read complete or error) ────── */
 	if (isr & INTC_CH_MM2S) {
 		uint32_t mm2s_sr = dma_rd(cfg, DMA_MM2S_DMASR);
-		/* W1C: clear latched IRQ bits in DMASR */
+		/* W1C: clears IRQ bits and de-asserts mm2s_introut before IAR */
 		dma_wr(cfg, DMA_MM2S_DMASR, mm2s_sr);
 		if (mm2s_sr & DMA_SR_ERR_IRQ) {
 			LOG_ERR("DMA MM2S error: DMASR=0x%08x", mm2s_sr);
@@ -197,6 +212,7 @@ static void fft_accel_isr(const struct device *dev)
 	/* ── Channel 1: DMA S2MM (output committed to RX BRAM, or error) ── */
 	if (isr & INTC_CH_S2MM) {
 		uint32_t s2mm_sr = dma_rd(cfg, DMA_S2MM_DMASR);
+		/* W1C: clears IRQ bits and de-asserts s2mm_introut before IAR */
 		dma_wr(cfg, DMA_S2MM_DMASR, s2mm_sr);
 		if (s2mm_sr & DMA_SR_ERR_IRQ) {
 			LOG_ERR("DMA S2MM error: DMASR=0x%08x", s2mm_sr);
@@ -208,11 +224,24 @@ static void fft_accel_isr(const struct device *dev)
 		}
 	}
 
-	/* ── Channel 2: xfft overflow ───────────────────────────────────── */
+	/* ── Channel 2: xfft m_axis_status_tvalid ──────────────────────── */
+	/* m_axis_status_tvalid fires once per completed FFT frame, not only
+	 * on overflow.  The actual overflow flag is in m_axis_status_tdata[0],
+	 * which is not currently wired to a readable register in the BD.
+	 * Treat every ch2 pulse as "frame done" and do not set last_overflow
+	 * unconditionally; only a future BD change that reads tdata[0] can
+	 * distinguish real overflow from normal frame completion. */
 	if (isr & INTC_CH_OVFLO) {
-		data->last_overflow = true;
-		LOG_WRN("FFT overflow detected — output bins may be corrupted");
+		/* No action needed: frame-complete notification, not overflow. */
+		(void)0;
 	}
+
+	/* Acknowledge INTC after all DMA DMASR W1C writes have de-asserted
+	 * the source lines.  For level-sensitive channels (C_KIND_OF_INTR=0),
+	 * writing IAR before the source de-asserts causes the ISR bit to
+	 * immediately re-set, generating a spurious second ISR entry where
+	 * give_sem fires again on stale isr state. */
+	intc_wr(cfg, INTC_IAR, isr);
 
 	if (give_sem) {
 		k_sem_give(&data->irq_sem);
@@ -252,7 +281,12 @@ int fft_accel_transform(const struct device *dev,
 		return -EINVAL;
 	}
 
-	uint32_t byte_len = (uint32_t)(n * sizeof(struct fft_sample_t));
+	/* Transfer N+1 words: the xfft natural-order output sorter asserts
+	 * m_axis_data_tvalid for one phantom word immediately after aresetn
+	 * de-assertion.  S2MM captures this at BRAM[0]; Y[0..N-1] land at
+	 * BRAM[1..N].  Transferring N+1 words ensures Y[N-1] is captured
+	 * rather than falling outside the DMA window and being silently lost. */
+	uint32_t byte_len = (uint32_t)((n + 1) * sizeof(struct fft_sample_t));
 
 	if (byte_len > cfg->bram_size) {
 		return -EINVAL;
@@ -277,24 +311,89 @@ int fft_accel_transform(const struct device *dev,
 		sys_write32(word, cfg->tx_bram_base + i * 4);
 	}
 
-	/* 2. Reset both DMA channels (polled until reset bit self-clears) */
-	dma_reset_channel(cfg, DMA_MM2S_DMACR);
-	dma_reset_channel(cfg, DMA_S2MM_DMACR);
+	/* 2. Reset xfft pipeline then DMA channels.
+	 *
+	 * Per PG109 §3, aresetn must be held low for at least two aclk cycles
+	 * to flush the internal pipeline.  GPIO bit 0 drives xfft_aresetn through
+	 * a util_vector_logic AND with peripheral_rstn (C_DOUT_DEFAULT=1, so
+	 * xfft starts un-reset after FPGA power-on).
+	 *
+	 * Sequence (PG021 §2.4):
+	 *   a. GPIO=0 → assert xfft_aresetn=0: flush pipeline state.
+	 *   b. DMA software reset: halts any in-progress transfers cleanly.
+	 *   c. GPIO=1 → release xfft_aresetn=1: pipeline ready to accept input.
+	 */
+	gpio_wr(cfg, GPIO_DATA, 0x0);  /* assert xfft reset (aresetn=0) */
 
-	/* 3. Program MM2S (TX BRAM → xfft input stream) with IOC + ERR IRQs */
-	dma_wr(cfg, DMA_MM2S_DMACR,  DMA_CR_RS | DMA_CR_IOC_IRQEN | DMA_CR_ERR_IRQEN);
-	dma_wr(cfg, DMA_MM2S_SA,     (uint32_t)cfg->tx_bram_base);
-	dma_wr(cfg, DMA_MM2S_LENGTH, byte_len);
+	int reset_err = dma_reset_channel(cfg, DMA_MM2S_DMACR);
+	reset_err    |= dma_reset_channel(cfg, DMA_S2MM_DMACR);
+	if (reset_err) {
+		gpio_wr(cfg, GPIO_DATA, 0x1);  /* release xfft reset before exit */
+		k_mutex_unlock(&data->xfer_lock);
+		return -EIO;
+	}
 
-	/* 4. Program S2MM (xfft output stream → RX BRAM) with IOC + ERR IRQs */
+	gpio_wr(cfg, GPIO_DATA, 0x1);  /* release xfft reset (aresetn=1) */
+
+	/* 3. Arm S2MM first (xfft output stream → RX BRAM, IOC + ERR IRQs).
+	 * PG021 sequence: RS=1 first (channel Halted→Idle), then DA, then LENGTH.
+	 * Writing LENGTH to a running channel triggers the transfer.
+	 * S2MM is armed before MM2S so its TREADY is high before xfft output begins;
+	 * in nonrealtime throttle mode a low TREADY backpressures through the xfft
+	 * pipeline to s_axis_data_tready=0, deadlocking the MM2S input side. */
 	dma_wr(cfg, DMA_S2MM_DMACR,  DMA_CR_RS | DMA_CR_IOC_IRQEN | DMA_CR_ERR_IRQEN);
 	dma_wr(cfg, DMA_S2MM_DA,     (uint32_t)cfg->rx_bram_base);
 	dma_wr(cfg, DMA_S2MM_LENGTH, byte_len);
 
-	/* 5. Wait for S2MM IOC (output ready) or DMA error */
+	/* 4. Trigger MM2S last (TX BRAM → xfft input stream, ERR IRQ only).
+	 * Same PG021 sequence: RS=1, then SA, then LENGTH (transfer starts). */
+	dma_wr(cfg, DMA_MM2S_DMACR,  DMA_CR_RS | DMA_CR_ERR_IRQEN);
+	dma_wr(cfg, DMA_MM2S_SA,     (uint32_t)cfg->tx_bram_base);
+	dma_wr(cfg, DMA_MM2S_LENGTH, byte_len);
+
+	/* 5. Wait for S2MM IOC interrupt (output committed to RX BRAM) or error.
+	 *
+	 * The ISR gives irq_sem on S2MM IOC (channel 1) or any DMA error
+	 * (channels 0 or 1).  A single blocking wait covers both cases;
+	 * data->last_error is set by the ISR on error before giving the sem. */
 	int ret = k_sem_take(&data->irq_sem, K_MSEC(CONFIG_FFT_ACCEL_TIMEOUT_MS));
 	if (ret != 0) {
 		LOG_ERR("FFT DMA timeout after %d ms", CONFIG_FFT_ACCEL_TIMEOUT_MS);
+
+		/* DIAGNOSTIC: snapshot registers before reset to identify failure mode.
+		 *
+		 * Interpretation guide:
+		 *  MM2S_DMASR IDLE=0        → MM2S still running; xfft not accepting input
+		 *                             (s_axis_data_tready stuck LOW — xfft config
+		 *                              handshake or pipeline stall)
+		 *  MM2S_DMASR IDLE=1        → MM2S finished (xfft received all samples)
+		 *  S2MM_DMASR IOC=1         → S2MM finished; interrupt never reached CPU
+		 *                             (check INTC_ISR, MIE[11], mext_irq_i path)
+		 *  S2MM_DMASR IDLE=0,IOC=0  → S2MM still running; xfft not producing output
+		 *  INTC_ISR ≠ 0             → INTC generated an IRQ; CPU did not take it
+		 *                             (MEIE not set, mstatus.MIE cleared, or mtvec wrong)
+		 *  INTC_ISR = 0             → No pending INTC interrupt at all
+		 *  INTC_MER ≠ 0x3           → Master enable was cleared (INTC init bug)
+		 */
+		uint32_t mm2s_sr = dma_rd(cfg, DMA_MM2S_DMASR);
+		uint32_t s2mm_sr = dma_rd(cfg, DMA_S2MM_DMASR);
+		uint32_t intc_isr = intc_rd(cfg, INTC_ISR);
+		uint32_t intc_ier = intc_rd(cfg, INTC_IER);
+		uint32_t intc_mer = intc_rd(cfg, INTC_MER);
+
+		LOG_ERR("  MM2S_DMASR=0x%08x (IDLE=%d IOC=%d ERR=%d)",
+			mm2s_sr,
+			!!(mm2s_sr & DMA_SR_IDLE),
+			!!(mm2s_sr & DMA_SR_IOC_IRQ),
+			!!(mm2s_sr & DMA_SR_ERR_IRQ));
+		LOG_ERR("  S2MM_DMASR=0x%08x (IDLE=%d IOC=%d ERR=%d)",
+			s2mm_sr,
+			!!(s2mm_sr & DMA_SR_IDLE),
+			!!(s2mm_sr & DMA_SR_IOC_IRQ),
+			!!(s2mm_sr & DMA_SR_ERR_IRQ));
+		LOG_ERR("  INTC_ISR=0x%08x INTC_IER=0x%08x INTC_MER=0x%08x",
+			intc_isr, intc_ier, intc_mer);
+
 		/* Halt both channels to prevent a stale IRQ on the next call */
 		dma_reset_channel(cfg, DMA_MM2S_DMACR);
 		dma_reset_channel(cfg, DMA_S2MM_DMACR);
@@ -309,10 +408,26 @@ int fft_accel_transform(const struct device *dev,
 			"reduce input amplitude or enable scaling");
 	}
 
-	/* 6. Read output samples from RX BRAM (only on success) */
+	/* 6. Read output samples from RX BRAM (only on success).
+	 *
+	 * Layout after an N+1 word DMA transfer:
+	 *   BRAM[0]   — phantom word (xfft pipeline artefact; discarded)
+	 *   BRAM[1]   — Y[0]    (DC bin)
+	 *   BRAM[N]   — Y[N-1]  (last bin; captured only because byte_len = N+1 words)
+	 *
+	 * Each 32-bit word is {im[31:16], re[15:0]} in Q1.15 fixed-point. */
+
 	if (err == 0) {
+		/* BRAM[0] holds a phantom word captured when the xfft natural-order
+		 * output sorter briefly asserts m_axis_data_tvalid immediately after
+		 * aresetn de-assertion.  Read it once to prime the AXI read path
+		 * (absorbs the stale-first-read penalty), then discard it.
+		 * Y[0..N-1] are at BRAM[1..N]; all N samples fit because byte_len
+		 * covers N+1 words. */
+		(void)sys_read32(cfg->rx_bram_base);  /* dummy read — phantom at BRAM[0] */
+
 		for (size_t i = 0; i < n; i++) {
-			uint32_t word = sys_read32(cfg->rx_bram_base + i * 4);
+			uint32_t word = sys_read32(cfg->rx_bram_base + (i + 1) * 4);
 			out[i].re = (int16_t)(word & 0xFFFFu);
 			out[i].im = (int16_t)(word >> 16);
 		}
@@ -359,6 +474,7 @@ bool fft_accel_get_last_overflow(const struct device *dev)
 		.tx_bram_base = DT_INST_REG_ADDR_BY_NAME(inst, tx_bram),	\
 		.rx_bram_base = DT_INST_REG_ADDR_BY_NAME(inst, rx_bram),	\
 		.intc_base    = DT_INST_REG_ADDR_BY_NAME(inst, intc),		\
+		.gpio_base    = DT_INST_REG_ADDR_BY_NAME(inst, gpio),		\
 		.bram_size    = DT_INST_PROP(inst, bram_size),			\
 		.irq_num      = DT_INST_IRQN(inst),				\
 	};									\
