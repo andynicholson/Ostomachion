@@ -7,20 +7,27 @@ run, see [GETTING_STARTED.md](GETTING_STARTED.md).
 
 ## Repository layout
 
+Fabric hierarchy (**`xem7310_top.vhd`** vs **`ostomachion_bd_wrapper`**) matches the ASCII stack in the root [README.md](README.md) (Architecture / RTL design).
+
 ```
 .
 ├── Makefile                          # Build orchestration (GHDL sim, Zephyr, FPGA)
 ├── west.yml                          # West manifest — pins Zephyr SHA + SDK version
-├── .github/workflows/ci.yml          # GitHub Actions CI (sim, twister, vivado-synth)
+├── .github/workflows/ci.yml          # GitHub Actions CI (sim, twister, vivado-synth, …)
+├── docs/
+│   ├── acceptance_test_procedure.md  # HIL / self-hosted runner expectations
+│   └── neorv32_upgrade_notes.md    # Checklist before bumping the neorv32 submodule
 ├── scripts/
 │   ├── init_dev_env.sh               # Source to set ZEPHYR_BASE, venv, FRONTPANEL_DIR, Vivado PATH
 │   ├── uart_bridge.py                # FrontPanel UART-over-USB bridge (PTY ↔ Pipes)
+│   ├── uart_upload.py                # NEORV32 bootloader upload (used by make fpga-fw, test-*-hw)
+│   ├── fpga_program.py               # FrontPanel USB bitstream load (used by make fpga-program)
 │   ├── bin2vhd.py                    # ELF binary → VHDL IMEM image
 │   └── gen_release_artifacts.sh      # Stage release/<VERSION>/ certification artifacts
 ├── rtl/
 │   └── neorv32_wrapper.vhd           # Simulation wrapper around neorv32_top
 ├── fpga/xem7310/
-│   ├── xem7310_top.vhd               # Board top: IBUFDS, NEORV32, bridge, BD, FrontPanel
+│   ├── xem7310_top.vhd               # Board top: IBUFDS, NEORV32, bridge, BD wrapper, FrontPanel
 │   ├── fp_uart_bridge.vhd            # FrontPanel UART bridge (async FIFOs + Pipe endpoints)
 │   ├── xem7310.xdc                   # Vivado pin + timing constraints (XC7A200T)
 │   ├── build.tcl                     # Non-interactive Vivado batch script
@@ -33,10 +40,12 @@ run, see [GETTING_STARTED.md](GETTING_STARTED.md).
 │   ├── neorv32_tb.vhd                # GHDL testbench (clock, reset, SPI/I2C/UART monitors)
 │   └── sim_uart_rx.vhd               # UART character decoder
 ├── neorv32/                          # NEORV32 RTL submodule (v1.11.6)
+│   └── rtl/system_integration/xbus2axi4_bridge.vhd   # XBUS → AXI4-Lite (FPGA fabric; vhdl-lint CI)
 ├── sw/test_gpio_uart/                # Bare-metal smoke-test firmware (C)
 └── zephyr_app/
     ├── CMakeLists.txt
-    ├── prj.conf                      # Base Kconfig — ZTEST, SPI, I2C, GPIO, C++20
+    ├── zephyr/module.yml             # Registers this tree as a Zephyr module (drivers/bindings)
+    ├── prj.conf                      # Base Kconfig — ZTEST, SPI, I2C, GPIO, C++20 (sim / CI default)
     ├── prj_fpga.conf                 # Overlay — FPGA (IRQ drivers, larger stacks)
     ├── prj_accel.conf                # Overlay — FFT accelerator
     ├── prj_shell.conf                # Overlay — interactive shell (no ZTEST)
@@ -93,8 +102,11 @@ run, see [GETTING_STARTED.md](GETTING_STARTED.md).
 | TX BRAM | — | ✅ | `0x41000000` (32 KB) | — | (part of fft-accel) |
 | RX BRAM | — | ✅ | `0x41008000` (32 KB) | — | (part of fft-accel) |
 | AXI INTC | — | ✅ | `0x40010000` | — | (part of fft-accel) |
+| AXI GPIO (xfft reset gate) | — | ✅ | `0x40020000` | — | (BD only; fft aresetn) |
 
 IMEM: 128 KB (FPGA), 64 KB (sim).  DMEM: 64 KB both targets.
+
+**GHDL / sim:** Xilinx **xfft** and the block design are not simulated; the default `prj.conf` image runs **SPI, I2C, and GPIO** ZTEST suites only. **WDT** and **FFT** tests are compiled for Twister or FPGA overlays (`prj_fpga.conf`, `prj_accel.conf`, `CONFIG_WDT_NEORV32`, `CONFIG_FFT_ACCEL` — see `CMakeLists.txt`).
 
 **Interrupt topology**: AXI INTC (PG099) aggregates three sources into the
 single NEORV32 MEI line: Ch0 = DMA MM2S, Ch1 = DMA S2MM, Ch2 = xfft overflow.
@@ -254,13 +266,15 @@ Use errno return codes instead of exceptions.
 
 | Job | Runner | What it does |
 |-----|--------|-------------|
-| `sim` | ubuntu-latest | Build Zephyr (sim), run GHDL, assert `PROJECT EXECUTION SUCCESSFUL` |
-| `twister` | ubuntu-latest | `west twister -T zephyr_app/tests` (all configs, neorv32 board) |
-| `vivado-synth` | self-hosted [vivado] | `make fpga-synth && make fpga-check`, upload `.bit` + reports |
-| `vhdl-lint` | ubuntu-latest | GHDL analysis of full RTL (catches VHDL-2008 type errors) |
-| `firmware-analysis` | ubuntu-latest | clang-tidy, `nm --size-sort` memory map, thread analyser |
+| `sim` | ubuntu-latest | `west build` Zephyr with `prj.conf`, then `make SIM_TIME=400ms test-zephyr`; assert `PROJECT EXECUTION SUCCESSFUL` in the log |
+| `twister` | ubuntu-latest | `west twister -T zephyr_app/tests --integration` (after `sim` succeeds) |
+| `vivado-synth` | self-hosted, label `vivado` | `make fpga-synth && make fpga-check`, upload `.bit` + reports — **skipped on forks** and when `github.repository_owner != 'ostomachion'` |
+| `vhdl-lint` | ubuntu-latest | GHDL `-i/-m`: NEORV32 core lib, `xbus2axi4_bridge.vhd`, `rtl/neorv32_wrapper.vhd`, `fpga/xem7310/xem7310_top.vhd`; elaborate `xem7310_top` (no BD/Xilinx IP elaboration) |
+| `firmware-analysis` | ubuntu-latest | clang-tidy, `nm --size-sort` memory map, thread analyser (runs after `twister`) |
 
-In-progress runs are cancelled when a new commit arrives on the same branch.
+In-progress runs are cancelled when a new commit arrives on the same ref (`concurrency`).
+
+**Local vs CI Zephyr board:** the Makefile defaults to `ZEPHYR_BOARD = neorv32/neorv32/minimalboot` for `make zephyr` / `make test-zephyr`. The CI `sim` job uses `-b neorv32` with `-DCONF_FILE=prj.conf`; both paths use the same application `prj.conf` baseline.
 
 ---
 
@@ -269,14 +283,14 @@ In-progress runs are cancelled when a new commit arrives on the same branch.
 ### GHDL simulation
 
 ```bash
-make test-zephyr      # Zephyr app (SPI/I2C/GPIO/WDT ZTEST suites)
+make test-zephyr      # Zephyr + GHDL: SPI / I2C / GPIO ZTEST (default prj.conf)
 make test-baremetal   # bare-metal GPIO + UART smoke test
 ```
 
-The testbench validates:
+The testbench (`sim/neorv32_tb.vhd`) models:
 - **SPI**: MOSI wired to MISO; every byte is echoed back unchanged.
 - **I2C**: Synthesised slave at `0x50`; ACKs all writes, returns `0x5A` on reads.
-- **Watchdog**: Fatal if GPIO toggle count is below threshold at 390 ms simulated.
+- **Hang detector**: at **390 ms** simulated time, the bench fails if the GPIO heartbeat has not advanced (firmware stuck); this is **not** the NEORV32 watchdog peripheral (WDT tests require `CONFIG_WDT_NEORV32` and FPGA DTS — see Twister / `make test-hw`).
 
 ZTEST output format (parsed by CI and Twister):
 
@@ -304,8 +318,10 @@ west twister -T zephyr_app/tests --integration -v
 | `ostomachion.hw.peripherals` | xem7310 | HIL (`xem7310_hw` fixture) |
 | `ostomachion.hw.fft` | xem7310 | HIL (`xem7310_hw_fft` fixture) |
 
-HIL tests require a self-hosted runner with the XEM7310 connected and
-bitstream loaded.
+HIL tests require a self-hosted runner (label `xem7310`), the XEM7310
+connected, a programmed bitstream, and the harness fixtures named above.
+See [docs/acceptance_test_procedure.md](docs/acceptance_test_procedure.md)
+for runner setup and acceptance flow.
 
 ---
 

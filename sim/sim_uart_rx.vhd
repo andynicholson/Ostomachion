@@ -1,3 +1,6 @@
+-- Copyright (c) 2026 A P Nicholson , intothemist@gmail.com
+-- SPDX-License-Identifier: Apache-2.0
+--
 -- Line-buffered simulation UART receiver.
 -- Accumulates characters and prints complete lines to the console.
 -- Based on NEORV32 sim_uart_rx (BSD-3-Clause, Stephan Nolting).

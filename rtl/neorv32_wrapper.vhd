@@ -1,3 +1,7 @@
+-- Ostomachion — NEORV32 simulation wrapper (GHDL)
+-- Copyright (c) 2026 A P Nicholson , intothemist@gmail.com
+-- SPDX-License-Identifier: Apache-2.0
+
 library ieee;
 use ieee.std_logic_1164.all;
 
