@@ -1,33 +1,32 @@
-<p align="center">
-  <img src="docs/img/logo.png" width="200" alt="Ostomachion logo"/>
-</p>
-<p align="center">
-  <b>NEORV32 RISC-V Processor &middot; Zephyr RTOS &middot; Custom RTL Accelerator Pipeline</b><br/>
-  <i>Targeted to modern C++20 and FPGAs</i>
-</p>
+## 🧩 What is Ostomachion?
 
-<p align="center">
-  <a href="https://github.com/stnolting/neorv32">NEORV32</a> &middot;
-  <a href="https://www.zephyrproject.org/">Zephyr Project</a>
-</p>
-
----
-
-## What is Ostomachion?
+[NEORV32 RISC-V](https://github.com/stnolting/neorv32), [Zephyr RTOS](https://www.zephyrproject.org/) on FPGA bare metal, an extensible DMA<->xFFT/custom transform RTL pipeline — one C++20 HAL from fabric to std::span.
 
 Ostomachion is Archimedes' dissection puzzle — fourteen geometric pieces that
 fit together in hundreds of distinct ways.  The name captures the design
-philosophy: a small set of composable, interlocking parts (NEORV32 RTL, Zephyr
-RTOS, out-of-tree C drivers, C++20 HAL) that assemble into a complete,
-verified FPGA RTOS platform.
-
-The goal is a **professional starting point**, not a finished product.  Every
-layer is independently testable and follows a consistent pattern, making it
-straightforward to add new hardware accelerators and software components
-without disturbing what already works.
+philosophy: a small set of composable, interlocking parts that assemble into a complete, verified FPGA RTOS platform.
 
 Target hardware: **Opal Kelly XEM7310-A200** (Xilinx Artix-7 XC7A200T).
 Simulation: **GHDL** with a full peripheral testbench.
+
+## The fourteen pieces
+
+Archimedes’ puzzle has fourteen tiles; here they are the composable layers of the platform, bottom to top:
+
+1. **Artix-7 FPGA hardware** — XEM7310-A200, pin and timing constraints (`fpga/xem7310/xem7310.xdc`), volatile/persistent programming via FrontPanel USB.
+2. **[NEORV32 RISC-V](https://github.com/stnolting/neorv32) SoC RTL** — Upstream `neorv32/` submodule (v1.11.6): RISC-V core, on-chip memory, CLINT, GPIO, UART, SPI, I2C (TWI), and external-bus masters.
+3. **Board top-level VHDL** — `fpga/xem7310/xem7310_top.vhd` stitches clocks, resets, SoC, bridge, block-design wrapper, FrontPanel, pads, and the UART pipe bridge.
+4. **XBUS → AXI4-Lite bridge** — RTL path from the CPU’s external bus to the Xilinx fabric for memory-mapped control of IP.
+5. **Tcl-only Vivado block design** — `fpga/xem7310/ostomachion_bd.tcl` recreates the IP Integrator canvas from script (no hand-edited block design in the GUI necessary); sourced by the batch flow in `build.tcl`.
+6. **Clocking and resets in fabric** — On-board LVDS oscillator → IBUFDS → MMCM in the BD (100 MHz system clock, locked status, peripheral reset network).
+7. **FFT accelerator pipeline** — Xilinx **xfft** (4096-point, 16-bit, streaming) with **AXI DMA** staging through TX/RX **BRAM**; **AXI INTC** merges DMA and overflow lines onto NEORV32 `mext_irq`.
+8. **FrontPanel host interface** — `okHost` / pipes / wires in RTL for bitstream load, debug, and high-speed host I/O alongside MC headers.
+9. **FrontPanel UART bridge** — `fp_uart_bridge.vhd` connects NEORV32 UART to FrontPanel pipes for host serial without extra USB-UART wiring.
+10. **[Zephyr RTOS](https://www.zephyrproject.org/) and board port** — `west.yml` + board/soc glue; Zephyr is the primary RTOS for applications and drivers.
+11. **Out-of-tree Zephyr drivers (C)** — `zephyr_app/drivers/` for NEORV32 SPI, TWI, watchdog, and the MMIO/IRQ-heavy `fft_accel` driver (DMA completion, INTC demux, timeouts).
+12. **Devicetree and Kconfig** — Bindings under `zephyr_app/dts/`, base and target overlays (`app*.overlay`), and `prj*.conf` splits for simulation, FPGA, accelerator, shell, and hardware-test builds.
+13. **C++20 header-only HAL** — `zephyr_app/include/ostomachion/` wraps Zephyr’s C APIs with `std::span`, `[[nodiscard]]`, and RAII-style device handles for GPIO, SPI, I2C, and FFT.
+14. **Verification and automation** — GHDL testbench (`sim/`, `rtl/neorv32_wrapper.vhd`) for RTL-level peripherals; **ZTEST** suites and Twister matrix under `zephyr_app/tests/`; `Makefile` and CI for sim, firmware, and Vivado synthesis quality gates (`check_build.tcl`).
 
 ## 🏗️ Architecture
 
@@ -48,16 +47,59 @@ Simulation: **GHDL** with a full peripheral testbench.
   └────────────────────────┬─────────────────────────────────────────┘
                            │  MMIO  sys_read32 / sys_write32
   ┌────────────────────────▼─────────────────────────────────────────┐
-  │  FPGA RTL — NEORV32 v1.11.6, XBUS→AXI4 bridge, FrontPanel UART  │
+  │  Board RTL — xem7310_top.vhd                                     │
+  │  NEORV32 · XBUS→AXI4-Lite bridge · FrontPanel · UART bridge     │
   └────────────────────────┬─────────────────────────────────────────┘
-                           │  AXI4-Lite
+                           │  s_axi_cpu, clocks, resets, mext_irq, …
   ┌────────────────────────▼─────────────────────────────────────────┐
-  │  Xilinx IP Subsystem  (ostomachion_bd.tcl)                       │
-  │  AXI DMA · xfft 4096-pt 16-bit · TX/RX BRAM · AXI INTC · MMCM  │
+  │  ostomachion_bd_wrapper  (Tcl BD → Xilinx IP only)               │
+  │  AXI DMA · xfft 4096-pt 16-bit · TX/RX BRAM · AXI INTC · MMCM    │
   └────────────────────────┬─────────────────────────────────────────┘
                            │
   ┌────────────────────────▼─────────────────────────────────────────┐
   │  XEM7310-A200 hardware  /  GHDL simulation (neorv32_tb.vhd)      │
+  └──────────────────────────────────────────────────────────────────┘
+```
+
+### RTL design (`xem7310_top` + `ostomachion_bd`)
+
+Fabric RTL is split between **hand-written board VHDL** and a **Tcl-built Vivado block design**. `fpga/xem7310/xem7310_top.vhd` is the top: it brings in the 200 MHz LVDS clock (`IBUFDS`), pads and primitives for SPI, UART, TWI (`IOBUF`), JTAG and LEDs, **FrontPanel** (`okHost`, wires, pipes), **`fp_uart_bridge`** (NEORV32 UART ↔ host pipes), **`neorv32_top`**, and **`xbus2axi4_bridge`**, which terminates in the AXI4-Lite master port **`s_axi_cpu`** on the block design. The SoC external interrupt **`mext_irq`** is driven from the BD (`mext_irq_o`). Vivado generates **`ostomachion_bd_wrapper`** from `fpga/xem7310/ostomachion_bd.tcl` (`make_wrapper`); that wrapper contains **only Xilinx IP** — no application RTL inside the canvas.
+
+```
+  ┌──────────────────────────────────────────────────────────────────┐
+  │  Custom board RTL — fpga/xem7310/xem7310_top.vhd                 │
+  │  IBUFDS (LVDS osc) · resets/LEDs/MC pads · std_ulogic stitching  │
+  │  neorv32_top · xbus2axi4_bridge ↔ ostomachion_bd_wrapper ports   │
+  │  okHost / okWire* / okPipe* · fp_uart_bridge (UART ↔ pipes)      │
+  ├──────────────────────────────────────────────────────────────────┤
+  │  ostomachion_bd_wrapper  (Vivado-generated around Tcl BD)        │
+  ├──────────────────────────────────────────────────────────────────┤
+  │  BD boundary / wrapper I/O (instantiated as entity work.…)       │
+  │    s_axi_cpu_* · sys_clk · ck_rst · clk_o · periph_resetn_o      │
+  │    mext_irq_o · fft_dbg_mm2s_tvalid · fft_dbg_s_data_tready      │
+  ├──────────────────────────────────────────────────────────────────┤
+  │  clk_wiz_0 (MMCM)      200 MHz in → 100 MHz aclk · locked        │
+  │  proc_sys_reset_0      ext_reset · dcm_locked · aresetn nets     │
+  ├──────────────────────────────────────────────────────────────────┤
+  │  axi_smc (SmartConnect)   3 AXI masters → 5 MM targets           │
+  │    S00 ← s_axi_cpu       S01 ← axi_dma M_AXI_MM2S                │
+  │                          S02 ← axi_dma M_AXI_S2MM                │
+  │    M00 → axi_dma S_AXI_LITE      @ 0x4000_0000                   │
+  │    M01 → tx_bram_ctrl + tx_bram  @ 0x4100_0000 (32 KiB)          │
+  │    M02 → rx_bram_ctrl + rx_bram  @ 0x4100_8000 (32 KiB)          │
+  │    M03 → axi_intc                @ 0x4001_0000                   │
+  │    M04 → axi_gpio (xfft aresetn gate) @ 0x4002_0000              │
+  ├──────────────────────────────────────────────────────────────────┤
+  │  axi_dma_0   MM2S + S2MM (no SG) · AXI-Lite + AXIS clocks        │
+  │  xfft_0      4096-pt · 16b · pipelined streaming · ovfl          │
+  │    M_AXIS_MM2S → s_axis_data ; m_axis_data → S_AXIS_S2MM         │
+  │    xlconstant / const_one → s_axis_config (tvalid/tlast)         │
+  ├──────────────────────────────────────────────────────────────────┤
+  │  blk_mem_gen   tx_bram / rx_bram  (single-port BRAM ctrl)        │
+  │  util_vector_logic AND  gpio_io_o[0] & periph_aresetn → xfft     │
+  ├──────────────────────────────────────────────────────────────────┤
+  │  xlconcat → axi_intc   Ch0 MM2S · Ch1 S2MM · Ch2 xfft ovf        │
+  │               → mext_irq_o   (overflow edge, DMA level)          │
   └──────────────────────────────────────────────────────────────────┘
 ```
 
