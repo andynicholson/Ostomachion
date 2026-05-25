@@ -278,13 +278,32 @@ connect_bd_net [get_bd_pins axi_dma_0/M_AXIS_MM2S_TLAST]  \
 ## xfft output → S2MM: interface-level connect is fine here (no probes needed).
 ##
 ## Phase 3b — AXIS phantom gate (planned, not yet inserted).
-##   Insert a TLAST-aware AXIS gate (small custom IP or axis_register_slice
-##   variant) at this connection point to drop the post-aresetn phantom beat
-##   that xfft asserts before the first real frame begins.  The driver-side
-##   support already exists: with the gate active, the firmware can be
-##   updated to use byte_len = N*4 (no +1) and read Y[i] directly from
-##   BRAM[i] (no offset).  Phase 2 ILA capture must confirm phantom shape
-##   first; see ACCEL_DEBUG.md and the FFT driver header comment.
+##   Insert a TLAST-aware AXIS gate at this connection point to drop the
+##   post-aresetn phantom beat that xfft asserts before the first real frame
+##   begins.  Three candidate implementations, in increasing RTL invasiveness:
+##
+##     Option (i)  — Software-only: arm S2MM only AFTER MM2S has issued its
+##                   first beat (poll MM2S_DMASR.IDLE=0).  No RTL change.
+##                   Race-prone vs xfft pipeline latency but quickest to try.
+##
+##     Option (ii) — Drop in an axis_register_slice (or AXIS Subset Converter)
+##                   here, configured to suppress invalid beats during reset.
+##                   No custom RTL.  Requires aresetn to be held low until
+##                   after S2MM is armed.
+##
+##     Option (iii)— Insert a small custom 1-bit AXIS gate IP whose enable is
+##                   driven by an extra axi_gpio_0 output bit, set by firmware
+##                   just before MM2S is armed and cleared after IOC.  Most
+##                   robust; deterministic regardless of xfft pipeline timing.
+##
+##   The driver-side support already exists: with any of these gates active,
+##   the firmware can be updated to use byte_len = N*4 (no +1) and read Y[i]
+##   directly from BRAM[i] (no offset); the dummy read of BRAM[0] and the
+##   transfer-integrity sentinel become unnecessary.  Phase 2 ILA capture
+##   must confirm phantom shape first to pick between (i), (ii), (iii);
+##   see ACCEL_DEBUG.md "Phase 3b — Root-cause AXIS gate (deferred)" and
+##   the comment block in zephyr_app/drivers/accel/fft_accel.c around
+##   `byte_len = (n + 1) * sizeof(struct fft_sample_t);`.
 connect_bd_intf_net [get_bd_intf_pins xfft_0/m_axis_data] \
                     [get_bd_intf_pins axi_dma_0/S_AXIS_S2MM]
 

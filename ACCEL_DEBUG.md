@@ -346,16 +346,33 @@ fixes.  Items left open are explicitly tagged *Deferred*.
 
 Recommended fix is a TLAST-aware AXIS gate between `xfft_0/m_axis_data` and
 `axi_dma_0/S_AXIS_S2MM` that drops any beat asserted before the first real
-frame.  Once the gate is in place:
+frame.  Three candidate implementations, in increasing RTL invasiveness:
+
+- **Option (i) — Software-only**: arm `S2MM` only *after* MM2S has issued its
+  first beat (poll `MM2S_DMASR.IDLE=0`).  No RTL change.  Race-prone vs xfft
+  pipeline latency but quickest to try.
+- **Option (ii) — `axis_register_slice` / AXIS Subset Converter**: drop in a
+  stock Xilinx IP between `xfft_0/m_axis_data` and `axi_dma_0/S_AXIS_S2MM`,
+  configured to suppress invalid beats during reset.  Requires `aresetn` to
+  be held low until after S2MM is armed.  No custom RTL.
+- **Option (iii) — Custom 1-bit AXIS gate IP**: insert a small gate IP whose
+  enable is driven by an extra `axi_gpio_0` output bit, set by firmware just
+  before MM2S is armed and cleared after IOC.  Most robust; deterministic
+  regardless of xfft pipeline timing.
+
+Once the gate (any option) is in place:
 
 - `byte_len` returns to `N*4` (no +1)
 - The driver's dummy read of `BRAM[0]` is removed
 - Output loop becomes `out[i] = BRAM[i]`
+- The transfer-integrity sentinel becomes unnecessary (can stay as a cheap
+  defensive check or be removed for clarity)
 - BRAM depth can return to 4096 words / 16 KB (RX may stay 32K-aligned)
 
 Insertion point is documented in `fpga/xem7310/ostomachion_bd.tcl` at the
 `xfft_0/m_axis_data ↔ axi_dma_0/S_AXIS_S2MM` connection ("Phase 3b — AXIS
-phantom gate").  The gate change is gated on Phase 2 ILA evidence (Q1):
+phantom gate"), including the three options enumerated above.  The choice
+between (i)/(ii)/(iii) is gated on Phase 2 ILA evidence (Q1):
 
 - **Outcome A** (TVALID=1 + TLAST=0 beat between aresetn rising edge and the
   first MM2S beat) — gate confirmed necessary; insert and update driver.
