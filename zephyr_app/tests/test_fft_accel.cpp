@@ -5,14 +5,20 @@
 // These tests require the accelerator bitstream to be loaded in the FPGA.
 //
 // FFT configuration: 4096-point, 16-bit Q1.15, pipelined streaming,
-// all 12 stages scaled (÷2 each), forward transform.
+// all 6 radix-4 stages scaled (÷4 each, total ÷4096), forward transform.
 //
 // Tests:
-//   1. test_dc_response      — DC input → bin-0 dominant; magnitude > 0
-//   2. test_single_tone      — bin-8 real cosine → peak at bin 8 or mirror (4088)
-//   3. test_roundtrip_latency— N=4096 completes within 2000 µs
-//   4. test_invalid_n        — non-4096 lengths return -EINVAL
-//   5. test_sequential       — two back-to-back transforms both produce valid results
+//   1. test_dc_response       — DC input → bin-0 dominant; magnitude > 0
+//   2. test_dc_exact          — DC input → out[0].re ≈ 16384 within ±5%
+//   3. test_single_tone       — bin-8 cosine → peak EXACTLY at 8 or 4088
+//   4. test_no_off_by_one     — bin-1 cosine → peak EXACTLY at 1 or 4095
+//   5. test_y_n_minus_1       — verifies bin 4095 actually lands in g_out[4095]
+//   6. test_roundtrip_latency — N=4096 completes within 2000 µs
+//   7. test_invalid_n         — non-4096 lengths return -EINVAL
+//   8. test_sequential        — two back-to-back transforms both produce valid results
+//
+// The exact-bin tests (3, 4, 5) are written to FAIL on any one-bin misalignment
+// of the DMA→BRAM mapping: this is the regression guard for ACCEL_DEBUG Issue 3.
 //
 // Memory note: a 4096-point FFT buffer is 16 KB (4096 × 4 bytes).
 // All test functions share a SINGLE file-scope in/out buffer pair to keep
@@ -27,6 +33,7 @@
 
 #include <math.h>    /* cosf — available via picolibc */
 #include <stdint.h>
+#include <stdlib.h>  /* abs */
 
 LOG_MODULE_REGISTER(test_fft_accel, LOG_LEVEL_INF);
 
@@ -61,12 +68,41 @@ static void *fft_setup(void)
 
 ZTEST_SUITE(ostomachion_fft, NULL, fft_setup, NULL, NULL, NULL);
 
-/* ── Helper: integer magnitude squared ───────────────────────────────────────
- * Use int64_t to avoid signed overflow when re = im = INT16_MIN.
+/* ── Helpers ─────────────────────────────────────────────────────────────────
+ * mag_sq uses int64_t to avoid signed overflow when re = im = INT16_MIN.
  */
 static int64_t mag_sq(int16_t re, int16_t im)
 {
     return (int64_t)re * re + (int64_t)im * im;
+}
+
+/* Find the bin with the largest magnitude.  Returns the bin index and writes
+ * the magnitude squared to *peak_mag_sq if non-null. */
+static int peak_bin(const fft_sample_t *out, int n, int64_t *peak_mag_sq)
+{
+    int64_t m_max = 0;
+    int     bin   = 0;
+    for (int k = 0; k < n; k++) {
+        int64_t m = mag_sq(out[k].re, out[k].im);
+        if (m > m_max) {
+            m_max = m;
+            bin   = k;
+        }
+    }
+    if (peak_mag_sq) {
+        *peak_mag_sq = m_max;
+    }
+    return bin;
+}
+
+/* Fill g_in[] with a real cosine at the given bin (Q1.15 amplitude 0.5). */
+static void fill_cosine(int target_bin)
+{
+    for (int k = 0; k < FFT_N; k++) {
+        float angle = 2.0f * M_PI * target_bin * k / (float)FFT_N;
+        g_in[k].re = (int16_t)(16384.0f * cosf(angle));
+        g_in[k].im = 0;
+    }
 }
 
 /* ── Tests ───────────────────────────────────────────────────────────────────*/
@@ -74,11 +110,12 @@ static int64_t mag_sq(int16_t re, int16_t im)
 ZTEST_F(ostomachion_fft, test_dc_response)
 {
     /* DC input: all samples (0.5 + 0j) in Q1.15.
-     * With 4096 samples of re=16384 and all 12 stages scaled by 1/2:
-     *   bin-0 re = 4096 * 16384 / 2^12 = 16384 (same as input amplitude).
-     * Allow ±10% tolerance for truncation rounding. */
+     * With 4096 samples of re=16384 and 6 radix-4 stages each ÷4:
+     *   bin-0 re = 4096 * 16384 / 4^6 = 16384.
+     * Tolerance is generous because this test only checks that bin-0
+     * dominates; test_dc_exact below checks the value tightly. */
     for (int i = 0; i < FFT_N; i++) {
-        g_in[i].re = 16384;  /* 0.5 in Q1.15 */
+        g_in[i].re = 16384;
         g_in[i].im = 0;
     }
 
@@ -102,40 +139,105 @@ ZTEST_F(ostomachion_fft, test_dc_response)
             g_out[0].re, g_out[0].im, (long long)bin0_mag);
 }
 
-ZTEST_F(ostomachion_fft, test_single_tone)
+ZTEST_F(ostomachion_fft, test_dc_exact)
 {
-    /* Real cosine at bin 8: x[k] = 0.5 * cos(2π·8·k/4096), imaginary = 0.
-     * A real cosine produces two symmetric peaks: bin 8 and its mirror at
-     * bin 4088 (= 4096 − 8).  Allow ±1 bin for Q1.15 rounding. */
-    const int TARGET_BIN = 8;
-    for (int k = 0; k < FFT_N; k++) {
-        float angle = 2.0f * M_PI * TARGET_BIN * k / (float)FFT_N;
-        g_in[k].re = (int16_t)(16384.0f * cosf(angle));
-        g_in[k].im = 0;
+    /* Strict DC magnitude check: catches a partial off-by-one (bin energy split
+     * between bins 0 and 1) and any scaling drift.  Tolerance ±5% on re; im
+     * must be near zero (±200 LSB). */
+    for (int i = 0; i < FFT_N; i++) {
+        g_in[i].re = 16384;
+        g_in[i].im = 0;
     }
 
     ostomachion::FftAccel accel(fixture->dev);
     int rc = accel.transform(g_in, g_out, FFT_N);
     zassert_equal(rc, 0, "transform failed: %d", rc);
 
-    int64_t peak_mag = 0;
-    int     peak_bin = 0;
-    for (int k = 0; k < FFT_N; k++) {
-        int64_t mk = mag_sq(g_out[k].re, g_out[k].im);
-        if (mk > peak_mag) {
-            peak_mag = mk;
-            peak_bin = k;
-        }
-    }
+    const int32_t expected = 16384;
+    const int32_t tol      = 16384 / 20;   /* 5% of 16384 ≈ 819 */
+    int32_t re0 = g_out[0].re;
+    int32_t im0 = g_out[0].im;
+
+    zassert_true(re0 > expected - tol && re0 < expected + tol,
+                 "DC exact: bin-0 re=%d outside [%d, %d]",
+                 re0, expected - tol, expected + tol);
+    zassert_true(im0 > -200 && im0 < 200,
+                 "DC exact: bin-0 im=%d not near zero", im0);
+    LOG_INF("DC exact: bin-0 re=%d (expected ~%d ±%d), im=%d",
+            re0, expected, tol, im0);
+}
+
+ZTEST_F(ostomachion_fft, test_single_tone)
+{
+    /* Real cosine at bin 8.  A pure cosine produces two symmetric peaks at
+     * bin 8 and bin 4088 (= 4096 − 8).  No tolerance on the peak location:
+     * an off-by-one in the DMA→BRAM mapping would put the peak at bin 9 or
+     * bin 4089 and this test must catch that. */
+    const int TARGET_BIN = 8;
+    fill_cosine(TARGET_BIN);
+
+    ostomachion::FftAccel accel(fixture->dev);
+    int rc = accel.transform(g_in, g_out, FFT_N);
+    zassert_equal(rc, 0, "transform failed: %d", rc);
+
+    int64_t pmag = 0;
+    int     pbin = peak_bin(g_out, FFT_N, &pmag);
 
     const int MIRROR = FFT_N - TARGET_BIN;  /* 4088 */
-    bool peak_ok = ((peak_bin >= TARGET_BIN - 1 && peak_bin <= TARGET_BIN + 1) ||
-                    (peak_bin >= MIRROR - 1      && peak_bin <= MIRROR + 1));
+    bool peak_ok = (pbin == TARGET_BIN) || (pbin == MIRROR);
     zassert_true(peak_ok,
-                 "Single-tone: peak at bin %d, expected %d or %d (±1)",
-                 peak_bin, TARGET_BIN, MIRROR);
+                 "Single-tone: peak at bin %d, expected exactly %d or %d "
+                 "(any off-by-one indicates a DMA mapping bug)",
+                 pbin, TARGET_BIN, MIRROR);
     LOG_INF("Single-tone bin-%d: peak at bin %d, mag_sq=%lld",
-            TARGET_BIN, peak_bin, (long long)peak_mag);
+            TARGET_BIN, pbin, (long long)pmag);
+}
+
+ZTEST_F(ostomachion_fft, test_no_off_by_one)
+{
+    /* The most stringent off-by-one regression guard: bin 1 has the lowest
+     * possible non-DC frequency.  An off-by-one would push the peak into bin 0
+     * (DC region) or bin 2, both of which are far from bin 1's expected
+     * energy.  Mirror is at 4095. */
+    const int TARGET_BIN = 1;
+    fill_cosine(TARGET_BIN);
+
+    ostomachion::FftAccel accel(fixture->dev);
+    int rc = accel.transform(g_in, g_out, FFT_N);
+    zassert_equal(rc, 0, "transform failed: %d", rc);
+
+    int     pbin = peak_bin(g_out, FFT_N, NULL);
+    const int MIRROR = FFT_N - TARGET_BIN;  /* 4095 */
+
+    bool peak_ok = (pbin == TARGET_BIN) || (pbin == MIRROR);
+    zassert_true(peak_ok,
+                 "Off-by-one guard: bin-%d cosine peaked at bin %d "
+                 "(must be exactly %d or %d)",
+                 TARGET_BIN, pbin, TARGET_BIN, MIRROR);
+    LOG_INF("Off-by-one guard: bin-%d cosine peaked at bin %d (PASS)",
+            TARGET_BIN, pbin);
+}
+
+ZTEST_F(ostomachion_fft, test_y_n_minus_1)
+{
+    /* Y[N-1] (= Y[4095]) is the bin that was being silently dropped before
+     * the byte_len = (n+1)*4 fix in ACCEL_DEBUG Issue 4.  Verify that with
+     * a real cosine at bin 1 the mirror peak at 4095 is captured non-zero
+     * by g_out[4095]. */
+    fill_cosine(1);
+
+    ostomachion::FftAccel accel(fixture->dev);
+    int rc = accel.transform(g_in, g_out, FFT_N);
+    zassert_equal(rc, 0, "transform failed: %d", rc);
+
+    int64_t bin_n_minus_1 = mag_sq(g_out[FFT_N - 1].re, g_out[FFT_N - 1].im);
+    zassert_true(bin_n_minus_1 > 0,
+                 "Y[N-1] (bin %d) mag_sq=%lld — bin not captured by DMA "
+                 "(check byte_len handling and N+1 transfer)",
+                 FFT_N - 1, (long long)bin_n_minus_1);
+    LOG_INF("Y[N-1] capture: g_out[%d] re=%d im=%d mag_sq=%lld",
+            FFT_N - 1, g_out[FFT_N - 1].re, g_out[FFT_N - 1].im,
+            (long long)bin_n_minus_1);
 }
 
 ZTEST_F(ostomachion_fft, test_roundtrip_latency)

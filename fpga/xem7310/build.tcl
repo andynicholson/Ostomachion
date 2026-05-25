@@ -185,17 +185,33 @@ puts "INFO: Checkpoint saved to $build_dir/impl_final.dcp"
 # ---------------------------------------------------------------------------
 # Optional ILA debug build
 # ---------------------------------------------------------------------------
+# Probe set is targeted at settling the "phantom-word" hypothesis (ACCEL_DEBUG
+# Q1).  In particular, the xfft m_axis_data_tlast bit is the deciding signal:
+# a phantom word is by definition a TVALID=1 beat with TLAST=0 emitted before
+# the first real frame begins.  The xfft aresetn AFTER the AND gate
+# (xfft_rst_and/Res) is included so the trigger lines up with the actual
+# pipeline release, not the GPIO write that drives it.
+#
+# Recommended trigger: rising edge of xfft_rst_and/Res, with TVALID & TLAST
+# captured in a 1024-sample window.
 if {$DEBUG_BUILD} {
     puts "INFO: ── ILA insertion (debug build) ────────────────────────────────"
 
-    set mm2s_nets  [get_nets -hierarchical -filter {NAME =~ *M_AXIS_MM2S*} -quiet]
-    set s2mm_nets  [get_nets -hierarchical -filter {NAME =~ *S_AXIS_S2MM*} -quiet]
-    set irq_nets   [get_nets -hierarchical -filter {NAME =~ *introut*} -quiet]
-    set ovflo_nets [get_nets -hierarchical -filter {NAME =~ *m_axis_status*} -quiet]
+    set mm2s_nets   [get_nets -hierarchical -filter {NAME =~ *M_AXIS_MM2S*} -quiet]
+    set s2mm_nets   [get_nets -hierarchical -filter {NAME =~ *S_AXIS_S2MM*} -quiet]
+    set irq_nets    [get_nets -hierarchical -filter {NAME =~ *introut*} -quiet]
+    set ovflo_nets  [get_nets -hierarchical -filter {NAME =~ *m_axis_status*} -quiet]
+    set xfft_data   [get_nets -hierarchical -filter {NAME =~ *xfft_0*m_axis_data*} -quiet]
+    set xfft_rstn   [get_nets -hierarchical -filter {NAME =~ *xfft_rst_and*Res*} -quiet]
+    set gpio_out    [get_nets -hierarchical -filter {NAME =~ *axi_gpio_0*gpio_io_o*} -quiet]
 
-    foreach net [concat $mm2s_nets $s2mm_nets $irq_nets $ovflo_nets] {
+    set probe_count 0
+    foreach net [concat $mm2s_nets $s2mm_nets $irq_nets $ovflo_nets \
+                        $xfft_data $xfft_rstn $gpio_out] {
         set_property MARK_DEBUG true [get_nets $net]
+        incr probe_count
     }
+    puts "INFO: Marked $probe_count nets for debug capture."
 
     implement_debug_core
     write_debug_probes -force "$build_dir/debug_probes.ltx"
@@ -205,6 +221,12 @@ if {$DEBUG_BUILD} {
         -force \
         "$build_dir/ostomachion_xem7310_debug.bit"
     puts "INFO: Debug bitstream → $build_dir/ostomachion_xem7310_debug.bit"
+    puts "INFO: To run the phantom-word experiment:"
+    puts "INFO:   1. make fpga-program BIT_FILE=$build_dir/ostomachion_xem7310_debug.bit"
+    puts "INFO:   2. Open Vivado Hardware Manager, load $build_dir/debug_probes.ltx"
+    puts "INFO:   3. Trigger on rising edge of xfft_rst_and/Res"
+    puts "INFO:   4. Inspect xfft_0/m_axis_data_tvalid and m_axis_data_tlast"
+    puts "INFO:      after aresetn deasserts but before MM2S starts."
 }
 
 # ---------------------------------------------------------------------------

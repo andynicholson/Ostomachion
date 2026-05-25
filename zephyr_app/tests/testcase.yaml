@@ -11,7 +11,7 @@
 tests:
   # ── SPI / I2C / GPIO baseline (builds for neorv32 sim target) ───────────
   ostomachion.peripherals.baseline:
-    platform_allow: neorv32
+    platform_allow: neorv32/neorv32/minimalboot
     build_only: false
     tags: [baseline, spi, i2c, gpio]
     extra_configs:
@@ -23,7 +23,7 @@ tests:
 
   # ── FFT accelerator suite (compile-only on sim; runs on HW with bitstream)
   ostomachion.fft.compile:
-    platform_allow: neorv32
+    platform_allow: neorv32/neorv32/minimalboot
     build_only: true
     tags: [fft, accelerator]
     extra_configs:
@@ -35,7 +35,7 @@ tests:
 
   # ── Shell / interactive firmware (compile-only on sim) ───────────────────
   ostomachion.shell.compile:
-    platform_allow: neorv32
+    platform_allow: neorv32/neorv32/minimalboot
     build_only: true
     tags: [shell]
     extra_configs:
@@ -48,7 +48,7 @@ tests:
   # WDT DTS node is only in app_fpga.overlay; tests skip gracefully when the
   # node is absent, so this configuration still runs all other test suites.
   ostomachion.wdt.compile:
-    platform_allow: neorv32
+    platform_allow: neorv32/neorv32/minimalboot
     build_only: false
     tags: [wdt]
     extra_configs:

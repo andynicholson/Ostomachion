@@ -5,17 +5,20 @@
 # The FFT core is the Xilinx xfft IP; it has no AXI4-Lite slave interface.
 # All data movement is handled by the AXI DMA.  Interrupt source
 # identification is provided by the AXI INTC (Xilinx PG099).
+# An AXI GPIO (Xilinx PG144) drives the xfft aresetn signal so the driver
+# can flush the pipeline between transforms.
 #
 # Example DTS node:
 #
 #   fft_accel: fft-accel@40000000 {
 #       compatible = "ostomachion,fft-accel";
 #       reg = <0x40000000 0x40>,     /* AXI DMA control registers  (64 B)  */
-#             <0x41000000 0x4000>,   /* TX BRAM                   (16 KB)  */
-#             <0x41004000 0x4000>,   /* RX BRAM                   (16 KB)  */
-#             <0x40010000 0x80>;     /* AXI INTC (128 B AXI aperture)      */
-#       reg-names = "dma", "tx_bram", "rx_bram", "intc";
-#       bram-size = <16384>;
+#             <0x41000000 0x8000>,   /* TX BRAM                   (32 KB)  */
+#             <0x41008000 0x8000>,   /* RX BRAM                   (32 KB)  */
+#             <0x40010000 0x80>,     /* AXI INTC (128 B AXI aperture)      */
+#             <0x40020000 0x80>;     /* AXI GPIO (xfft reset, 128 B)       */
+#       reg-names = "dma", "tx_bram", "rx_bram", "intc", "gpio";
+#       dma-max-bytes = <16388>;
 #       interrupts = <11>;          /* RISC-V MEI line (IRQ 11) */
 #       status = "okay";
 #   };
@@ -33,16 +36,21 @@ properties:
   reg-names:
     required: true
     description: |
-      Must be "dma", "tx_bram", "rx_bram", "intc" in that order.
+      Must be "dma", "tx_bram", "rx_bram", "intc", "gpio" in that order.
         dma     — AXI DMA control registers (64 B at 0x40000000)
-        tx_bram — TX BRAM input buffer (16 KB at 0x41000000)
-        rx_bram — RX BRAM output buffer (16 KB at 0x41004000)
+        tx_bram — TX BRAM input buffer (32 KB at 0x41000000)
+        rx_bram — RX BRAM output buffer (32 KB at 0x41008000)
         intc    — AXI INTC (128 B decode at 0x40010000; PG099 regs in low 32 B)
+        gpio    — AXI GPIO (128 B at 0x40020000; bit 0 = xfft aresetn)
 
-  bram-size:
+  dma-max-bytes:
     type: int
     required: true
-    description: Size of each BRAM buffer in bytes (TX and RX are equal).
+    description: |
+      Maximum DMA transfer length in bytes for one RX (S2MM) transfer.
+      For a 4096-point transform with the (N+1)-word phantom-skip workaround,
+      this is (4096 + 1) * 4 = 16388.  Used as a runtime guard: the driver
+      rejects any transform whose required byte count exceeds this value.
 
   interrupts:
     required: true

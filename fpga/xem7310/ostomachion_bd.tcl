@@ -275,7 +275,16 @@ connect_bd_net [get_bd_pins axi_dma_0/M_AXIS_MM2S_TDATA]  \
 connect_bd_net [get_bd_pins axi_dma_0/M_AXIS_MM2S_TLAST]  \
                [get_bd_pins xfft_0/s_axis_data_tlast]
 
-## xfft output → S2MM: interface-level connect is fine here (no probes needed)
+## xfft output → S2MM: interface-level connect is fine here (no probes needed).
+##
+## Phase 3b — AXIS phantom gate (planned, not yet inserted).
+##   Insert a TLAST-aware AXIS gate (small custom IP or axis_register_slice
+##   variant) at this connection point to drop the post-aresetn phantom beat
+##   that xfft asserts before the first real frame begins.  The driver-side
+##   support already exists: with the gate active, the firmware can be
+##   updated to use byte_len = N*4 (no +1) and read Y[i] directly from
+##   BRAM[i] (no offset).  Phase 2 ILA capture must confirm phantom shape
+##   first; see ACCEL_DEBUG.md and the FFT driver header comment.
 connect_bd_intf_net [get_bd_intf_pins xfft_0/m_axis_data] \
                     [get_bd_intf_pins axi_dma_0/S_AXIS_S2MM]
 

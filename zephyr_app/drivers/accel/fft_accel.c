@@ -22,7 +22,7 @@
  *   the active channel:
  *     ch0 — AXI DMA MM2S complete/error
  *     ch1 — AXI DMA S2MM complete/error  (output ready)
- *     ch2 — xfft overflow (m_axis_status_tvalid)
+ *     ch2 — xfft frame complete (m_axis_status_tvalid; not overflow-only)
  *
  * Transfer sequence (fft_accel_transform):
  *   1. Acquire xfer_lock (prevents concurrent calls).
@@ -36,6 +36,18 @@
  * Thread safety: not safe for concurrent calls from multiple threads.
  * xfer_lock serialises callers; a second caller blocks until the first
  * completes or times out.
+ *
+ * Off-by-one mitigation strategy (ACCEL_DEBUG Issue 3):
+ *   The driver currently uses the (N+1)-word phantom-skip workaround:
+ *     - Programs S2MM with byte_len = (N+1)*4
+ *     - Discards BRAM[0] (assumed phantom) and reads Y[i] from BRAM[i+1]
+ *   This is empirically validated and protected by the runtime integrity
+ *   sentinel (see FFT_ACCEL_XFER_SENTINEL).  The "proper" fix is a
+ *   TLAST-gated AXIS path between xfft and S2MM (planned BD change; see
+ *   ostomachion_bd.tcl note "Phase 3b — AXIS phantom gate").  Once the
+ *   gate ships, the driver will drop to byte_len = N*4 and read Y[i]
+ *   directly from BRAM[i].  Until then, the integrity sentinel ensures
+ *   any silent regression becomes a hard -EIO rather than corrupted data.
  */
 
 #include <zephyr/kernel.h>
@@ -77,6 +89,17 @@ LOG_MODULE_REGISTER(fft_accel, CONFIG_FFT_ACCEL_LOG_LEVEL);
 /* Maximum polling iterations for software reset (~100 µs at 100 MHz) */
 #define DMA_RESET_POLL_MAX 100
 
+/* Transfer-integrity sentinel: written to BRAM[N] (the location where Y[N-1]
+ * is expected to land after an (N+1)-word S2MM transfer) before each transform
+ * and re-read after IOC.  If the sentinel survives, the DMA terminated short
+ * of N+1 words — most likely because xfft did not emit a phantom beat (i.e.
+ * ACCEL_DEBUG Issue 3 hypothesis is invalid for this build).  The driver
+ * returns -EIO rather than silently producing off-by-one results.
+ *
+ * False-positive probability: 2^-32 per transform (Y[N-1] would have to
+ * happen to equal exactly this value).  Acceptable in practice. */
+#define FFT_ACCEL_XFER_SENTINEL 0xDEADBEEFU
+
 /* ── AXI INTC register offsets (Xilinx PG099) ───────────────────────────── */
 #define INTC_ISR  0x00U  /* Interrupt Status Register   (bit N = channel N pending) */
 #define INTC_IPR  0x04U  /* Interrupt Pending Register  (ISR & IER)                 */
@@ -87,10 +110,15 @@ LOG_MODULE_REGISTER(fft_accel, CONFIG_FFT_ACCEL_LOG_LEVEL);
 #define INTC_IVR  0x18U  /* Interrupt Vector Register                               */
 #define INTC_MER  0x1CU  /* Master Enable Register (bit0=ME, bit1=HIE)              */
 
-/* INTC channel bit masks (must match ostomachion_bd.tcl channel wiring) */
-#define INTC_CH_MM2S  BIT(0)  /* AXI DMA MM2S complete/error  */
-#define INTC_CH_S2MM  BIT(1)  /* AXI DMA S2MM complete/error  */
-#define INTC_CH_OVFLO BIT(2)  /* xfft overflow                */
+/* INTC channel bit masks (must match ostomachion_bd.tcl channel wiring).
+ *
+ * Note: ch2 is wired to xfft m_axis_status_tvalid, which fires once per
+ * completed FFT frame.  It is NOT a clean overflow-only signal: the actual
+ * overflow flag is in m_axis_status_tdata[0] and is not currently routed
+ * to a readable register in the BD.  See ACCEL_DEBUG Issue 5 / Open Q. */
+#define INTC_CH_MM2S       BIT(0)  /* AXI DMA MM2S complete/error      */
+#define INTC_CH_S2MM       BIT(1)  /* AXI DMA S2MM complete/error      */
+#define INTC_CH_FRAME_DONE BIT(2)  /* xfft frame complete (not overflow) */
 
 #define INTC_MER_ME  BIT(0)   /* Master Enable                */
 #define INTC_MER_HIE BIT(1)   /* Hardware Interrupt Enable    */
@@ -103,7 +131,7 @@ struct fft_accel_config {
 	uintptr_t rx_bram_base; /* RX BRAM base address          */
 	uintptr_t intc_base;    /* AXI INTC base address         */
 	uintptr_t gpio_base;    /* AXI GPIO base (xfft reset)    */
-	uint32_t  bram_size;    /* BRAM size in bytes            */
+	uint32_t  dma_max_bytes; /* Maximum DMA transfer length, bytes */
 	uint32_t  irq_num;      /* NEORV32 mext IRQ line         */
 };
 
@@ -184,9 +212,9 @@ static int dma_reset_channel(const struct fft_accel_config *cfg, uint32_t cr_reg
  * to guess the source) with definitive per-channel identification.
  *
  * INTC channel mapping (see ostomachion_bd.tcl):
- *   ch0 (INTC_CH_MM2S)  — AXI DMA MM2S complete or error
- *   ch1 (INTC_CH_S2MM)  — AXI DMA S2MM complete or error (triggers sem)
- *   ch2 (INTC_CH_OVFLO) — xfft overflow (m_axis_status_tvalid pulse)
+ *   ch0 (INTC_CH_MM2S)       — AXI DMA MM2S complete or error
+ *   ch1 (INTC_CH_S2MM)       — AXI DMA S2MM complete or error (triggers sem)
+ *   ch2 (INTC_CH_FRAME_DONE) — xfft frame complete (m_axis_status_tvalid pulse)
  */
 static void fft_accel_isr(const struct device *dev)
 {
@@ -224,16 +252,14 @@ static void fft_accel_isr(const struct device *dev)
 		}
 	}
 
-	/* ── Channel 2: xfft m_axis_status_tvalid ──────────────────────── */
-	/* m_axis_status_tvalid fires once per completed FFT frame, not only
-	 * on overflow.  The actual overflow flag is in m_axis_status_tdata[0],
-	 * which is not currently wired to a readable register in the BD.
-	 * Treat every ch2 pulse as "frame done" and do not set last_overflow
-	 * unconditionally; only a future BD change that reads tdata[0] can
-	 * distinguish real overflow from normal frame completion. */
-	if (isr & INTC_CH_OVFLO) {
-		/* No action needed: frame-complete notification, not overflow. */
-		(void)0;
+	/* ── Channel 2: xfft m_axis_status_tvalid (frame-done pulse) ─────
+	 * Fires once per completed FFT frame, NOT exclusively on overflow.
+	 * The actual overflow flag is m_axis_status_tdata[0], which is not
+	 * currently wired to a readable register in the BD.  No action is
+	 * required here; the channel is left enabled so the IAR W1C clears
+	 * any pending edge before the next transform. */
+	if (isr & INTC_CH_FRAME_DONE) {
+		(void)0;  /* frame-complete notification — driver does not act on it */
 	}
 
 	/* Acknowledge INTC after all DMA DMASR W1C writes have de-asserted
@@ -288,7 +314,7 @@ int fft_accel_transform(const struct device *dev,
 	 * rather than falling outside the DMA window and being silently lost. */
 	uint32_t byte_len = (uint32_t)((n + 1) * sizeof(struct fft_sample_t));
 
-	if (byte_len > cfg->bram_size) {
+	if (byte_len > cfg->dma_max_bytes) {
 		return -EINVAL;
 	}
 
@@ -322,8 +348,14 @@ int fft_accel_transform(const struct device *dev,
 	 *   a. GPIO=0 → assert xfft_aresetn=0: flush pipeline state.
 	 *   b. DMA software reset: halts any in-progress transfers cleanly.
 	 *   c. GPIO=1 → release xfft_aresetn=1: pipeline ready to accept input.
+	 *
+	 * The k_busy_wait calls below make the >=2 aclk-cycle requirement
+	 * explicit rather than relying on MMIO-write latency between back-to-back
+	 * register writes.  At 100 MHz, 1 us = 100 cycles (50× margin over the
+	 * 2-cycle minimum).
 	 */
 	gpio_wr(cfg, GPIO_DATA, 0x0);  /* assert xfft reset (aresetn=0) */
+	k_busy_wait(1);                /* hold aresetn=0 for >=2 aclk cycles */
 
 	int reset_err = dma_reset_channel(cfg, DMA_MM2S_DMACR);
 	reset_err    |= dma_reset_channel(cfg, DMA_S2MM_DMACR);
@@ -334,6 +366,15 @@ int fft_accel_transform(const struct device *dev,
 	}
 
 	gpio_wr(cfg, GPIO_DATA, 0x1);  /* release xfft reset (aresetn=1) */
+	k_busy_wait(1);                /* let xfft pipeline come out of reset */
+
+	/* 2b. Transfer-integrity sentinel.  Write FFT_ACCEL_XFER_SENTINEL to the
+	 * word in RX BRAM where Y[N-1] is expected to land (BRAM[N], i.e. byte
+	 * offset n*sizeof(struct fft_sample_t) — see "Layout after an N+1 word
+	 * DMA transfer" comment below).  After IOC the driver re-reads this word
+	 * and treats sentinel survival as a hard error (see step 6b). */
+	sys_write32(FFT_ACCEL_XFER_SENTINEL,
+		    cfg->rx_bram_base + (uintptr_t)n * sizeof(struct fft_sample_t));
 
 	/* 3. Arm S2MM first (xfft output stream → RX BRAM, IOC + ERR IRQs).
 	 * PG021 sequence: RS=1 first (channel Halted→Idle), then DA, then LENGTH.
@@ -408,7 +449,43 @@ int fft_accel_transform(const struct device *dev,
 			"reduce input amplitude or enable scaling");
 	}
 
-	/* 6. Read output samples from RX BRAM (only on success).
+	/* 6a. Post-completion DMA state validation.
+	 *
+	 * S2MM_DMASR.IDLE must be set after IOC for a non-SG DMA: an IOC
+	 * delivered while the channel is still running indicates a spurious
+	 * interrupt or an unhandled error. */
+	if (err == 0) {
+		uint32_t s2mm_sr = dma_rd(cfg, DMA_S2MM_DMASR);
+		if (!(s2mm_sr & DMA_SR_IDLE)) {
+			LOG_ERR("S2MM IOC fired but channel not IDLE: DMASR=0x%08x",
+				s2mm_sr);
+			err = -EIO;
+		}
+	}
+
+	/* 6b. Transfer-integrity check: the sentinel at BRAM[N] (where Y[N-1]
+	 * should land in the N+1-word transfer model) must have been overwritten.
+	 * If it is still FFT_ACCEL_XFER_SENTINEL the DMA terminated early —
+	 * typically because xfft asserted TLAST on its actual last beat without
+	 * a preceding phantom, meaning the BRAM[i+1] read offset is wrong for
+	 * ALL bins.  Surface this as -EIO so silent off-by-one corruption can
+	 * never reach the caller. */
+	if (err == 0) {
+		uint32_t sentinel_check =
+			sys_read32(cfg->rx_bram_base +
+				   (uintptr_t)n * sizeof(struct fft_sample_t));
+		if (sentinel_check == FFT_ACCEL_XFER_SENTINEL) {
+			LOG_ERR("DMA transfer-integrity check FAILED: BRAM[%zu] "
+				"still holds sentinel 0x%08x — Y[N-1] not captured. "
+				"This means xfft did NOT emit a phantom beat after "
+				"aresetn (ACCEL_DEBUG Issue 3 hypothesis is wrong) "
+				"and the (n+1)*4 transfer length is incorrect.",
+				n, sentinel_check);
+			err = -EIO;
+		}
+	}
+
+	/* 7. Read output samples from RX BRAM (only on success).
 	 *
 	 * Layout after an N+1 word DMA transfer:
 	 *   BRAM[0]   — phantom word (xfft pipeline artefact; discarded)
@@ -475,7 +552,7 @@ bool fft_accel_get_last_overflow(const struct device *dev)
 		.rx_bram_base = DT_INST_REG_ADDR_BY_NAME(inst, rx_bram),	\
 		.intc_base    = DT_INST_REG_ADDR_BY_NAME(inst, intc),		\
 		.gpio_base    = DT_INST_REG_ADDR_BY_NAME(inst, gpio),		\
-		.bram_size    = DT_INST_PROP(inst, bram_size),			\
+		.dma_max_bytes = DT_INST_PROP(inst, dma_max_bytes),		\
 		.irq_num      = DT_INST_IRQN(inst),				\
 	};									\
 									\
@@ -488,7 +565,7 @@ bool fft_accel_get_last_overflow(const struct device *dev)
 		k_mutex_init(&data->xfer_lock);					\
 									\
 		/* Initialise AXI INTC: enable channels 0,1,2 and master */	\
-		intc_wr(cfg, INTC_IER, INTC_CH_MM2S | INTC_CH_S2MM | INTC_CH_OVFLO); \
+		intc_wr(cfg, INTC_IER, INTC_CH_MM2S | INTC_CH_S2MM | INTC_CH_FRAME_DONE); \
 		intc_wr(cfg, INTC_MER, INTC_MER_ME | INTC_MER_HIE);		\
 									\
 		IRQ_CONNECT(DT_INST_IRQN(inst), 0,				\

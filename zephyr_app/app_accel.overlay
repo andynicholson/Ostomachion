@@ -35,10 +35,11 @@
 			      <0x40010000 0x80>,
 			      <0x40020000 0x80>;
 			reg-names = "dma", "tx_bram", "rx_bram", "intc", "gpio";
-			/* bram-size is the DMA transfer length for one RX transfer:
-			 * 1 phantom word + N=4096 output samples = 4097 × 4 = 16388 bytes.
-			 * Both BRAMs are 8192 words (32 KB) deep; the upper words are unused. */
-			bram-size = <16388>;
+			/* dma-max-bytes is the maximum DMA transfer length for one
+			 * RX transfer: 1 phantom word + N=4096 output samples =
+			 * 4097 × 4 = 16388 bytes.  Both BRAMs are 8192 words
+			 * (32 KB) deep; the upper words are unused. */
+			dma-max-bytes = <16388>;
 			/* AXI INTC IRQ output → NEORV32 MEI line (INTC IRQ 11) */
 			interrupts = <11>;
 			interrupt-parent = <&intc>;

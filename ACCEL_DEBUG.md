@@ -230,6 +230,10 @@ before the CPU reads.  Both fixes are in place.
 | `byte_len = (n+1) * 4` | Captures Y[N-1] which falls at BRAM[N] due to phantom at BRAM[0] |
 | Dummy read of `rx_bram_base` | Absorbs stale-first-read penalty; simultaneously discards phantom |
 | Loop reads `BRAM[i+1]` for `out[i]`, i in [0,N) | Skips phantom at BRAM[0]; reads all N samples Y[0..N-1] |
+| `k_busy_wait(1)` after aresetn assert and release | Makes the PG109 ≥2 aclk-cycle requirement explicit |
+| Post-IOC `S2MM_DMASR.IDLE` check | Detects spurious IOC delivered while channel still running |
+| `0xDEADBEEF` sentinel at BRAM[N] | Hard-fails any DMA transfer that does not write Y[N-1] |
+| `INTC_CH_OVFLO` → `INTC_CH_FRAME_DONE` | ch2 is `m_axis_status_tvalid` (frame-done), not overflow |
 
 ### Block design (`fpga/xem7310/ostomachion_bd.tcl`)
 
@@ -248,7 +252,7 @@ before the CPU reads.  Both fixes are in place.
 |--------|--------|
 | TX BRAM reg `<0x41000000 0x8000>` | Was 0x4000; matches new 32 KB BRAM |
 | RX BRAM reg `<0x41008000 0x8000>` | Was `0x41004000 0x4000`; new address and size |
-| `bram-size = <16388>` | DMA RX transfer length: (N+1)×4 = 4097×4 bytes |
+| `dma-max-bytes = <16388>` | Maximum DMA RX transfer length: (N+1)×4 = 4097×4 bytes (renamed from `bram-size` for clarity) |
 
 ---
 
@@ -311,3 +315,103 @@ The `fft dc`, `fft sine`, and `fft diag` shell commands (and the ZTEST suite
    for a tone at bin 4088 (mirror of bin 8 in `test_single_tone`).
 4. **ILA capture (optional)** — confirm or refute the phantom-word hypothesis
    by probing M_AXIS_DATA_TVALID after aresetn de-assertion.
+
+---
+
+## DMA architecture review — Phase 1 → Phase 4 (2026-04-26)
+
+A broad audit of the FFT/DMA pipeline produced the following commit-ready
+fixes.  Items left open are explicitly tagged *Deferred*.
+
+### Resolution table
+
+| Issue | Fix (this branch) | Status |
+|-------|-------------------|--------|
+| Issue 1 — INTC not initialised | MER + IER write at init | **Resolved** |
+| Issue 2 — Spurious ISR re-entry | DMASR W1C before INTC IAR | **Resolved** |
+| Issue 3 — Off-by-one on `out[0]` | N+1 DMA transfer + dummy read + sentinel safety net (3a hardening) | **Mitigated**; root-cause AXIS gate deferred to post-Phase-2 ILA |
+| Issue 4 — Y[N-1] silently lost | byte_len = (N+1)×4; RX BRAM 8192 words; integrity sentinel at BRAM[N] | **Resolved** |
+| Issue 5 — Stale BRAM reads | Single-port BRAM | **Resolved (RTL applied; on-hw verification pending)** |
+
+### Phase 3a — Hardening (always-applicable, applied)
+
+| File | Change |
+|------|--------|
+| `zephyr_app/tests/test_fft_accel.cpp` | Tightened `test_single_tone` to ±0-bin, added `test_dc_exact` (±5%), `test_no_off_by_one` (bin-1 cosine, ±0-bin), `test_y_n_minus_1` (verifies BRAM[N] non-zero) |
+| `zephyr_app/drivers/accel/fft_accel.c` | Added explicit `k_busy_wait(1)` around xfft aresetn assertion and release (PG109 ≥2 aclk cycles); post-IOC S2MM `DMASR.IDLE` validation; transfer-integrity sentinel `0xDEADBEEF` written to BRAM[N] before each transform and re-read post-IOC (sentinel survival → hard `-EIO`); renamed `INTC_CH_OVFLO` → `INTC_CH_FRAME_DONE` (ch2 is frame-done, not overflow) |
+| `zephyr_app/app_accel.overlay`, `dts/bindings/misc/ostomachion,fft-accel.yaml` | Renamed DTS property `bram-size` → `dma-max-bytes` (the value is the maximum DMA transfer length, not BRAM size) |
+| `fpga/xem7310/build.tcl` | Expanded ILA debug probe set: now also marks `xfft_0/m_axis_data*` (TVALID, TLAST, TDATA), `xfft_rst_and/Res` (post-AND aresetn), and `axi_gpio_0/gpio_io_o*` for definitive phantom-word capture in a single experiment |
+
+### Phase 3b — Root-cause AXIS gate (deferred)
+
+Recommended fix is a TLAST-aware AXIS gate between `xfft_0/m_axis_data` and
+`axi_dma_0/S_AXIS_S2MM` that drops any beat asserted before the first real
+frame.  Once the gate is in place:
+
+- `byte_len` returns to `N*4` (no +1)
+- The driver's dummy read of `BRAM[0]` is removed
+- Output loop becomes `out[i] = BRAM[i]`
+- BRAM depth can return to 4096 words / 16 KB (RX may stay 32K-aligned)
+
+Insertion point is documented in `fpga/xem7310/ostomachion_bd.tcl` at the
+`xfft_0/m_axis_data ↔ axi_dma_0/S_AXIS_S2MM` connection ("Phase 3b — AXIS
+phantom gate").  The gate change is gated on Phase 2 ILA evidence (Q1):
+
+- **Outcome A** (TVALID=1 + TLAST=0 beat between aresetn rising edge and the
+  first MM2S beat) — gate confirmed necessary; insert and update driver.
+- **Outcome B** (no phantom; TLAST early-terminates at beat N) — restore
+  `byte_len = N*4` without inserting a gate; the integrity sentinel will
+  flag this case immediately as `-EIO` if the existing build still produces it.
+- **Outcome C** (other) — fix targeted to the observed waveform.
+
+### Phase 3c — Stale-read confirmation (deferred)
+
+Only relevant once Phase 3b removes the dummy read.  Single-port BRAM is
+expected to make the dummy read unnecessary; if a regression appears,
+investigate `XBUS_REGSTAGE_EN => true` in `fpga/xem7310/xem7310_top.vhd`
+and add an explicit `DMA_S2MM_DMACR` read-back as a memory barrier before
+BRAM reads.
+
+### Phase 2 — Settle the phantom hypothesis
+
+The ILA infrastructure now covers the full set of nets needed for a single
+debug capture to settle Q1 (`fpga/xem7310/build.tcl` debug section):
+
+```
+make fpga-synth FPGA_DIR=fpga/xem7310 -- -tclargs debug
+make fpga-program BIT_FILE=build/xem7310/ostomachion_xem7310_debug.bit
+# Open Vivado Hardware Manager → load build/xem7310/debug_probes.ltx
+# Trigger on rising edge of xfft_rst_and/Res
+# Capture xfft_0/m_axis_data_tvalid, m_axis_data_tlast for ~1024 cycles
+```
+
+The presence (or absence) of a TVALID=1 + TLAST=0 beat before the first
+MM2S transfer is the deciding signal for the Phase 3b decision tree above.
+
+### Phase 4 — Validation status
+
+Compile-time validation completed on this branch:
+
+- `west build -b neorv32/neorv32/minimalboot zephyr_app -- -DEXTRA_CONF_FILE='prj_accel.conf;prj_hw_test.conf'`
+  → ROM 68 %, RAM 70 %; clean build of the FFT driver (with sentinel + reset
+  timing + S2MM IDLE validation), the renamed `dma-max-bytes` DTS property,
+  and the tightened ZTEST suite (`test_dc_exact`, `test_no_off_by_one`,
+  `test_y_n_minus_1`, exact-bin `test_single_tone`).
+- `west build -b neorv32/neorv32/minimalboot zephyr_app -- -DEXTRA_CONF_FILE=prj_shell.conf`
+  → ROM 94 %, RAM 74 %; clean build of `fft_shell.c` against the renamed
+  driver fields.
+
+Twister parses the test root but stops on a pre-existing platform name
+(`xem7310` HIL configurations have no in-tree board definition); fixing that
+parser-level error is independent of this audit and is filed as a follow-up.
+
+Pending hardware validation (requires bitstream + XEM7310 board):
+
+1. `make fpga-synth -- -tclargs debug` then `make fpga-program` of the debug
+   bitstream and run the Phase 2 ILA capture per the procedure above.
+2. `make test-accel-hw` to execute the tightened ZTEST suite — any future
+   off-by-one regression will surface as either a `test_no_off_by_one`
+   failure (peak at bin 0/2 instead of bin 1) or a sentinel-survival
+   `-EIO` from `fft_accel_transform()`.
+3. `make shell-hw` and run `fft dc`, `fft sine 1`, `fft sine 8`,
+   `fft sine 4088` for visual confirmation that `Y[N-1]` is captured.
