@@ -1,10 +1,12 @@
 ## 🧩 What is Ostomachion?
 
-[NEORV32 RISC-V](https://github.com/stnolting/neorv32), [Zephyr RTOS](https://www.zephyrproject.org/) on FPGA bare metal, an extensible DMA<->xFFT/custom transform RTL pipeline — one C++20 HAL from fabric to std::span.
+[NEORV32 RISC-V](https://github.com/stnolting/neorv32) SoC running [Zephyr RTOS](https://www.zephyrproject.org/) on FPGA bare metal - with an extensible DMA through a xFFT (or custom transform) RTL pipeline — one C++20 HAL from fabric to std::span.
 
 Ostomachion is Archimedes' dissection puzzle — fourteen geometric pieces that
 fit together in hundreds of distinct ways.  The name captures the design
 philosophy: a small set of composable, interlocking parts that assemble into a complete, verified FPGA RTOS platform.
+
+The entire FPGA build is programmatic — a single Tcl script regenerates the full Vivado block design (IP configuration, clock tree, AXI address map, interconnect, and optional ILA debug probes) under headless `vivado -mode batch`, so every bitstream is reproducible from version-controlled text alone with no hand-edited checkpoints or saved GUI state anywhere in the tree.
 
 Target hardware: **Opal Kelly XEM7310-A200** (Xilinx Artix-7 XC7A200T).
 Simulation: **GHDL** with a full peripheral testbench.
