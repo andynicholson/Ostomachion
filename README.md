@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/img/logo.svg" alt="Ostomachion logo: fourteen-piece dissection of a square" width="220"/>
+</p>
+
 ## 🧩 What is Ostomachion?
 
 [NEORV32 RISC-V](https://github.com/stnolting/neorv32) SoC running [Zephyr RTOS](https://www.zephyrproject.org/) on FPGA bare metal - with an extensible DMA through a xFFT (or custom transform) RTL pipeline — one C++20 HAL from fabric to std::span.
