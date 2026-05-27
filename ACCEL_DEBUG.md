@@ -329,9 +329,10 @@ fixes.  Items left open are explicitly tagged *Deferred*.
 |-------|-------------------|--------|
 | Issue 1 — INTC not initialised | MER + IER write at init | **Resolved** |
 | Issue 2 — Spurious ISR re-entry | DMASR W1C before INTC IAR | **Resolved** |
-| Issue 3 — Off-by-one on `out[0]` | N+1 DMA transfer + dummy read + sentinel safety net (3a hardening) | **Mitigated**; root-cause AXIS gate deferred to post-Phase-2 ILA |
-| Issue 4 — Y[N-1] silently lost | byte_len = (N+1)×4; RX BRAM 8192 words; integrity sentinel at BRAM[N] | **Resolved** |
-| Issue 5 — Stale BRAM reads | Single-port BRAM | **Resolved (RTL applied; on-hw verification pending)** |
+| Issue 3 — Off-by-one on `out[0]` | Asymmetric DMA lengths: MM2S=N*4, S2MM=(N+1)*4; phantom captured at `BRAM[0]` and discarded; Y[k] read from `BRAM[k+1]`; integrity sentinel safety net | **Resolved on hardware** (8/8 ZTEST pass incl. `test_no_off_by_one`); architectural AXIS gate (Phase 3b) still deferred |
+| Issue 4 — Y[N-1] silently lost | S2MM byte_len = (N+1)*4 with RX BRAM at 8192 words; integrity sentinel at `BRAM[N]` verifies the last bin landed | **Resolved on hardware** (`test_y_n_minus_1` PASS: `g_out[4095] re=8191`) |
+| Issue 5 — Stale BRAM reads | Single-port BRAM | **Resolved on hardware** (8/8 ZTEST sequential transforms pass) |
+| Issue 6 — MM2S length = (N+1)*4 confused xfft | Split byte_len into `mm2s_byte_len = N*4` and `s2mm_byte_len = (N+1)*4`.  MM2S asserting TLAST one beat past the xfft frame boundary left the IP in an undefined state (input accepted, output never produced — `MM2S=IDLE+IOC, S2MM=running w/ 0 bytes`).  N+1 belongs only to the OUTPUT side. | **Resolved on hardware** |
 
 ### Phase 3a — Hardening (always-applicable, applied)
 
@@ -406,6 +407,31 @@ The presence (or absence) of a TVALID=1 + TLAST=0 beat before the first
 MM2S transfer is the deciding signal for the Phase 3b decision tree above.
 
 ### Phase 4 — Validation status
+
+**On-hardware validation completed (XEM7310-A200, May 27 2026):**
+
+```
+SUITE PASS - 100.00% [ostomachion_fft]: pass = 8, fail = 0, skip = 0
+ - PASS - test_dc_exact            (0.013 s)
+ - PASS - test_dc_response         (0.033 s)
+ - PASS - test_invalid_n           (0.004 s)
+ - PASS - test_no_off_by_one       (1.498 s)  bin-1 cosine peaked at bin 1
+ - PASS - test_roundtrip_latency   (0.011 s)
+ - PASS - test_sequential          (0.058 s)
+ - PASS - test_single_tone         (1.651 s)  peak at bin 4088, mag_sq=67102481
+ - PASS - test_y_n_minus_1         (1.436 s)  g_out[4095] re=8191 im=12
+```
+
+The `[FFT-DBG]` trace from the bridge captured `0b111 DATA FLOWING` (xfft input
+handshake active) for the first time once the MM2S length was corrected from
+(N+1)*4 to N*4 — definitive confirmation of Issue 6.
+
+The integrity sentinel never triggered across 7 transforms, which is positive
+evidence for the phantom-word hypothesis (Phase 2 Outcome A): xfft does assert
+TVALID for one beat after aresetn de-assertion, the S2MM=N+1 length captures
+it at BRAM[0], and real bins land at BRAM[1..N].  Phase 3b (architectural AXIS
+gate to drop the phantom in hardware) is therefore optional cleanup, not a
+correctness requirement.
 
 Compile-time validation completed on this branch:
 

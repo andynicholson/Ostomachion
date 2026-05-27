@@ -307,14 +307,31 @@ int fft_accel_transform(const struct device *dev,
 		return -EINVAL;
 	}
 
-	/* Transfer N+1 words: the xfft natural-order output sorter asserts
-	 * m_axis_data_tvalid for one phantom word immediately after aresetn
-	 * de-assertion.  S2MM captures this at BRAM[0]; Y[0..N-1] land at
-	 * BRAM[1..N].  Transferring N+1 words ensures Y[N-1] is captured
-	 * rather than falling outside the DMA window and being silently lost. */
-	uint32_t byte_len = (uint32_t)((n + 1) * sizeof(struct fft_sample_t));
+	/* Asymmetric DMA lengths.
+	 *
+	 *   MM2S (input):   N words.  xfft is synthesised for a fixed frame
+	 *                   size of N=4096; sending more confuses the input
+	 *                   side because MM2S asserts TLAST on its final beat
+	 *                   and xfft sees TLAST off the configured frame
+	 *                   boundary, leaving the IP in an undefined state
+	 *                   (input accepted, output never produced).
+	 *
+	 *   S2MM (output):  N+1 words.  The xfft natural-order output sorter
+	 *                   asserts m_axis_data_tvalid for one phantom word
+	 *                   immediately after aresetn de-assertion.  S2MM
+	 *                   captures it at BRAM[0]; Y[0..N-1] land at
+	 *                   BRAM[1..N].  The extra word ensures Y[N-1] is
+	 *                   captured rather than falling outside the DMA
+	 *                   window and being silently lost.
+	 *
+	 * Phase 3b architectural fix (deferred) would let both sides return
+	 * to N*4; see ostomachion_bd.tcl "Phase 3b - AXIS phantom gate".
+	 */
+	uint32_t mm2s_byte_len = (uint32_t)(n * sizeof(struct fft_sample_t));
+	uint32_t s2mm_byte_len = (uint32_t)((n + 1) * sizeof(struct fft_sample_t));
 
-	if (byte_len > cfg->dma_max_bytes) {
+	if (mm2s_byte_len > cfg->dma_max_bytes ||
+	    s2mm_byte_len > cfg->dma_max_bytes) {
 		return -EINVAL;
 	}
 
@@ -384,13 +401,13 @@ int fft_accel_transform(const struct device *dev,
 	 * pipeline to s_axis_data_tready=0, deadlocking the MM2S input side. */
 	dma_wr(cfg, DMA_S2MM_DMACR,  DMA_CR_RS | DMA_CR_IOC_IRQEN | DMA_CR_ERR_IRQEN);
 	dma_wr(cfg, DMA_S2MM_DA,     (uint32_t)cfg->rx_bram_base);
-	dma_wr(cfg, DMA_S2MM_LENGTH, byte_len);
+	dma_wr(cfg, DMA_S2MM_LENGTH, s2mm_byte_len);
 
 	/* 4. Trigger MM2S last (TX BRAM → xfft input stream, ERR IRQ only).
 	 * Same PG021 sequence: RS=1, then SA, then LENGTH (transfer starts). */
 	dma_wr(cfg, DMA_MM2S_DMACR,  DMA_CR_RS | DMA_CR_ERR_IRQEN);
 	dma_wr(cfg, DMA_MM2S_SA,     (uint32_t)cfg->tx_bram_base);
-	dma_wr(cfg, DMA_MM2S_LENGTH, byte_len);
+	dma_wr(cfg, DMA_MM2S_LENGTH, mm2s_byte_len);
 
 	/* 5. Wait for S2MM IOC interrupt (output committed to RX BRAM) or error.
 	 *
