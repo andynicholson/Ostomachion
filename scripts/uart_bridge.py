@@ -208,6 +208,10 @@ def main():
                         help="Switch to this baud rate on SIGUSR1 (e.g. 115200)")
     parser.add_argument("--program", type=str, default=None, metavar="BITFILE",
                         help="Program FPGA with this bitstream before bridging")
+    parser.add_argument("--log", type=str, default=None, metavar="PATH",
+                        help="Tee every RX byte to this file (append mode, flushed "
+                             "after each write).  Lets `tail -f PATH` capture all "
+                             "UART output at any time, race-free with the PTY.")
     parser.add_argument("--debug", action="store_true",
                         help="Print TX/RX debug traces")
     args = parser.parse_args()
@@ -231,9 +235,15 @@ def main():
     tty.setraw(slave_fd)
     slave_name = os.ttyname(slave_fd)
 
+    log_fp = None
+    if args.log:
+        log_fp = open(args.log, "wb", buffering=0)
+
     print(f"\n{'='*60}")
     print(f"  PTY ready: {slave_name}")
     print(f"  Connect with:  minicom -D {slave_name} -b {args.baud}")
+    if args.log:
+        print(f"  RX log:       tail -f {args.log}")
     if args.baud_after:
         print(f"  Baud will switch to {args.baud_after} on SIGUSR1")
     if args.program:
@@ -280,6 +290,8 @@ def main():
                 if rx_data:
                     if args.debug:
                         print(f"[RX] {len(rx_data)} byte(s): {list(rx_data)}")
+                    if log_fp is not None:
+                        log_fp.write(rx_data)
                     try:
                         os.write(master_fd, rx_data)
                     except OSError as e:
@@ -307,6 +319,8 @@ def main():
     except KeyboardInterrupt:
         print("\nBridge stopped.")
     finally:
+        if log_fp is not None:
+            log_fp.close()
         os.close(master_fd)
         os.close(slave_fd)
         try:

@@ -169,8 +169,10 @@ fpga-flash: $(BIT_FILE)
 	@echo "=== Flash programming complete — FPGA will auto-boot on next power-up ==="
 
 ## Start the FrontPanel UART-over-USB bridge.
-## Creates a PTY (pseudo-terminal) that minicom or the bootloader upload
-## script can use as UART_DEVICE.  Runs in the foreground; Ctrl-C to stop.
+## Creates a PTY (pseudo-terminal) that the bootloader upload script can use
+## as UART_DEVICE.  All UART RX is teed to BRIDGE_LOG (default
+## /tmp/uart_bridge.log), so a separate `tail -f` captures every byte
+## without racing the PTY.  Runs in the foreground; Ctrl-C to stop.
 ##
 ## Usage:
 ##   make uart-bridge                       # 19200 baud (bootloader)
@@ -180,21 +182,29 @@ fpga-flash: $(BIT_FILE)
 ## With PROGRAM=1 the script creates the PTY, programs the FPGA, then starts
 ## bridging — all on one USB handle.  This avoids the race where fpga-program
 ## and uart-bridge can't share the FrontPanel USB device simultaneously.
-## Connect minicom to the PTY path BEFORE the FPGA finishes programming to
-## capture the bootloader banner.
 ##
-## The PTY path is printed on startup, e.g. /dev/pts/3.  Use it as:
-##   make fpga-fw UART_DEVICE=/dev/pts/3
-##   minicom -D /dev/pts/3 -b 19200
+## Recommended three-terminal flow (race-free):
+##   Terminal 1:  make uart-bridge PROGRAM=1            (prints PTY path)
+##   Terminal 2:  tail -f /tmp/uart_bridge.log          (any time, no race)
+##   Terminal 3:  make test-accel-hw UART_DEVICE=/dev/pts/N
+##                (or: make shell-hw UART_DEVICE=/dev/pts/N)
+##
+## minicom on the PTY is still supported but MUST NOT be open while
+## uart_upload.py is running — both read the PTY exclusively.  The log
+## file is the friction-free alternative for read-only observation.
 BRIDGE_BAUD       ?= 19200
 BRIDGE_BAUD_AFTER ?= 115200
+BRIDGE_LOG        ?= /tmp/uart_bridge.log
 
 uart-bridge:
 	@echo "=== Starting FrontPanel UART bridge ($(BRIDGE_BAUD) baud) ==="
+	@echo "    UART RX is teed to $(BRIDGE_LOG) — run 'tail -f $(BRIDGE_LOG)'"
+	@echo "    in another terminal at any time to capture the boot banner +"
+	@echo "    full ZTEST output without racing the minicom-attach window."
 ifdef PROGRAM
-	python3 scripts/uart_bridge.py --baud $(BRIDGE_BAUD) --baud-after $(BRIDGE_BAUD_AFTER) --program $(BIT_FILE) $(BRIDGE_ARGS)
+	python3 scripts/uart_bridge.py --baud $(BRIDGE_BAUD) --baud-after $(BRIDGE_BAUD_AFTER) --log $(BRIDGE_LOG) --program $(BIT_FILE) $(BRIDGE_ARGS)
 else
-	python3 scripts/uart_bridge.py --baud $(BRIDGE_BAUD) --baud-after $(BRIDGE_BAUD_AFTER) $(BRIDGE_ARGS)
+	python3 scripts/uart_bridge.py --baud $(BRIDGE_BAUD) --baud-after $(BRIDGE_BAUD_AFTER) --log $(BRIDGE_LOG) $(BRIDGE_ARGS)
 endif
 
 ## Upload Zephyr firmware to the NEORV32 bootloader over UART.
