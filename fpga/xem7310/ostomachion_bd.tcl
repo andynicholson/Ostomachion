@@ -143,6 +143,22 @@ set_property -dict {
 ## CPU read on Port B concurrently with a DMA write on Port A, which caused
 ## stale reads when the SmartConnect returned early BRESP to the DMA before
 ## the write had reached the BRAM fabric.
+##
+## Read-latency contract (PG078 §1.3 / §4.1):
+##   The AXI BRAM Controller's READ_LATENCY parameter must EXACTLY match the
+##   total clock-cycle latency from BRAM address-valid to data-valid.  When
+##   READ_LATENCY is set to its default of 1, PG078 forbids enabling the
+##   blk_mem_gen "Register Port A Output of Memory Primitives" (and Core)
+##   options — those each add one extra latency cycle.  A mismatch causes the
+##   controller to sample the BRAM data port one cycle too early, returning
+##   the previously-addressed word on every CPU-side read (a 1-word off-by-
+##   one shift) — this is the long-mis-diagnosed "phantom beat" symptom.
+##   We keep the strict 1-cycle BRAM (no primitive/core output registers) so
+##   the default READ_LATENCY=1 matches exactly; timing closes comfortably at
+##   100 MHz on Artix-7 with WNS > 0.5 ns on the BRAM datapath.
+##   Empirically confirmed via fft_beat_counter (WireOut 0x22) showing xfft
+##   emits exactly N output beats per N-point frame and the resulting Y[i]
+##   lands at BRAM[i] with no offset.
 foreach name {tx_bram_ctrl rx_bram_ctrl} {
     create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:4.1 $name
     set_property -dict {
@@ -152,18 +168,21 @@ foreach name {tx_bram_ctrl rx_bram_ctrl} {
 }
 
 ## TX BRAM: 8192 words (32 KB) — CPU writes N=4096 samples, DMA MM2S reads them.
-## RX BRAM: 8192 words (32 KB) — DMA S2MM writes 1 phantom + N=4096 output samples.
-## Both BRAMs use depth 8192 (power-of-2, 32 KB) so address ranges are identical
-## and the AXI SmartConnect alignment constraint (range must equal depth×4) is met.
-## The xfft natural-order output sorter asserts tvalid for one phantom word
-## immediately after aresetn de-assertion.  The DMA captures this at BRAM[0];
-## Y[0..N-1] land at BRAM[1..N].  Words N+1..8191 are unused padding.
+## RX BRAM: 8192 words (32 KB) — DMA S2MM writes N=4096 output samples.
+## Both BRAMs use depth 8192 (power-of-2, 32 KB) so address ranges are
+## identical and the AXI SmartConnect alignment constraint (range must equal
+## depth×4) is met.  Words N..8191 are unused padding.
+##
+## Register_PortA_Output_of_Memory_Primitives = false: 1-cycle BRAM read
+## latency, matching the AXI BRAM Controller default READ_LATENCY=1 above.
+## See the latency contract note on the controller above for the full
+## rationale.
 create_bd_cell -type ip -vlnv xilinx.com:ip:blk_mem_gen:8.4 tx_bram
 set_property -dict {
     CONFIG.Memory_Type        {Single_Port_RAM}
     CONFIG.Write_Width_A      {32}
     CONFIG.Write_Depth_A      {8192}
-    CONFIG.Register_PortA_Output_of_Memory_Primitives {true}
+    CONFIG.Register_PortA_Output_of_Memory_Primitives {false}
 } [get_bd_cells tx_bram]
 
 create_bd_cell -type ip -vlnv xilinx.com:ip:blk_mem_gen:8.4 rx_bram
@@ -171,7 +190,7 @@ set_property -dict {
     CONFIG.Memory_Type        {Single_Port_RAM}
     CONFIG.Write_Width_A      {32}
     CONFIG.Write_Depth_A      {8192}
-    CONFIG.Register_PortA_Output_of_Memory_Primitives {true}
+    CONFIG.Register_PortA_Output_of_Memory_Primitives {false}
 } [get_bd_cells rx_bram]
 
 connect_bd_intf_net [get_bd_intf_pins tx_bram_ctrl/BRAM_PORTA] \
@@ -275,37 +294,40 @@ connect_bd_net [get_bd_pins axi_dma_0/M_AXIS_MM2S_TDATA]  \
 connect_bd_net [get_bd_pins axi_dma_0/M_AXIS_MM2S_TLAST]  \
                [get_bd_pins xfft_0/s_axis_data_tlast]
 
-## xfft output → S2MM: interface-level connect is fine here (no probes needed).
+## xfft output → S2MM: use per-signal connects (not connect_bd_intf_net) so
+## that TVALID, TREADY and TLAST can be tapped as additional sinks on the
+## same nets and routed out as fft_dbg_m_data_* ports.  These feed the
+## fft_beat_counter module in xem7310_top.vhd which exposes
+## pre_first_tlast_beats via WireOut 0x22 — the definitive measurement of
+## whether xfft really emits N or N+1 output beats per N-point frame.
 ##
-## Phase 3b — AXIS phantom gate (planned, not yet inserted).
-##   Insert a TLAST-aware AXIS gate at this connection point to drop the
-##   post-aresetn phantom beat that xfft asserts before the first real frame
-##   begins.  Three candidate implementations, in increasing RTL invasiveness:
-##
-##     Option (i)  — Software-only: arm S2MM only AFTER MM2S has issued its
-##                   first beat (poll MM2S_DMASR.IDLE=0).  No RTL change.
-##                   Race-prone vs xfft pipeline latency but quickest to try.
-##
-##     Option (ii) — Drop in an axis_register_slice (or AXIS Subset Converter)
-##                   here, configured to suppress invalid beats during reset.
-##                   No custom RTL.  Requires aresetn to be held low until
-##                   after S2MM is armed.
-##
-##     Option (iii)— Insert a small custom 1-bit AXIS gate IP whose enable is
-##                   driven by an extra axi_gpio_0 output bit, set by firmware
-##                   just before MM2S is armed and cleared after IOC.  Most
-##                   robust; deterministic regardless of xfft pipeline timing.
-##
-##   The driver-side support already exists: with any of these gates active,
-##   the firmware can be updated to use byte_len = N*4 (no +1) and read Y[i]
-##   directly from BRAM[i] (no offset); the dummy read of BRAM[0] and the
-##   transfer-integrity sentinel become unnecessary.  Phase 2 ILA capture
-##   must confirm phantom shape first to pick between (i), (ii), (iii);
-##   see ACCEL_DEBUG.md "Phase 3b — Root-cause AXIS gate (deferred)" and
-##   the comment block in zephyr_app/drivers/accel/fft_accel.c around
-##   `byte_len = (n + 1) * sizeof(struct fft_sample_t);`.
-connect_bd_intf_net [get_bd_intf_pins xfft_0/m_axis_data] \
-                    [get_bd_intf_pins axi_dma_0/S_AXIS_S2MM]
+## Phase 3b — AXIS "phantom gate" hypothesis: RESOLVED, NOT REQUIRED.
+##   The in-fabric fft_beat_counter (WireOut 0x22) measured exactly N=4096
+##   beats per frame on hardware (Outcome A, May 27 2026), confirming xfft is
+##   PG109-correct with no phantom output beat after aresetn.  The original
+##   off-by-one symptom was the BRAM controller read-latency mismatch (Issue
+##   7 in ACCEL_DEBUG.md), now fixed by setting
+##   Register_PortA_Output_of_Memory_Primitives=false on both BRAMs so the
+##   strict 1-cycle BRAM matches the controller's default READ_LATENCY=1.
+##   The beat counter and its WireOut taps are retained as permanent
+##   diagnostic infrastructure; the fft_dbg_m_data_* per-signal connects
+##   below stay as they are.
+
+create_bd_port -dir O fft_dbg_m_data_tvalid
+create_bd_port -dir O fft_dbg_m_data_tready
+create_bd_port -dir O fft_dbg_m_data_tlast
+
+connect_bd_net [get_bd_pins xfft_0/m_axis_data_tvalid]   \
+               [get_bd_pins axi_dma_0/S_AXIS_S2MM_TVALID] \
+               [get_bd_ports fft_dbg_m_data_tvalid]
+connect_bd_net [get_bd_pins axi_dma_0/S_AXIS_S2MM_TREADY] \
+               [get_bd_pins xfft_0/m_axis_data_tready]    \
+               [get_bd_ports fft_dbg_m_data_tready]
+connect_bd_net [get_bd_pins xfft_0/m_axis_data_tlast]    \
+               [get_bd_pins axi_dma_0/S_AXIS_S2MM_TLAST]  \
+               [get_bd_ports fft_dbg_m_data_tlast]
+connect_bd_net [get_bd_pins xfft_0/m_axis_data_tdata]    \
+               [get_bd_pins axi_dma_0/S_AXIS_S2MM_TDATA]
 
 ## xfft config: connect the constant word and tvalid using explicit net names so
 ## that Vivado does not silently ignore the connection if the interface pin is

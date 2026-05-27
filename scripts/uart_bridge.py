@@ -29,6 +29,10 @@ FrontPanel endpoint map (matching xem7310_top.vhd):
                       [0] M_AXIS_MM2S_TVALID  (1 = DMA sending data to xfft)
                       [1] s_axis_data_TREADY  (1 = xfft accepting input)
                       [2] periph_rstn         (1 = peripherals out of reset)
+    WireOut   0x22  xfft m_axis_data beat counts (latched, hold between resets)
+                      [15:0]  pre_first_tlast_beats  (FIRST frame after aresetn)
+                      [31:16] beats_in_last_frame    (most recent frame)
+    WireOut   0x23  [7:0]  tlast_count  (number of frames since aresetn, wraps)
     BTPipeIn  0x80  host → NEORV32 UART data  (block-throttled, ep_ready = not full)
     BTPipeOut 0xA0  NEORV32 UART data → host  (block-throttled, ep_ready = not empty)
 """
@@ -45,11 +49,13 @@ import tty
 SYS_CLK_HZ = 100_000_000
 PID_FILE = "/tmp/uart_bridge.pid"
 
-EP_WIREIN_CFG  = 0x00
-EP_WIREOUT_CNT = 0x20
-EP_WIREOUT_FFT = 0x21
-EP_PIPEIN_TX   = 0x80
-EP_PIPEOUT_RX  = 0xA0
+EP_WIREIN_CFG     = 0x00
+EP_WIREOUT_CNT    = 0x20
+EP_WIREOUT_FFT    = 0x21
+EP_WIREOUT_BEATS  = 0x22  # [15:0] pre_first_tlast_beats, [31:16] beats_in_last_frame
+EP_WIREOUT_TLAST  = 0x23  # [7:0]  tlast_count
+EP_PIPEIN_TX      = 0x80
+EP_PIPEOUT_RX     = 0xA0
 
 # WireOut 0x21 bit decode (bit 2 = periph_rstn, bit 1 = s_axis_data_tready, bit 0 = mm2s_tvalid)
 _FFT_DBG = {
@@ -71,6 +77,31 @@ def decode_fft_debug(val: int) -> str:
     vld  = bits & 1
     msg  = _FFT_DBG.get(bits, "???")
     return f"WireOut 0x21 = 0b{bits:03b}  rst={rst} tready={rdy} tvalid={vld}  {msg}"
+
+
+def decode_beat_counts(beats_word: int, tlast_word: int, n_expected: int = 4096) -> str:
+    """Decode the xfft m_axis_data beat counts.
+
+    pre_first_tlast_beats answers the central question for Q1:
+      = N           → PG109 is correct, off-by-one is elsewhere (Outcome A).
+      = N+1         → phantom-beat hypothesis confirmed (Outcome B).
+      = other       → investigate (Outcome C).
+    """
+    pre_first = beats_word & 0xFFFF
+    last_frm  = (beats_word >> 16) & 0xFFFF
+    tlast_ct  = tlast_word & 0xFF
+
+    if pre_first == 0 and tlast_ct == 0:
+        verdict = "no frames observed since reset"
+    elif pre_first == n_expected:
+        verdict = f"= N ({n_expected})  → Outcome A (PG109-correct, no phantom)"
+    elif pre_first == n_expected + 1:
+        verdict = f"= N+1 ({n_expected + 1})  → Outcome B (phantom confirmed)"
+    else:
+        verdict = f"unexpected (N={n_expected})  → Outcome C"
+
+    return (f"[BEATS] frames={tlast_ct:3d}  "
+            f"first_frame={pre_first}  last_frame={last_frm}  {verdict}")
 
 
 
@@ -267,6 +298,7 @@ def main():
     set_baud(dev, current_baud, args.uart_src)
 
     last_fft_dbg = None
+    last_beat_key = None
 
     try:
         while True:
@@ -278,13 +310,23 @@ def main():
                 sys.stdout.flush()
 
             # RX: check FIFO count first to avoid blocking on an empty BTPipeOut.
-            # UpdateWireOuts is called inside get_rx_count; piggyback 0x21.
+            # UpdateWireOuts is called inside get_rx_count; piggyback 0x21/0x22/0x23.
             rx_data = b""
             rx_count = get_rx_count(dev)
             fft_dbg = dev.GetWireOutValue(EP_WIREOUT_FFT) & 0x7
             if fft_dbg != last_fft_dbg:
                 print(f"[FFT-DBG] {decode_fft_debug(fft_dbg)}", flush=True)
                 last_fft_dbg = fft_dbg
+
+            beats_word = dev.GetWireOutValue(EP_WIREOUT_BEATS) & 0xFFFFFFFF
+            tlast_word = dev.GetWireOutValue(EP_WIREOUT_TLAST) & 0xFF
+            beat_key = (beats_word, tlast_word)
+            if beat_key != last_beat_key:
+                msg = decode_beat_counts(beats_word, tlast_word)
+                print(msg, flush=True)
+                if log_fp is not None:
+                    log_fp.write((msg + "\n").encode("utf-8", errors="replace"))
+                last_beat_key = beat_key
             if rx_count > 0:
                 rx_data = read_uart_bytes(dev)
                 if rx_data:

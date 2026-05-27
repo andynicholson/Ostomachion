@@ -22,6 +22,7 @@ build_zephyr_shell/
 build_vivado.log
 nohup.out
 clockInfo.txt
+tight_setup_hold_pins.txt
 .Xil/
 
 # Vivado build output

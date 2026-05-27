@@ -37,17 +37,15 @@
  * xfer_lock serialises callers; a second caller blocks until the first
  * completes or times out.
  *
- * Off-by-one mitigation strategy (ACCEL_DEBUG Issue 3):
- *   The driver currently uses the (N+1)-word phantom-skip workaround:
- *     - Programs S2MM with byte_len = (N+1)*4
- *     - Discards BRAM[0] (assumed phantom) and reads Y[i] from BRAM[i+1]
- *   This is empirically validated and protected by the runtime integrity
- *   sentinel (see FFT_ACCEL_XFER_SENTINEL).  The "proper" fix is a
- *   TLAST-gated AXIS path between xfft and S2MM (planned BD change; see
- *   ostomachion_bd.tcl note "Phase 3b — AXIS phantom gate").  Once the
- *   gate ships, the driver will drop to byte_len = N*4 and read Y[i]
- *   directly from BRAM[i].  Until then, the integrity sentinel ensures
- *   any silent regression becomes a hard -EIO rather than corrupted data.
+ * Off-by-one resolution:
+ *   The historical "phantom beat" hypothesis (xfft emits an extra output
+ *   beat after aresetn de-assertion, putting Y[0] at BRAM[1]) was
+ *   empirically disproven by the fft_beat_counter fabric instrumentation
+ *   (WireOut 0x22).  xfft emits exactly N output beats per N-point input
+ *   frame, with TLAST on the final beat, as PG109 v9.1 documents.  The
+ *   driver therefore uses symmetric N*4 DMA byte counts and reads Y[i]
+ *   directly from BRAM[i], with no offset, dummy read, or integrity
+ *   sentinel.  See ACCEL_DEBUG.md "Q1" for the measurement.
  */
 
 #include <zephyr/kernel.h>
@@ -88,17 +86,6 @@ LOG_MODULE_REGISTER(fft_accel, CONFIG_FFT_ACCEL_LOG_LEVEL);
 
 /* Maximum polling iterations for software reset (~100 µs at 100 MHz) */
 #define DMA_RESET_POLL_MAX 100
-
-/* Transfer-integrity sentinel: written to BRAM[N] (the location where Y[N-1]
- * is expected to land after an (N+1)-word S2MM transfer) before each transform
- * and re-read after IOC.  If the sentinel survives, the DMA terminated short
- * of N+1 words — most likely because xfft did not emit a phantom beat (i.e.
- * ACCEL_DEBUG Issue 3 hypothesis is invalid for this build).  The driver
- * returns -EIO rather than silently producing off-by-one results.
- *
- * False-positive probability: 2^-32 per transform (Y[N-1] would have to
- * happen to equal exactly this value).  Acceptable in practice. */
-#define FFT_ACCEL_XFER_SENTINEL 0xDEADBEEFU
 
 /* ── AXI INTC register offsets (Xilinx PG099) ───────────────────────────── */
 #define INTC_ISR  0x00U  /* Interrupt Status Register   (bit N = channel N pending) */
@@ -307,31 +294,18 @@ int fft_accel_transform(const struct device *dev,
 		return -EINVAL;
 	}
 
-	/* Asymmetric DMA lengths.
+	/* Symmetric N-word DMA on both sides.
 	 *
-	 *   MM2S (input):   N words.  xfft is synthesised for a fixed frame
-	 *                   size of N=4096; sending more confuses the input
-	 *                   side because MM2S asserts TLAST on its final beat
-	 *                   and xfft sees TLAST off the configured frame
-	 *                   boundary, leaving the IP in an undefined state
-	 *                   (input accepted, output never produced).
-	 *
-	 *   S2MM (output):  N+1 words.  The xfft natural-order output sorter
-	 *                   asserts m_axis_data_tvalid for one phantom word
-	 *                   immediately after aresetn de-assertion.  S2MM
-	 *                   captures it at BRAM[0]; Y[0..N-1] land at
-	 *                   BRAM[1..N].  The extra word ensures Y[N-1] is
-	 *                   captured rather than falling outside the DMA
-	 *                   window and being silently lost.
-	 *
-	 * Phase 3b architectural fix (deferred) would let both sides return
-	 * to N*4; see ostomachion_bd.tcl "Phase 3b - AXIS phantom gate".
+	 * Empirically verified via the on-fabric fft_beat_counter (WireOut
+	 * 0x22): xfft emits exactly N output beats per N-point input frame,
+	 * with TLAST on the final beat, exactly as PG109 v9.1 describes.
+	 * There is NO phantom beat after aresetn.  Both MM2S and S2MM
+	 * therefore use byte_len = N*4 and the driver reads out[i] = BRAM[i]
+	 * with no offset.  See ACCEL_DEBUG.md "Q1" for the measurement.
 	 */
-	uint32_t mm2s_byte_len = (uint32_t)(n * sizeof(struct fft_sample_t));
-	uint32_t s2mm_byte_len = (uint32_t)((n + 1) * sizeof(struct fft_sample_t));
+	uint32_t byte_len = (uint32_t)(n * sizeof(struct fft_sample_t));
 
-	if (mm2s_byte_len > cfg->dma_max_bytes ||
-	    s2mm_byte_len > cfg->dma_max_bytes) {
+	if (byte_len > cfg->dma_max_bytes) {
 		return -EINVAL;
 	}
 
@@ -385,14 +359,6 @@ int fft_accel_transform(const struct device *dev,
 	gpio_wr(cfg, GPIO_DATA, 0x1);  /* release xfft reset (aresetn=1) */
 	k_busy_wait(1);                /* let xfft pipeline come out of reset */
 
-	/* 2b. Transfer-integrity sentinel.  Write FFT_ACCEL_XFER_SENTINEL to the
-	 * word in RX BRAM where Y[N-1] is expected to land (BRAM[N], i.e. byte
-	 * offset n*sizeof(struct fft_sample_t) — see "Layout after an N+1 word
-	 * DMA transfer" comment below).  After IOC the driver re-reads this word
-	 * and treats sentinel survival as a hard error (see step 6b). */
-	sys_write32(FFT_ACCEL_XFER_SENTINEL,
-		    cfg->rx_bram_base + (uintptr_t)n * sizeof(struct fft_sample_t));
-
 	/* 3. Arm S2MM first (xfft output stream → RX BRAM, IOC + ERR IRQs).
 	 * PG021 sequence: RS=1 first (channel Halted→Idle), then DA, then LENGTH.
 	 * Writing LENGTH to a running channel triggers the transfer.
@@ -401,13 +367,13 @@ int fft_accel_transform(const struct device *dev,
 	 * pipeline to s_axis_data_tready=0, deadlocking the MM2S input side. */
 	dma_wr(cfg, DMA_S2MM_DMACR,  DMA_CR_RS | DMA_CR_IOC_IRQEN | DMA_CR_ERR_IRQEN);
 	dma_wr(cfg, DMA_S2MM_DA,     (uint32_t)cfg->rx_bram_base);
-	dma_wr(cfg, DMA_S2MM_LENGTH, s2mm_byte_len);
+	dma_wr(cfg, DMA_S2MM_LENGTH, byte_len);
 
 	/* 4. Trigger MM2S last (TX BRAM → xfft input stream, ERR IRQ only).
 	 * Same PG021 sequence: RS=1, then SA, then LENGTH (transfer starts). */
 	dma_wr(cfg, DMA_MM2S_DMACR,  DMA_CR_RS | DMA_CR_ERR_IRQEN);
 	dma_wr(cfg, DMA_MM2S_SA,     (uint32_t)cfg->tx_bram_base);
-	dma_wr(cfg, DMA_MM2S_LENGTH, mm2s_byte_len);
+	dma_wr(cfg, DMA_MM2S_LENGTH, byte_len);
 
 	/* 5. Wait for S2MM IOC interrupt (output committed to RX BRAM) or error.
 	 *
@@ -480,48 +446,16 @@ int fft_accel_transform(const struct device *dev,
 		}
 	}
 
-	/* 6b. Transfer-integrity check: the sentinel at BRAM[N] (where Y[N-1]
-	 * should land in the N+1-word transfer model) must have been overwritten.
-	 * If it is still FFT_ACCEL_XFER_SENTINEL the DMA terminated early —
-	 * typically because xfft asserted TLAST on its actual last beat without
-	 * a preceding phantom, meaning the BRAM[i+1] read offset is wrong for
-	 * ALL bins.  Surface this as -EIO so silent off-by-one corruption can
-	 * never reach the caller. */
-	if (err == 0) {
-		uint32_t sentinel_check =
-			sys_read32(cfg->rx_bram_base +
-				   (uintptr_t)n * sizeof(struct fft_sample_t));
-		if (sentinel_check == FFT_ACCEL_XFER_SENTINEL) {
-			LOG_ERR("DMA transfer-integrity check FAILED: BRAM[%zu] "
-				"still holds sentinel 0x%08x — Y[N-1] not captured. "
-				"This means xfft did NOT emit a phantom beat after "
-				"aresetn (ACCEL_DEBUG Issue 3 hypothesis is wrong) "
-				"and the (n+1)*4 transfer length is incorrect.",
-				n, sentinel_check);
-			err = -EIO;
-		}
-	}
-
 	/* 7. Read output samples from RX BRAM (only on success).
 	 *
-	 * Layout after an N+1 word DMA transfer:
-	 *   BRAM[0]   — phantom word (xfft pipeline artefact; discarded)
-	 *   BRAM[1]   — Y[0]    (DC bin)
-	 *   BRAM[N]   — Y[N-1]  (last bin; captured only because byte_len = N+1 words)
+	 * Direct 1:1 mapping — Y[i] lands at BRAM[i] because xfft emits
+	 * exactly N output beats per N-point frame (verified on-fabric by
+	 * fft_beat_counter, WireOut 0x22).  No dummy read, no offset.
 	 *
 	 * Each 32-bit word is {im[31:16], re[15:0]} in Q1.15 fixed-point. */
-
 	if (err == 0) {
-		/* BRAM[0] holds a phantom word captured when the xfft natural-order
-		 * output sorter briefly asserts m_axis_data_tvalid immediately after
-		 * aresetn de-assertion.  Read it once to prime the AXI read path
-		 * (absorbs the stale-first-read penalty), then discard it.
-		 * Y[0..N-1] are at BRAM[1..N]; all N samples fit because byte_len
-		 * covers N+1 words. */
-		(void)sys_read32(cfg->rx_bram_base);  /* dummy read — phantom at BRAM[0] */
-
 		for (size_t i = 0; i < n; i++) {
-			uint32_t word = sys_read32(cfg->rx_bram_base + (i + 1) * 4);
+			uint32_t word = sys_read32(cfg->rx_bram_base + i * 4);
 			out[i].re = (int16_t)(word & 0xFFFFu);
 			out[i].im = (int16_t)(word >> 16);
 		}

@@ -66,6 +66,7 @@ add_files -fileset sources_1 [list $bridge_rtl]
 add_files -fileset sources_1 [list \
     "$fpga_dir/xem7310_top.vhd"  \
     "$fpga_dir/fp_uart_bridge.vhd" \
+    "$fpga_dir/fft_beat_counter.vhd" \
 ]
 set_property TOP xem7310_top [get_filesets sources_1]
 
@@ -132,6 +133,7 @@ set rtl_vhdl2008_files [concat $soc_files [list \
     $bridge_rtl                            \
     "$fpga_dir/xem7310_top.vhd"           \
     "$fpga_dir/fp_uart_bridge.vhd"        \
+    "$fpga_dir/fft_beat_counter.vhd"      \
 ]]
 foreach f $rtl_vhdl2008_files {
     set_property FILE_TYPE {VHDL 2008} [get_files $f]

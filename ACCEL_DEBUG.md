@@ -260,22 +260,61 @@ before the CPU reads.  Both fixes are in place.
 
 ### Q1 — Is the phantom word real?
 
-The +1 offset in BRAM is confirmed by experiment.  The explanation (xfft
-C_ARCH=3 asserts tvalid for one word after aresetn de-assertion) is a
-hypothesis consistent with PG109 but not directly measured.
+**Resolved (May 27 2026, "FFT beat-count verification" plan): NO.**
 
-Alternative explanations that have not been definitively ruled out:
-- AXI DMA S2MM captures one word from xfft's registered output pipeline before
-  the first real sample arrives, due to pipeline latency after aresetn release.
-- The xfft natural-order sorter inserts a latency word before its first output
-  that is unrelated to tvalid behaviour.
+An in-fabric beat counter (`fpga/xem7310/fft_beat_counter.vhd`, exposed via
+FrontPanel WireOut 0x22/0x23) was tapped onto the live
+`xfft_0/m_axis_data` AXIS net and counts every `TVALID && TREADY` event in
+the `aclk` (100 MHz) domain.  Every observed transform produced:
 
-**What would confirm it:** An ILA probe on `M_AXIS_DATA_TVALID` and
-`M_AXIS_DATA_TDATA` immediately after aresetn de-assertion, captured before
-MM2S starts sending input.  If tvalid is high for one cycle before the first
-real sample, the phantom word theory is confirmed.  The debug bitstream target
-(`make fpga-synth` with `debug` arg) generates an ILA-instrumented bitstream
-that could capture this.
+```
+[BEATS] frames=N  first_frame=4096  last_frame=4096  → Outcome A
+        (PG109-correct, no phantom)
+```
+
+i.e. xfft emits **exactly N=4096 beats per N-point frame**, with `TLAST`
+on the final beat, exactly as PG109 v9.1 documents.  There is no phantom
+output beat after `aresetn` de-assertion.  The original "Y[k] at BRAM[k+1]"
+symptom (Issue 3) was therefore *not* caused by an xfft phantom — it was a
+**fabric BRAM read-latency mismatch on the CPU read path** (see Issue 7
+below).
+
+### Issue 7 — BRAM controller read-latency mismatch (real fabric root cause)
+
+**Symptom:** With the original Issue-3 workarounds removed (symmetric
+`byte_len = N*4`, direct `out[i] = BRAM[i]`), the bin-1 cosine peak
+appeared at `g_out[2]` instead of `g_out[1]` — a consistent +1 shift on
+every CPU read of the RX BRAM.  A BRAM-marker probe (`0xDEAD00xx` pre-fill,
+post-DMA dump) confirmed CPU `read(BRAM[k])` was returning the data
+written at `BRAM[k-1]`.
+
+**Root cause:** The `blk_mem_gen` was configured with
+`Register_PortA_Output_of_Memory_Primitives = true`, giving a 2-cycle BRAM
+read latency (1 primitive read cycle + 1 output register).  The
+`axi_bram_ctrl` was at its default `READ_LATENCY = 1`, which per PG078
+§1.3 explicitly forbids enabling any BRAM output register stage:
+
+> *"When Read Latency is 1, the controller expects latency of one clock
+> cycle from BRAM.  Therefore, the output register from the BRAM
+> (Primitives Output Register/Core Output Register) cannot be selected."*
+
+With the controller sampling the BRAM data port one cycle too early, every
+read returned the previously-addressed word — a 1-word off-by-one shift
+on every CPU-side read.  The previous `out[i] = BRAM[i+1]` software
+workaround inadvertently compensated for this hardware misconfiguration.
+
+**Fix (`fpga/xem7310/ostomachion_bd.tcl`):** disable the BRAM Primitives
+Output Register on both RX and TX BRAM
+(`CONFIG.Register_PortA_Output_of_Memory_Primitives {false}`), giving a
+clean 1-cycle BRAM that matches the default `READ_LATENCY = 1`.  Timing
+closes comfortably at 100 MHz on Artix-7 with WNS > 0.5 ns on the BRAM
+datapath.
+
+**Status:** All 8 FFT ZTESTs pass on hardware with the simplified driver
+(symmetric `byte_len = N*4`, `out[i] = BRAM[i]`, no dummy read, no
+sentinel offset).  The empirical BRAM dump now shows
+`BRAM[N] = 0xdead1000` and `BRAM[N+1] = 0xdead1001` — both markers intact,
+i.e. the DMA writes exactly N words to BRAM[0..N-1] with no shift.
 
 ### Q2 — Does the single-port BRAM fix actually solve the stale-read issue?
 
@@ -329,7 +368,7 @@ fixes.  Items left open are explicitly tagged *Deferred*.
 |-------|-------------------|--------|
 | Issue 1 — INTC not initialised | MER + IER write at init | **Resolved** |
 | Issue 2 — Spurious ISR re-entry | DMASR W1C before INTC IAR | **Resolved** |
-| Issue 3 — Off-by-one on `out[0]` | Asymmetric DMA lengths: MM2S=N*4, S2MM=(N+1)*4; phantom captured at `BRAM[0]` and discarded; Y[k] read from `BRAM[k+1]`; integrity sentinel safety net | **Resolved on hardware** (8/8 ZTEST pass incl. `test_no_off_by_one`); architectural AXIS gate (Phase 3b) still deferred |
+| Issue 3 — Off-by-one on `out[0]` | **Real root cause was Issue 7** (BRAM controller read-latency mismatch — `axi_bram_ctrl READ_LATENCY=1` while `blk_mem_gen Register_PortA_Output_of_Memory_Primitives=true` gave the BRAM 2-cycle latency).  Fixed in fabric by disabling the BRAM primitive output register so the BRAM is strict 1-cycle.  Driver returns to symmetric `byte_len = N*4`, direct `out[i] = BRAM[i]`, no dummy read.  Phase 3b AXIS gate is **invalidated** (no phantom to drop). | **Resolved in fabric** (8/8 ZTEST pass incl. `test_no_off_by_one`, `test_y_n_minus_1`); workarounds reverted |
 | Issue 4 — Y[N-1] silently lost | S2MM byte_len = (N+1)*4 with RX BRAM at 8192 words; integrity sentinel at `BRAM[N]` verifies the last bin landed | **Resolved on hardware** (`test_y_n_minus_1` PASS: `g_out[4095] re=8191`) |
 | Issue 5 — Stale BRAM reads | Single-port BRAM | **Resolved on hardware** (8/8 ZTEST sequential transforms pass) |
 | Issue 6 — MM2S length = (N+1)*4 confused xfft | Split byte_len into `mm2s_byte_len = N*4` and `s2mm_byte_len = (N+1)*4`.  MM2S asserting TLAST one beat past the xfft frame boundary left the IP in an undefined state (input accepted, output never produced — `MM2S=IDLE+IOC, S2MM=running w/ 0 bytes`).  N+1 belongs only to the OUTPUT side. | **Resolved on hardware** |
@@ -343,44 +382,19 @@ fixes.  Items left open are explicitly tagged *Deferred*.
 | `zephyr_app/app_accel.overlay`, `dts/bindings/misc/ostomachion,fft-accel.yaml` | Renamed DTS property `bram-size` → `dma-max-bytes` (the value is the maximum DMA transfer length, not BRAM size) |
 | `fpga/xem7310/build.tcl` | Expanded ILA debug probe set: now also marks `xfft_0/m_axis_data*` (TVALID, TLAST, TDATA), `xfft_rst_and/Res` (post-AND aresetn), and `axi_gpio_0/gpio_io_o*` for definitive phantom-word capture in a single experiment |
 
-### Phase 3b — Root-cause AXIS gate (deferred)
+### Phase 3b — Root-cause AXIS gate (invalidated by Phase 2 evidence)
 
-Recommended fix is a TLAST-aware AXIS gate between `xfft_0/m_axis_data` and
-`axi_dma_0/S_AXIS_S2MM` that drops any beat asserted before the first real
-frame.  Three candidate implementations, in increasing RTL invasiveness:
+**Status: NOT REQUIRED.**  The in-fabric beat counter (Phase 2, May 27
+2026) showed xfft emits exactly N=4096 beats per frame — there is no
+phantom beat to drop.  The proposed AXIS gate would have masked the real
+fabric bug (Issue 7, BRAM controller read-latency mismatch) and remained
+indefinitely in the design.  No gate is being inserted; the BD comment
+block at the `xfft_0/m_axis_data ↔ axi_dma_0/S_AXIS_S2MM` connection has
+been updated to reflect this resolved state.
 
-- **Option (i) — Software-only**: arm `S2MM` only *after* MM2S has issued its
-  first beat (poll `MM2S_DMASR.IDLE=0`).  No RTL change.  Race-prone vs xfft
-  pipeline latency but quickest to try.
-- **Option (ii) — `axis_register_slice` / AXIS Subset Converter**: drop in a
-  stock Xilinx IP between `xfft_0/m_axis_data` and `axi_dma_0/S_AXIS_S2MM`,
-  configured to suppress invalid beats during reset.  Requires `aresetn` to
-  be held low until after S2MM is armed.  No custom RTL.
-- **Option (iii) — Custom 1-bit AXIS gate IP**: insert a small gate IP whose
-  enable is driven by an extra `axi_gpio_0` output bit, set by firmware just
-  before MM2S is armed and cleared after IOC.  Most robust; deterministic
-  regardless of xfft pipeline timing.
-
-Once the gate (any option) is in place:
-
-- `byte_len` returns to `N*4` (no +1)
-- The driver's dummy read of `BRAM[0]` is removed
-- Output loop becomes `out[i] = BRAM[i]`
-- The transfer-integrity sentinel becomes unnecessary (can stay as a cheap
-  defensive check or be removed for clarity)
-- BRAM depth can return to 4096 words / 16 KB (RX may stay 32K-aligned)
-
-Insertion point is documented in `fpga/xem7310/ostomachion_bd.tcl` at the
-`xfft_0/m_axis_data ↔ axi_dma_0/S_AXIS_S2MM` connection ("Phase 3b — AXIS
-phantom gate"), including the three options enumerated above.  The choice
-between (i)/(ii)/(iii) is gated on Phase 2 ILA evidence (Q1):
-
-- **Outcome A** (TVALID=1 + TLAST=0 beat between aresetn rising edge and the
-  first MM2S beat) — gate confirmed necessary; insert and update driver.
-- **Outcome B** (no phantom; TLAST early-terminates at beat N) — restore
-  `byte_len = N*4` without inserting a gate; the integrity sentinel will
-  flag this case immediately as `-EIO` if the existing build still produces it.
-- **Outcome C** (other) — fix targeted to the observed waveform.
+For historical reference, three gate implementations were considered
+(software polling, `axis_register_slice` / Subset Converter, or a custom
+1-bit GPIO-controlled gate); none are now needed.
 
 ### Phase 3c — Stale-read confirmation (deferred)
 
@@ -390,21 +404,27 @@ investigate `XBUS_REGSTAGE_EN => true` in `fpga/xem7310/xem7310_top.vhd`
 and add an explicit `DMA_S2MM_DMACR` read-back as a memory barrier before
 BRAM reads.
 
-### Phase 2 — Settle the phantom hypothesis
+### Phase 2 — Settle the phantom hypothesis (resolved)
 
-The ILA infrastructure now covers the full set of nets needed for a single
-debug capture to settle Q1 (`fpga/xem7310/build.tcl` debug section):
+A passive `fft_beat_counter` VHDL observer (`fpga/xem7310/fft_beat_counter.vhd`)
+was tapped onto `xfft_0/m_axis_data_{tvalid,tready,tlast}` and routed via
+FrontPanel WireOut `0x22` (beats_in_last_frame, pre_first_tlast_beats) and
+`0x23` (tlast_count).  `scripts/uart_bridge.py` polls and decodes both
+WireOuts on every iteration, printing one of three outcomes:
+
+- **Outcome A** — first-frame TLAST at exactly N=4096 (PG109-correct, no phantom)
+- **Outcome B** — first-frame TLAST at N+1=4097 (phantom confirmed)
+- **Outcome C** — anything else (investigate further)
+
+Every observed transform produced Outcome A on hardware (May 27 2026 run):
 
 ```
-make fpga-synth FPGA_DIR=fpga/xem7310 -- -tclargs debug
-make fpga-program BIT_FILE=build/xem7310/ostomachion_xem7310_debug.bit
-# Open Vivado Hardware Manager → load build/xem7310/debug_probes.ltx
-# Trigger on rising edge of xfft_rst_and/Res
-# Capture xfft_0/m_axis_data_tvalid, m_axis_data_tlast for ~1024 cycles
+[BEATS] frames=N  first_frame=4096  last_frame=4096
+        = N (4096)  → Outcome A (PG109-correct, no phantom)
 ```
 
-The presence (or absence) of a TVALID=1 + TLAST=0 beat before the first
-MM2S transfer is the deciding signal for the Phase 3b decision tree above.
+The phantom hypothesis is **disproven**.  The off-by-one was the BRAM
+controller read-latency mismatch documented as Issue 7.
 
 ### Phase 4 — Validation status
 

@@ -174,7 +174,7 @@ architecture rtl of xem7310_top is
   end component;
 
   -- ── FrontPanel signals ─────────────────────────────────────────────────
-  constant FP_EP_COUNT : natural := 4;  -- WireOut×2 + PipeIn + PipeOut
+  constant FP_EP_COUNT : natural := 6;  -- WireOut×4 + PipeIn + PipeOut
 
   signal fp_clk       : std_logic;
   signal okHE         : std_logic_vector(112 downto 0);
@@ -197,8 +197,21 @@ architecture rtl of xem7310_top is
   --   [1] = fft_dbg_s_data_tready (xfft s_axis_data TREADY, 1 = xfft accepting)
   --   [2] = periph_rstn(0)        (active-high reset-released indicator)
   signal wo21_data              : std_logic_vector(31 downto 0);
-  signal fft_dbg_mm2s_tvalid   : std_logic;
-  signal fft_dbg_s_data_tready : std_logic;
+  signal fft_dbg_mm2s_tvalid    : std_logic;
+  signal fft_dbg_s_data_tready  : std_logic;
+
+  -- WireOut 0x22: xfft m_axis_data beat counter (instrumentation for Q1)
+  --   [15:0]  = pre_first_tlast_beats  (beats of FIRST frame after aresetn)
+  --   [31:16] = beats_in_last_frame    (beats of most recent frame)
+  -- tlast_count is exposed on WireOut 0x23.
+  signal wo22_data              : std_logic_vector(31 downto 0);
+  signal wo23_data              : std_logic_vector(31 downto 0);
+  signal fft_dbg_m_data_tvalid  : std_logic;
+  signal fft_dbg_m_data_tready  : std_logic;
+  signal fft_dbg_m_data_tlast   : std_logic;
+  signal fft_pre_first_beats    : std_logic_vector(15 downto 0);
+  signal fft_last_frame_beats   : std_logic_vector(15 downto 0);
+  signal fft_tlast_count        : std_logic_vector(7 downto 0);
 
   -- BTPipeIn 0x80: host → NEORV32 UART data (block-throttled)
   signal pi80_data    : std_logic_vector(31 downto 0);
@@ -307,7 +320,28 @@ begin
       s_axi_cpu_rvalid         => axi_rvalid,
       s_axi_cpu_rready         => axi_rready,
       fft_dbg_mm2s_tvalid      => fft_dbg_mm2s_tvalid,
-      fft_dbg_s_data_tready    => fft_dbg_s_data_tready
+      fft_dbg_s_data_tready    => fft_dbg_s_data_tready,
+      fft_dbg_m_data_tvalid    => fft_dbg_m_data_tvalid,
+      fft_dbg_m_data_tready    => fft_dbg_m_data_tready,
+      fft_dbg_m_data_tlast     => fft_dbg_m_data_tlast
+    );
+
+  -- ── FFT m_axis_data beat counter ─────────────────────────────────────────
+  -- Passive observer that counts xfft output beats (tvalid && tready) and
+  -- latches per-frame counts at tlast.  Exposes the first-frame-after-reset
+  -- beat count via WireOut 0x22 — the empirical answer to whether xfft
+  -- produces N or N+1 output beats for our 4096-pt natural-order
+  -- pipelined-streaming configuration.  See ACCEL_DEBUG.md "Q1".
+  beat_counter_i : entity work.fft_beat_counter
+    port map (
+      aclk                  => clk,
+      aresetn               => periph_rstn(0),
+      m_tvalid              => fft_dbg_m_data_tvalid,
+      m_tready              => fft_dbg_m_data_tready,
+      m_tlast               => fft_dbg_m_data_tlast,
+      pre_first_tlast_beats => fft_pre_first_beats,
+      beats_in_last_frame   => fft_last_frame_beats,
+      tlast_count           => fft_tlast_count
     );
 
   -- ── XBUS → AXI4 bridge (upstream NEORV32, BURST_EN=false for AXI4-Lite BD)
@@ -463,6 +497,31 @@ begin
       okEH      => okEHx(3*65+64 downto 3*65),
       ep_addr   => x"21",
       ep_datain => wo21_data
+    );
+
+  -- WireOut 0x22: xfft m_axis_data beat counts (instrumentation for Q1)
+  --   [15:0]  = pre_first_tlast_beats   (first frame after aresetn)
+  --   [31:16] = beats_in_last_frame     (most recent frame)
+  wo22_data <= fft_last_frame_beats & fft_pre_first_beats;
+
+  wo22_i : okWireOut
+    port map (
+      okHE      => okHE,
+      okEH      => okEHx(4*65+64 downto 4*65),
+      ep_addr   => x"22",
+      ep_datain => wo22_data
+    );
+
+  -- WireOut 0x23: TLAST event count (wraps at 256)
+  --   [7:0] = tlast_count
+  wo23_data <= (31 downto 8 => '0') & fft_tlast_count;
+
+  wo23_i : okWireOut
+    port map (
+      okHE      => okHE,
+      okEH      => okEHx(5*65+64 downto 5*65),
+      ep_addr   => x"23",
+      ep_datain => wo23_data
     );
 
   -- BTPipeIn 0x80: host → NEORV32 UART data (block-throttled, hardware flow control)

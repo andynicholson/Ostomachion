@@ -185,6 +185,16 @@ set_false_path -to [get_cells -hierarchical -filter {NAME =~ *uart_bridge_i/tx_f
 ## them on demand), so no timing closure is required on this CDC path.
 set_false_path -to [get_cells -hierarchical -filter {NAME =~ *wo21_i*}]
 
+## WireOut 0x22/0x23: xfft m_axis_data beat counter outputs in the sys_clk
+## domain sampled by fp_clk inside okWireOut.  The counter values only change
+## on aresetn or on a TLAST handshake (rare events relative to the okClk
+## sampling rate); firmware reads them between frames when they are stable.
+## False-path the source registers (beat_counter_i/*) AND the WireOut
+## samplers (wo22_i, wo23_i) — both sides of the CDC.
+set_false_path -from [get_cells -hierarchical -filter {NAME =~ *beat_counter_i/*_reg*}]
+set_false_path -to   [get_cells -hierarchical -filter {NAME =~ *wo22_i*}]
+set_false_path -to   [get_cells -hierarchical -filter {NAME =~ *wo23_i*}]
+
 ## ==========================================================================
 ## Bitstream / configuration
 ## XEM7310 ties CFGBVS_B to GND; config bank is 1.8 V (per Opal Kelly SDK).
