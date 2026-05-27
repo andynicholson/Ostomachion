@@ -1,0 +1,63 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: Apache-2.0
+
+menu "NEORV32 out-of-tree drivers"
+rsource "spi/Kconfig"
+rsource "i2c/Kconfig"
+rsource "wdt/Kconfig"
+rsource "accel/Kconfig"
+endmenu
+
+menu "Ostomachion platform"
+
+config OSTOMACHION_HW_BUILD_ID
+	string "Expected bitstream build ID string"
+	default ""
+	help
+	  Set this to the build ID string written to build/xem7310/build_id.txt
+	  by the Vivado build (format: <git-hash>_<YYYYMMDD_HHMMSS>).
+	  At boot the FFT accelerator driver logs this value alongside a reminder
+	  to verify it against the programmed bitstream.  An empty string (the
+	  default) disables the check — suitable for development.
+
+	  Example (in your prj.conf):
+	    CONFIG_OSTOMACHION_HW_BUILD_ID="abc1234e_20260318_120000"
+
+endmenu
+
+menu "Ostomachion test configuration"
+
+config TEST_I2C_SLAVE_ADDR
+	int "I2C slave address for hardware tests (0 = no slave / skip)"
+	default 0
+	range 0 127
+	help
+	  7-bit I2C slave address used by the optional slave-dependent tests
+	  in tests/test_i2c.cpp.  Set to 0 (the default) to skip those tests
+	  gracefully via zassume_true.
+
+	  In simulation set to 80 (0x50) to exercise the GHDL I2C slave model.
+	  On hardware, set to the address of any attached I2C device.
+
+config TEST_I2C_BUS_SCAN
+	bool "Run full I2C bus scan test (0x08–0x77)"
+	default n
+	help
+	  Enables test_bus_scan which probes all 111 valid 7-bit I2C addresses.
+	  This test takes ~50 ms of simulated time at 100 kHz I2C.  Enable for
+	  hardware validation (prj_hw_test.conf); leave disabled for simulation
+	  to keep the GHDL test run within its 400 ms simulation window.
+
+config TEST_SPI_STRESS_COUNT
+	int "Number of back-to-back SPI transfers in the stress test"
+	default 16
+	range 1 256
+	help
+	  Controls how many consecutive single-byte loopback transfers
+	  test_stress_loopback executes.  Each transfer takes ~1 ms in GHDL
+	  simulation (Zephyr polling overhead at 100 MHz), so the default of 16
+	  fits within the 400 ms simulation window.  Set to 64 (or higher) in
+	  prj_hw_test.conf for more thorough interrupt-driver state testing on
+	  real hardware.
+
+endmenu

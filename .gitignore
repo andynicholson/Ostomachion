@@ -1,0 +1,59 @@
+# GHDL artifacts
+*.o
+*.cf
+*.ghw
+neorv32_tb
+UART0.log
+neorv32_tb.UART0_rx.out
+neorv32.uart0_sim_mode.out
+
+# Generated IMEM images
+test_imem_image.vhd
+zephyr_imem_image.vhd
+
+# Zephyr build output
+build_zephyr/
+build_zephyr_fpga/
+build_zephyr_hw_test/
+build_zephyr_accel_test/
+build_zephyr_shell/
+
+# Miscellaneous build artifacts
+build_vivado.log
+nohup.out
+clockInfo.txt
+tight_setup_hold_pins.txt
+.Xil/
+
+# Vivado build output
+build/
+vivado*
+
+#clangd
+.cache
+
+# SW build artifacts
+sw/test_gpio_uart/*.elf
+sw/test_gpio_uart/*.bin
+sw/test_gpio_uart/*.hex
+sw/test_gpio_uart/*.vhd
+sw/test_gpio_uart/*.lst
+sw/test_gpio_uart/*.o
+sw/test_gpio_uart/*.d
+sw/test_gpio_uart/*.out
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+
+# IDE
+.vscode/
+.cursor/
+
+# Local scratch (file or directory at repo root)
+/TMP
+
+# OS
+.DS_Store

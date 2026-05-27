@@ -1,0 +1,60 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+#include <zephyr/dt-bindings/dt-util.h>
+
+/*
+ * app_accel.overlay — DTS overlay for the AXI FFT accelerator pipeline
+ * Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+ *
+ * Applied in addition to app.overlay and app_fpga.overlay when building
+ * the accelerator firmware (prj_accel.conf or prj_shell.conf).
+ *
+ * Address map (XBUS region 0x40000000–0x4FFFFFFF):
+ *   0x40000000  AXI DMA control registers    64 B   (AXI4-Lite)
+ *   0x40010000  AXI INTC                    128 B   (AXI4-Lite)
+ *   0x40020000  AXI GPIO (xfft reset)       128 B   (AXI4-Lite)
+ *   0x41000000  TX BRAM                      32 KB  (AXI4-Full)
+ *   0x41008000  RX BRAM                      32 KB  (AXI4-Full)
+ *
+ * The FFT core is the Xilinx xfft IP instantiated in the block design.
+ * It has no AXI4-Lite slave; it is driven purely via AXI4-Stream by the
+ * AXI DMA and configured at synthesis time (forward, scale all stages).
+ *
+ * The DMA mm2s_introut and s2mm_introut are aggregated via xlconcat into
+ * a single mext_irq_i line to NEORV32.  Zephyr maps this to IRQ 0 in the
+ * NEORV32 external-interrupt domain.
+ */
+
+/ {
+	soc {
+		fft_accel: fft-accel@40000000 {
+			compatible = "ostomachion,fft-accel";
+			/* reg-names:  dma         tx_bram     rx_bram     intc        gpio        */
+			reg = <0x40000000 0x40>,
+			      <0x41000000 0x8000>,
+			      <0x41008000 0x8000>,
+			      <0x40010000 0x80>,
+			      <0x40020000 0x80>;
+			reg-names = "dma", "tx_bram", "rx_bram", "intc", "gpio";
+			/* dma-max-bytes is the runtime guard on RX (S2MM)
+			 * transfer length.  A 4096-point transform uses
+			 * N × 4 = 16384 bytes (ACCEL_ARCH.md §4.4); the
+			 * value below is a small upper-bound ceiling.  Both
+			 * BRAMs are 8192 words (32 KB) deep; the upper
+			 * words are unused. */
+			dma-max-bytes = <16388>;
+			/* AXI INTC IRQ output → NEORV32 MEI line (INTC IRQ 11) */
+			interrupts = <11>;
+			interrupt-parent = <&intc>;
+			status = "okay";
+		};
+	};
+};
+
+/* No XBUS DTS node required: the AXI peripherals are directly
+ * memory-mapped in the NEORV32 address space and accessed via MMIO. */
+
+/* The FFT driver + ZTEST suite exceeds 64 KB; increase IMEM to 128 KB.
+ * The NEORV32 IMEM in the block design must be configured to match. */
+&imem {
+	reg = <0x0 DT_SIZE_K(128)>;
+};

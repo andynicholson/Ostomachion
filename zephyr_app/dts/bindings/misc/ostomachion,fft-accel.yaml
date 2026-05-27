@@ -1,0 +1,72 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: Apache-2.0
+#
+# DTS binding for the Ostomachion FFT accelerator pipeline.
+# The FFT core is the Xilinx xfft IP; it has no AXI4-Lite slave interface.
+# All data movement is handled by the AXI DMA.  Interrupt source
+# identification is provided by the AXI INTC (Xilinx PG099).
+# An AXI GPIO (Xilinx PG144) drives the xfft aresetn signal so the driver
+# can flush the pipeline between transforms.
+#
+# Example DTS node:
+#
+#   fft_accel: fft-accel@40000000 {
+#       compatible = "ostomachion,fft-accel";
+#       reg = <0x40000000 0x40>,     /* AXI DMA control registers  (64 B)  */
+#             <0x41000000 0x8000>,   /* TX BRAM                   (32 KB)  */
+#             <0x41008000 0x8000>,   /* RX BRAM                   (32 KB)  */
+#             <0x40010000 0x80>,     /* AXI INTC (128 B AXI aperture)      */
+#             <0x40020000 0x80>;     /* AXI GPIO (xfft reset, 128 B)       */
+#       reg-names = "dma", "tx_bram", "rx_bram", "intc", "gpio";
+#       dma-max-bytes = <16388>;
+#       interrupts = <11>;          /* RISC-V MEI line (IRQ 11) */
+#       status = "okay";
+#   };
+
+description: Ostomachion AXI DMA + Xilinx xfft + AXI INTC hardware accelerator pipeline
+
+compatible: "ostomachion,fft-accel"
+
+include: base.yaml
+
+properties:
+  reg:
+    required: true
+
+  reg-names:
+    required: true
+    description: |
+      Must be "dma", "tx_bram", "rx_bram", "intc", "gpio" in that order.
+        dma     — AXI DMA control registers (64 B at 0x40000000)
+        tx_bram — TX BRAM input buffer (32 KB at 0x41000000)
+        rx_bram — RX BRAM output buffer (32 KB at 0x41008000)
+        intc    — AXI INTC (128 B decode at 0x40010000; PG099 regs in low 32 B)
+        gpio    — AXI GPIO (128 B at 0x40020000; bit 0 = xfft aresetn)
+
+  dma-max-bytes:
+    type: int
+    required: true
+    description: |
+      Maximum DMA transfer length in bytes for one RX (S2MM) transfer.
+      A 4096-point transform uses N * 4 = 16384 bytes (ACCEL_ARCH.md §4.4);
+      this property is a runtime guard against an oversized transform —
+      the driver rejects any transform whose required byte count exceeds
+      this value.
+
+  interrupts:
+    required: true
+    description: |
+      Machine External Interrupt (MEI), IRQ 11 on the riscv,cpu-intc (&intc).
+
+      Interrupt topology (AXI INTC, scalable multi-accelerator):
+        INTC channel 0 = AXI DMA mm2s_introut  (MM2S completion / error)
+        INTC channel 1 = AXI DMA s2mm_introut  (S2MM completion / error)
+        INTC channel 2 = xfft m_axis_status_tvalid  (frame-complete pulse;
+                         not overflow-only — see ACCEL_ARCH.md §2.2)
+      The AXI INTC (PG099) OR-reduces pending channels into one MEI wire.
+      The driver ISR reads INTC ISR (offset 0x00) for definitive channel
+      identification, then acknowledges via INTC IAR (offset 0x0C).
+
+      Expansion: add further accelerators by wiring their IRQs to INTC
+      channels 3, 4, … and widening C_NUM_INTR_INPUTS in the block design.
+      No firmware or DTS changes are required for the existing channels.

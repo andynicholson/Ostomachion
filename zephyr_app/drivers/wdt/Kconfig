@@ -1,0 +1,21 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: Apache-2.0
+
+config WDT_NEORV32
+	bool "NEORV32 watchdog timer driver"
+	default y
+	depends on WATCHDOG
+	depends on DT_HAS_NEORV32_WDT_ENABLED
+	help
+	  Enable the out-of-tree Zephyr driver for the NEORV32 WDT peripheral.
+	  Requires IO_WDT_EN=true in the NEORV32 top-level generic map (set in
+	  fpga/xem7310/xem7310_top.vhd for the production FPGA target).
+
+	  The driver implements the Zephyr watchdog API (wdt_install_timeout,
+	  wdt_setup, wdt_feed, wdt_disable).  Only reset mode is supported;
+	  callbacks are not available because the NEORV32 WDT triggers a
+	  hardware reset with no pre-reset IRQ.
+
+	  STRICT mode is always enabled: an incorrect feed password or write
+	  to a locked CTRL register causes an immediate hardware reset, ensuring
+	  the watchdog cannot be silently disabled by a runaway task.

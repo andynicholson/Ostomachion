@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Ostomachion logo - a fourteen-piece dissection of a square, inspired by
+  Archimedes' Stomachion (the oldest known geometric puzzle, c. 250 BCE).
+
+  The four sub-quadrants are dissected differently (2 / 4 / 4 / 4 pieces)
+  to evoke the asymmetric "scraped again" character of the historical
+  palimpsest puzzle.  All vertices lie on a 12x12 lattice (scaled 10x to
+  120 user units), so every piece edge is exact rational geometry.
+
+  Coordinate convention: SVG y-down, origin top-left.
+  Lattice vertices used: corners A(0,0) B(120,0) C(120,120) D(0,120);
+  edge midpoints E(60,0) F(120,60) G(60,120) H(0,60); centre O(60,60);
+  hub points P(40,80), Q(80,40), U(80,80).
+
+  Palette: muted Mediterranean tones - sun-bleached blues and teals
+  against terracotta, ochre, wine and sienna - bridging classical
+  antiquity and modern engineering.
+-->
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 128 128"
+     width="256" height="256"
+     role="img"
+     aria-label="Ostomachion logo: a fourteen-piece geometric dissection of a square">
+  <title>Ostomachion</title>
+  <desc>Fourteen polygonal pieces tessellating a square, in the manner of Archimedes' Stomachion dissection puzzle.</desc>
+
+  <g transform="translate(4,4)"
+     stroke="#0F1729"
+     stroke-width="0.7"
+     stroke-linejoin="miter"
+     stroke-linecap="square">
+
+    <!-- Top-left sub-quadrant: 2 pieces (single diagonal split) -->
+    <polygon points="0,0  60,0  0,60"        fill="#1B2A4E"/>
+    <polygon points="60,0 60,60 0,60"        fill="#155263"/>
+
+    <!-- Bottom-left sub-quadrant: 4 pieces around hub P(40,80) -->
+    <polygon points="0,60  40,80  0,120"     fill="#9E3D3D"/>
+    <polygon points="0,60  60,60  40,80"     fill="#4A6FA5"/>
+    <polygon points="40,80 0,120  60,120"    fill="#D7A86E"/>
+    <polygon points="40,80 60,120 60,60"     fill="#2E4374"/>
+
+    <!-- Top-right sub-quadrant: 4 pieces around hub Q(80,40) -->
+    <polygon points="60,0  120,0   80,40"    fill="#7E2D40"/>
+    <polygon points="60,0  80,40   60,60"    fill="#4B7F8A"/>
+    <polygon points="80,40 120,0   120,60"   fill="#C97B63"/>
+    <polygon points="80,40 120,60  60,60"    fill="#2F5D62"/>
+
+    <!-- Bottom-right sub-quadrant: 4 pieces around hub U(80,80) -->
+    <polygon points="60,60  120,60  80,80"   fill="#E76F51"/>
+    <polygon points="80,80  120,60  120,120" fill="#6B97B5"/>
+    <polygon points="60,60  80,80   60,120"  fill="#F4A261"/>
+    <polygon points="80,80  120,120 60,120"  fill="#B5651D"/>
+
+  </g>
+
+  <!-- Outer frame -->
+  <rect x="4" y="4" width="120" height="120"
+        fill="none"
+        stroke="#0F1729"
+        stroke-width="1.4"/>
+</svg>

@@ -1,0 +1,20 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: Apache-2.0
+
+description: NEORV32 SPI controller
+
+compatible: "neorv32,spi"
+
+include: [spi-controller.yaml, base.yaml]
+
+properties:
+  reg:
+    required: true
+
+  interrupts:
+    required: false
+
+  syscon:
+    type: phandle
+    required: true
+    description: phandle to NEORV32 SYSINFO syscon node.

@@ -1,0 +1,111 @@
+# testcase.yaml — Twister test definitions for the Ostomachion test suite
+# Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+#
+# Usage:
+#   west twister -T zephyr_app/tests --integration
+#
+# The neorv32 simulator platform is used for build verification and basic
+# configuration coverage.  Hardware-in-the-loop tests require a physical
+# XEM7310-A200 board connected to a self-hosted runner.
+
+tests:
+  # ── SPI / I2C / GPIO baseline (builds for neorv32 sim target) ───────────
+  ostomachion.peripherals.baseline:
+    platform_allow: neorv32/neorv32/minimalboot
+    build_only: false
+    tags: [baseline, spi, i2c, gpio]
+    extra_configs:
+      - CONFIG_ZTEST=y
+      - CONFIG_ZTEST_NEW_API=y
+    harness: ztest
+    harness_config:
+      fixture: neorv32_sim
+
+  # ── FFT accelerator suite (compile-only on sim; runs on HW with bitstream)
+  ostomachion.fft.compile:
+    platform_allow: neorv32/neorv32/minimalboot
+    build_only: true
+    tags: [fft, accelerator]
+    extra_configs:
+      - CONFIG_FFT_ACCEL=y
+      - CONFIG_ZTEST=y
+      - CONFIG_ZTEST_NEW_API=y
+    extra_args:
+      - OVERLAY_CONFIG=app_accel.overlay
+
+  # ── Shell / interactive firmware (compile-only on sim) ───────────────────
+  ostomachion.shell.compile:
+    platform_allow: neorv32/neorv32/minimalboot
+    build_only: true
+    tags: [shell]
+    extra_configs:
+      - CONFIG_SHELL=y
+      - CONFIG_FFT_ACCEL=y
+    extra_args:
+      - OVERLAY_CONFIG=app_accel.overlay
+
+  # ── WDT driver build verification (compile + sim run on neorv32 sim) ─────
+  # WDT DTS node is only in app_fpga.overlay; tests skip gracefully when the
+  # node is absent, so this configuration still runs all other test suites.
+  ostomachion.wdt.compile:
+    platform_allow: neorv32/neorv32/minimalboot
+    build_only: false
+    tags: [wdt]
+    extra_configs:
+      - CONFIG_ZTEST=y
+      - CONFIG_ZTEST_NEW_API=y
+      - CONFIG_WATCHDOG=y
+    harness: ztest
+    harness_config:
+      fixture: neorv32_sim
+
+  # ── Hardware-in-the-Loop (HIL) — requires XEM7310-A200 self-hosted runner ──
+  #
+  # These configurations run the full test suite on a physical XEM7310-A200
+  # board.  Prerequisites:
+  #   1. A self-hosted GitHub Actions runner with label "xem7310" registered
+  #      on the repository (see docs/acceptance_test_procedure.md §Runner).
+  #   2. The Ostomachion bitstream must be programmed via 'make fpga-flash'
+  #      before the runner starts the HIL tests.
+  #   3. Zephyr firmware is uploaded automatically via the NEORV32 bootloader
+  #      (BOOT_MODE_SELECT=0) at 19200 baud on the external UART adapter.
+  #
+  # These tests are tagged [hw] so they can be excluded from CI-only runs:
+  #   west twister -T zephyr_app/tests --exclude-tag hw
+  #
+  ostomachion.hw.peripherals:
+    platform_allow: xem7310
+    build_only: false
+    tags: [hw, spi, i2c, gpio, wdt]
+    extra_configs:
+      - CONFIG_ZTEST=y
+      - CONFIG_ZTEST_NEW_API=y
+      - CONFIG_WATCHDOG=y
+      - CONFIG_WDT_NEORV32=y
+      - CONFIG_SPI_NEORV32_INTERRUPT=y
+      - CONFIG_I2C_NEORV32_INTERRUPT=y
+    extra_args:
+      - DTC_OVERLAY_FILE=app.overlay;app_fpga.overlay
+      - OVERLAY_CONFIG=prj.conf;prj_fpga.conf;prj_hw_test.conf
+    harness: ztest
+    harness_config:
+      fixture: xem7310_hw
+
+  ostomachion.hw.fft:
+    platform_allow: xem7310
+    build_only: false
+    tags: [hw, fft, accelerator]
+    extra_configs:
+      - CONFIG_ZTEST=y
+      - CONFIG_ZTEST_NEW_API=y
+      - CONFIG_FFT_ACCEL=y
+      - CONFIG_WATCHDOG=y
+      - CONFIG_WDT_NEORV32=y
+      - CONFIG_SPI_NEORV32_INTERRUPT=y
+      - CONFIG_I2C_NEORV32_INTERRUPT=y
+    extra_args:
+      - DTC_OVERLAY_FILE=app.overlay;app_fpga.overlay;app_accel.overlay
+      - OVERLAY_CONFIG=prj.conf;prj_fpga.conf;prj_accel.conf;prj_hw_test.conf
+    harness: ztest
+    harness_config:
+      fixture: xem7310_hw_fft

@@ -1,0 +1,37 @@
+#include <zephyr/dt-bindings/dt-util.h>
+
+/* Ostomachion — FPGA (XEM7310-A200) DTS overlay
+ *
+ * Applied on top of app.overlay when building the FPGA firmware target.
+ * The SPI/I2C MMIO addresses and interrupt numbers are identical between
+ * simulation and FPGA; only the UART baud rate and hardware-specific
+ * peripherals (WDT) differ.
+ */
+
+/* IMEM is 128 KiB on the production XEM7310 top (see fpga/xem7310/xem7310_top.vhd).
+ * Keep app.overlay at 64 KiB for simulation; FPGA needs the full IMEM for
+ * ZTEST + IRQ drivers + WDT (linker ROM must match hardware).
+ */
+&imem {
+	reg = <0x0 DT_SIZE_K(128)>;
+};
+
+&uart0 {
+	current-speed = <115200>;
+};
+
+/* ── Watchdog Timer ─────────────────────────────────────────────────────────
+ * NEORV32 WDT is enabled via IO_WDT_EN=true in xem7310_top.vhd.
+ * The Zephyr application feeds it via wdt_feed() in the LED blink thread.
+ * clock-frequency must match CLOCK_FREQUENCY in xem7310_top.vhd (100 MHz).
+ */
+/ {
+	soc {
+		wdt0: watchdog@fffb0000 {
+			compatible = "neorv32,wdt";
+			reg = <0xfffb0000 0x8>;
+			clock-frequency = <100000000>;
+			status = "okay";
+		};
+	};
+};

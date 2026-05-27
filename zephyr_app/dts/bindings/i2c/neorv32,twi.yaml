@@ -1,0 +1,22 @@
+# Copyright (c) 2026
+# SPDX-License-Identifier: Apache-2.0
+
+description: NEORV32 TWI (I2C-compatible) master controller
+
+compatible: "neorv32,twi"
+
+include:
+  - i2c-controller.yaml
+  - base.yaml
+
+properties:
+  reg:
+    required: true
+
+  interrupts:
+    required: false
+
+  syscon:
+    type: phandle
+    required: true
+    description: phandle to NEORV32 SYSINFO syscon node.
