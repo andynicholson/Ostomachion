@@ -174,7 +174,12 @@ architecture rtl of xem7310_top is
   end component;
 
   -- ── FrontPanel signals ─────────────────────────────────────────────────
-  constant FP_EP_COUNT : natural := 6;  -- WireOut×4 + PipeIn + PipeOut
+  --   UART path : WireOut 0x20, BTPipeIn 0x80, BTPipeOut 0xA0,
+  --               WireOut 0x21, WireOut 0x22, WireOut 0x23        (6 EPs)
+  --   FFT pipe  : WireOut 0x24, WireOut 0x25, WireOut 0x26,
+  --               BTPipeIn 0x81, BTPipeOut 0xA1                   (5 EPs)
+  -- WireIns don't produce okEH outputs and are not counted in FP_EP_COUNT.
+  constant FP_EP_COUNT : natural := 11;
 
   signal fp_clk       : std_logic;
   signal okHE         : std_logic_vector(112 downto 0);
@@ -226,6 +231,41 @@ architecture rtl of xem7310_top is
   -- UART bridge outputs (system clock domain)
   signal bridge_uart_rx : std_logic;
   signal neorv32_uart_rxd : std_logic;
+
+  -- ── FFT pipe bridge signals (FrontPanel host ↔ NEORV32 bulk samples) ───
+  -- WireOut 0x24: { fifo_out_count[15:0], fifo_in_count[15:0] }  (fp_clk)
+  signal wo24_data             : std_logic_vector(31 downto 0);
+  signal fft_pipe_in_count_fp  : std_logic_vector(15 downto 0);
+  signal fft_pipe_out_count_fp : std_logic_vector(15 downto 0);
+
+  -- WireOut 0x25: HW FFT cycle count published by NEORV32 (sys→fp CDC)
+  signal wo25_data             : std_logic_vector(31 downto 0);
+  signal fft_hw_cycles_fp      : std_logic_vector(31 downto 0);
+
+  -- WireOut 0x26: Free-running frame counter (sys→fp CDC)
+  signal wo26_data             : std_logic_vector(31 downto 0);
+  signal fft_frame_count_fp    : std_logic_vector(31 downto 0);
+
+  -- BTPipeIn 0x81 / BTPipeOut 0xA1 — bulk FFT-sample transport
+  signal pi81_data   : std_logic_vector(31 downto 0);
+  signal pi81_write  : std_logic;
+  signal pi81_ready  : std_logic;
+
+  signal poA1_data   : std_logic_vector(31 downto 0);
+  signal poA1_read   : std_logic;
+  signal poA1_ready  : std_logic;
+
+  -- ── XBUS demux (NEORV32 → AXI bridge | NEORV32 → FFT pipe bridge) ──────
+  -- Region 0x9000_0000 routes to the FFT pipe bridge slave; everything else
+  -- goes to the existing xbus2axi4_bridge that fronts the BD.
+  signal sel_fifo_region  : std_ulogic;
+  signal xbus_stb_bridge  : std_ulogic;
+  signal xbus_stb_fifo    : std_ulogic;
+  signal xbus_rdat_bridge : std_ulogic_vector(31 downto 0);
+  signal xbus_ack_bridge  : std_ulogic;
+  signal xbus_err_bridge  : std_ulogic;
+  signal xbus_rdat_fifo   : std_ulogic_vector(31 downto 0);
+  signal xbus_ack_fifo    : std_ulogic;
 
   -- ── AXI4-Lite bus (bridge master ↔ BD slave, all std_logic) ──────────────
   signal axi_awaddr  : std_logic_vector(31 downto 0);
@@ -344,6 +384,20 @@ begin
       tlast_count           => fft_tlast_count
     );
 
+  -- ── XBUS demux ──────────────────────────────────────────────────────────
+  -- NEORV32 XBUS is split between two slaves by upper-nibble address decode:
+  --   adr[31:28] = 0x9  →  fp_fft_pipe_bridge (host pipe FIFOs + status regs)
+  --   anything else    →  xbus2axi4_bridge   (BD: AXI DMA, BRAM, INTC, …)
+  -- Wishbone-classic holds adr/stb stable until ack, so a combinational
+  -- response mux on the current address bit is safe.
+  sel_fifo_region <= '1' when xbus_adr_u(31 downto 28) = "1001" else '0';
+  xbus_stb_bridge <= xbus_stb_u and not sel_fifo_region;
+  xbus_stb_fifo   <= xbus_stb_u and sel_fifo_region;
+
+  xbus_rdat_u <= xbus_rdat_fifo when sel_fifo_region = '1' else xbus_rdat_bridge;
+  xbus_ack_u  <= xbus_ack_fifo  when sel_fifo_region = '1' else xbus_ack_bridge;
+  xbus_err_u  <= '0'            when sel_fifo_region = '1' else xbus_err_bridge;
+
   -- ── XBUS → AXI4 bridge (upstream NEORV32, BURST_EN=false for AXI4-Lite BD)
   bridge_i : entity work.xbus2axi4_bridge
     generic map (
@@ -359,10 +413,10 @@ begin
       xbus_tag_i    => xbus_tag_u,
       xbus_we_i     => xbus_we_u,
       xbus_sel_i    => xbus_sel_u,
-      xbus_stb_i    => xbus_stb_u,
-      xbus_dat_o    => xbus_rdat_u,
-      xbus_ack_o    => xbus_ack_u,
-      xbus_err_o    => xbus_err_u,
+      xbus_stb_i    => xbus_stb_bridge,
+      xbus_dat_o    => xbus_rdat_bridge,
+      xbus_ack_o    => xbus_ack_bridge,
+      xbus_err_o    => xbus_err_bridge,
       m_axi_awaddr  => axi_awaddr,
       m_axi_awlen   => open,
       m_axi_awsize  => open,
@@ -572,6 +626,92 @@ begin
       tx_ready  => pi80_ready,
       rx_ready  => poA0_ready,
       baud_div  => fp_baud_div
+    );
+
+  -- ── FFT pipe bridge (bulk-sample transport, CPU stays in the loop) ─────
+  -- WireOut 0x24: { fifo_out_count[15:0], fifo_in_count[15:0] }
+  wo24_data <= fft_pipe_out_count_fp & fft_pipe_in_count_fp;
+
+  wo24_i : okWireOut
+    port map (
+      okHE      => okHE,
+      okEH      => okEHx(6*65+64 downto 6*65),
+      ep_addr   => x"24",
+      ep_datain => wo24_data
+    );
+
+  -- WireOut 0x25: HW FFT cycle count (CDC from sys_clk, last frame)
+  wo25_data <= fft_hw_cycles_fp;
+
+  wo25_i : okWireOut
+    port map (
+      okHE      => okHE,
+      okEH      => okEHx(7*65+64 downto 7*65),
+      ep_addr   => x"25",
+      ep_datain => wo25_data
+    );
+
+  -- WireOut 0x26: Frame counter (free-running, bumped per published frame)
+  wo26_data <= fft_frame_count_fp;
+
+  wo26_i : okWireOut
+    port map (
+      okHE      => okHE,
+      okEH      => okEHx(8*65+64 downto 8*65),
+      ep_addr   => x"26",
+      ep_datain => wo26_data
+    );
+
+  -- BTPipeIn 0x81: host → FFT input samples (4096 × 32-bit per frame)
+  pi81_i : okBTPipeIn
+    port map (
+      okHE           => okHE,
+      okEH           => okEHx(9*65+64 downto 9*65),
+      ep_addr        => x"81",
+      ep_write       => pi81_write,
+      ep_blockstrobe => open,
+      ep_dataout     => pi81_data,
+      ep_ready       => pi81_ready
+    );
+
+  -- BTPipeOut 0xA1: FFT output samples → host (4096 × 32-bit per frame)
+  poA1_i : okBTPipeOut
+    port map (
+      okHE           => okHE,
+      okEH           => okEHx(10*65+64 downto 10*65),
+      ep_addr        => x"A1",
+      ep_read        => poA1_read,
+      ep_blockstrobe => open,
+      ep_datain      => poA1_data,
+      ep_ready       => poA1_ready
+    );
+
+  fft_pipe_bridge_i : entity work.fp_fft_pipe_bridge
+    port map (
+      sys_clk          => clk,
+      sys_rstn         => periph_rstn(0),
+
+      xbus_addr        => xbus_adr_u(3 downto 0),
+      xbus_stb         => xbus_stb_fifo,
+      xbus_we          => xbus_we_u,
+      xbus_wdat        => xbus_wdat_u,
+      xbus_rdat        => xbus_rdat_fifo,
+      xbus_ack         => xbus_ack_fifo,
+
+      fp_clk           => fp_clk,
+
+      pi_data          => pi81_data,
+      pi_wr            => pi81_write,
+      pi_ready         => pi81_ready,
+
+      po_data          => poA1_data,
+      po_rd            => poA1_read,
+      po_ready         => poA1_ready,
+
+      fifo_in_count_o  => fft_pipe_in_count_fp,
+      fifo_out_count_o => fft_pipe_out_count_fp,
+      hw_cycles_o      => fft_hw_cycles_fp,
+      frame_count_o    => fft_frame_count_fp
     );
 
 end architecture rtl;

@@ -196,6 +196,35 @@ set_false_path -to   [get_cells -hierarchical -filter {NAME =~ *wo22_i*}]
 set_false_path -to   [get_cells -hierarchical -filter {NAME =~ *wo23_i*}]
 
 ## ==========================================================================
+## FFT pipe bridge — clock domain crossings
+##
+## fft_pipe_bridge_i has two xpm_fifo_async instances and two xpm_cdc_array_single
+## instances spanning sys_clk (~100 MHz) ↔ fp_clk (okClk, ~100.8 MHz).  The
+## XPM macros implement their own synchronizers internally; we only need to
+## tell Vivado not to time the inter-clock paths, exactly like the UART
+## bridge above.
+##
+##   fifo_in    : wr_clk = fp_clk, rd_clk = sys_clk
+##   fifo_out   : wr_clk = sys_clk, rd_clk = fp_clk
+##   cdc_cycles : sys_clk → fp_clk (quasi-static, one update per frame)
+##   cdc_frame  : sys_clk → fp_clk (counter, monotonic across frames)
+##
+## Both async FIFOs take `rst <= not sys_rstn` (sys_clk), so the destination
+## flops on the wr_clk-side of fifo_in are in fp_clk and need a false-path,
+## same idiom as uart_bridge_i/tx_fifo_i above.
+## ==========================================================================
+set_false_path -to [get_cells -hierarchical -filter {NAME =~ *fft_pipe_bridge_i/fifo_in_i*xpm_fifo_rst_inst*}]
+set_false_path -to [get_cells -hierarchical -filter {NAME =~ *fft_pipe_bridge_i/fifo_in_i*prog_full_i*}]
+set_false_path -to [get_cells -hierarchical -filter {NAME =~ *fft_pipe_bridge_i/fifo_out_i*xpm_fifo_rst_inst*}]
+set_false_path -to [get_cells -hierarchical -filter {NAME =~ *fft_pipe_bridge_i/fifo_out_i*prog_full_i*}]
+
+## WireOut 0x24 (FIFO counts) — both halves are already in fp_clk domain;
+## no extra CDC constraint needed.  WireOuts 0x25 / 0x26 (HW cycles + frame
+## counter) are sourced from xpm_cdc_array_single outputs, which are already
+## in fp_clk; the okWireOut sampler is therefore in the same clock domain
+## as its data.  No additional false-path required.
+
+## ==========================================================================
 ## Bitstream / configuration
 ## XEM7310 ties CFGBVS_B to GND; config bank is 1.8 V (per Opal Kelly SDK).
 ## ==========================================================================
