@@ -1,5 +1,5 @@
 ## ostomachion_bd.tcl  (XEM7310-A200 variant)
-## Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+## Copyright (c) 2026  SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
 ##
 ## Vivado IP Integrator block design creation script.
 ## Sourced from build.tcl after all RTL sources have been added to sources_1.

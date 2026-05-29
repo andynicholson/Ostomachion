@@ -1,6 +1,6 @@
 -- Ostomachion — Opal Kelly XEM7310-A200 board-level top
 -- Copyright (c) 2026 A P Nicholson , intothemist@gmail.com
--- SPDX-License-Identifier: Apache-2.0
+-- SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
 --
 -- Architecture:
 --   xem7310_top (this file)

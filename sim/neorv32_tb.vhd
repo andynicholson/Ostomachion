@@ -1,6 +1,6 @@
 -- Ostomachion — NEORV32 GHDL testbench
 -- Copyright (c) 2026 A P Nicholson , intothemist@gmail.com
--- SPDX-License-Identifier: Apache-2.0
+-- SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
 
 library ieee;
 use ieee.std_logic_1164.all;

@@ -1,9 +1,9 @@
-/* SPDX-License-Identifier: Apache-2.0 */
+/* SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0 */
 #include <zephyr/dt-bindings/dt-util.h>
 
 /*
  * app_accel.overlay — DTS overlay for the AXI FFT accelerator pipeline
- * Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+ * Copyright (c) 2026  SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
  *
  * Applied in addition to app.overlay and app_fpga.overlay when building
  * the accelerator firmware (prj_accel.conf or prj_shell.conf).

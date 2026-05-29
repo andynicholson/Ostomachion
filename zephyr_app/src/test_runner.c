@@ -1,6 +1,6 @@
 /*
  * test_runner.c — Zephyr shell "test" command
- * Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+ * Copyright (c) 2026  SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
  *
  * Interactive test runner for the development / shell firmware image
  * (prj_shell.conf).  Tests are standalone functions — no ZTEST macros —

@@ -1,6 +1,6 @@
 /*
  * wdt_neorv32.c — Zephyr watchdog driver for the NEORV32 WDT peripheral
- * Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+ * Copyright (c) 2026  SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
  *
  * Device tree compatible: "neorv32,wdt"
  *

@@ -1,5 +1,5 @@
 // Copyright (c) 2026
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
 //
 // ostomachion::hal::SpiDevice — type-safe C++20 wrapper around the Zephyr SPI
 // driver API.  Uses std::span<std::byte> instead of void* + size_t pairs to

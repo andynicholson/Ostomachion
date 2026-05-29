@@ -24,11 +24,12 @@ existing accelerator driver, HAL, and DMA contract from
 
 ## Prerequisites
 
-The bitstream **must include** the new `fp_fft_pipe_bridge` module (this
-branch).  Bitstreams from `master` do not respond to `BTPipe 0x81 / 0xA1`
-or `WireOuts 0x24..0x26`.
+The bitstream **must include** `fp_fft_pipe_bridge` in
+`fpga/xem7310/xem7310_top.vhd` (merged on `master`).  Older bitstreams
+built before that integration do not respond to `BTPipe 0x81 / 0xA1` or
+`WireOuts 0x24..0x26`.
 
-1. **Build & program the new bitstream** (one-time per branch HEAD):
+1. **Build & program the bitstream** (one-time after clone, or when FPGA RTL changes):
 
    ```bash
    source scripts/init_dev_env.sh
@@ -78,7 +79,7 @@ The script pushes DC, single-bin cosines, and a sine + noise frame
 through the bridge, checks the HW peak bins against `np.fft` expectations,
 and prints HW cycles per frame.  Exit code is 0 on success.
 
-Typical good run on the new bitstream + `demo-hw` firmware:
+Typical good run with a current `master` bitstream and `demo-hw` firmware:
 
 ```
 Device : Opal Kelly XEM7310 sn=2537001HTD fw=1.60

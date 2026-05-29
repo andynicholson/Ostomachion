@@ -1,5 +1,5 @@
 ## Ostomachion — SPI flash programming script (XEM7310-A200)
-## Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+## Copyright (c) 2026  SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
 ##
 ## Programs the XEM7310-A200 on-board 16 MiB FPGA SPI configuration flash
 ## with the Ostomachion bitstream MCS image.

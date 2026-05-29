@@ -1,5 +1,5 @@
 // ostomachion/accel.hpp — Generic hardware accelerator abstraction
-// Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026  SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
 //
 // Defines the minimal vendor accelerator interface for the Ostomachion
 // platform.  Every hardware accelerator driver (FFT, matrix multiply,

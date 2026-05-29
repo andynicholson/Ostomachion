@@ -1,6 +1,6 @@
 /*
  * fft_demo_main.c — Realtime FFT-accelerator demo driver thread
- * Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+ * Copyright (c) 2026  SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
  *
  * Compiled when CONFIG_FFT_DEMO=y (see zephyr_app/Kconfig + prj_demo.conf).
  *
