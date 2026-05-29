@@ -28,7 +28,12 @@ tight_setup_hold_pins.txt
 
 # Vivado build output
 build/
-vivado*
+vivado.log
+vivado.jou
+
+# Vivado GUI project debris (BD is Tcl-generated in fpga/xem7310/ostomachion_bd.tcl)
+.srcs/
+.gen/
 
 #clangd
 .cache

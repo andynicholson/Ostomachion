@@ -157,52 +157,12 @@ jobs:
             twister.log
             twister-out/
 
-  # ── Vivado FPGA synthesis (self-hosted runner, optional) ─────────────────
-  #
-  # Requires a self-hosted runner with Vivado 2024.1+ and the label "vivado".
-  # Skipped on forks (no access to licensed tools) and when the runner is
-  # unavailable; does not block merging.
-  #
-  vivado-synth:
-    name: Vivado synthesis + timing closure
-    runs-on: [self-hosted, vivado]
-    if: |
-      github.repository_owner == 'andynicholson' &&
-      (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
-    timeout-minutes: 120
-    needs: sim
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Run Vivado build
-        run: make fpga-synth
-
-      - name: Run quality gate checks
-        run: make fpga-check
-
-      - name: Upload build artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: vivado-artifacts
-          path: |
-            build/xem7310/timing_summary.rpt
-            build/xem7310/utilization.rpt
-            build/xem7310/drc.rpt
-            build/xem7310/build_id.txt
-            build/xem7310/ostomachion_xem7310.bit
-            build/xem7310/ostomachion_xem7310.mcs
-
   # ── VHDL RTL linting ─────────────────────────────────────────────────────
   #
   # Runs GHDL analysis over the simulation-friendly RTL to catch VHDL-2008 syntax
   # and type errors within ~30 s on ubuntu-latest.  The Vivado FPGA top
-  # (xem7310_top) uses unisim primitives and is validated on the self-hosted
-  # Vivado runner.  NEORV32 core sources are analyzed first (as library neorv32).
+  # (xem7310_top) uses unisim primitives and is validated via the manual
+  # vivado-synth workflow on a self-hosted runner.
   #
   vhdl-lint:
     name: VHDL RTL lint (GHDL)
