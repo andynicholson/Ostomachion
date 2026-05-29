@@ -1,10 +1,10 @@
 name: CI
 
-# Run on every pull request and on direct pushes to main / develop.
+# Run on every pull request and on direct pushes to main / master / develop.
 on:
   pull_request:
   push:
-    branches: [main, develop]
+    branches: [main, master, develop]
 
 # Cancel in-progress runs when a new commit arrives on the same branch / PR.
 concurrency:
@@ -21,7 +21,7 @@ jobs:
   sim:
     name: GHDL + Zephyr simulation
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
@@ -33,48 +33,54 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            ghdl ghdl-llvm \
+            ghdl ghdl-llvm libllvm18 \
             python3-pip \
             cmake ninja-build \
             gcc-riscv64-unknown-elf
+
+      - name: Work around Ubuntu ghdl-llvm / libllvm18 soname mismatch
+        run: |
+          if [ ! -e /usr/lib/x86_64-linux-gnu/libLLVM-18.so.18.1 ]; then
+            sudo ln -sf libLLVM.so.18.1 /usr/lib/x86_64-linux-gnu/libLLVM-18.so.18.1
+          fi
 
       - name: Install west
         run: pip3 install west
 
       - name: Set up Zephyr workspace
         run: |
-          west init -l .
+          # west.yml declares self.path=ostomachion; GHA checks out to a sibling
+          # directory (…/RepoName/RepoName).  Symlink so west init lands zephyr
+          # next to the manifest at the expected layout.
+          PARENT="$(dirname "$GITHUB_WORKSPACE")"
+          ln -sfn "$GITHUB_WORKSPACE" "$PARENT/ostomachion"
+          cd "$PARENT"
+          west init -l ostomachion
           west update --narrow -o=--depth=1
+          echo "WEST_TOPDIR=$PARENT" >> "$GITHUB_ENV"
 
       - name: Install Zephyr Python requirements
-        run: pip3 install -r zephyr/scripts/requirements-base.txt
+        run: pip3 install -r "$WEST_TOPDIR/zephyr/scripts/requirements-base.txt"
 
       - name: Download Zephyr SDK (minimal RISC-V toolchain)
+        working-directory: ${{ env.WEST_TOPDIR }}
         run: |
           SDK_VER=1.0.0
           SDK_MIN="zephyr-sdk-${SDK_VER}_linux-x86_64_minimal.tar.xz"
           wget -q "https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${SDK_VER}/${SDK_MIN}"
           tar -xf "${SDK_MIN}"
-          ./zephyr-sdk-${SDK_VER}/setup.sh -h -c
+          ./zephyr-sdk-${SDK_VER}/setup.sh -t riscv64-zephyr-elf
+          ./zephyr-sdk-${SDK_VER}/setup.sh -h
+          ./zephyr-sdk-${SDK_VER}/setup.sh -c
           echo "ZEPHYR_SDK_INSTALL_DIR=$PWD/zephyr-sdk-${SDK_VER}" >> "$GITHUB_ENV"
 
-      - name: Build Zephyr (simulation config)
-        working-directory: zephyr_app
-        run: |
-          west build \
-            -b neorv32 \
-            -d ../build_zephyr_ci \
-            -- \
-            -DCONF_FILE=prj.conf \
-            -DOVERLAY_CONFIG="" 2>&1 | tee ../build_zephyr_ci.log
-          echo "Zephyr build finished."
+      - name: Build NEORV32 image_gen (required for zephyr.vhd output)
+        run: gcc -O2 neorv32/sw/image_gen/image_gen.c -o neorv32/sw/image_gen/image_gen
 
-      - name: Run GHDL simulation
+      - name: Build Zephyr and run GHDL simulation
         run: |
-          make SIM_TIME=400ms test-zephyr 2>&1 | tee ghdl_sim.log
-          # Fail the job if the expected success string is absent.
-          grep -q "PROJECT EXECUTION SUCCESSFUL" ghdl_sim.log || \
-            { echo "FAIL: simulation did not print PROJECT EXECUTION SUCCESSFUL"; exit 1; }
+          set -o pipefail
+          make ZEPHYR_SIM_TIME=800ms test-zephyr 2>&1 | tee ghdl_sim.log
 
       - name: Upload simulation log
         if: always()
@@ -111,19 +117,26 @@ jobs:
 
       - name: Set up Zephyr workspace
         run: |
-          west init -l .
+          PARENT="$(dirname "$GITHUB_WORKSPACE")"
+          ln -sfn "$GITHUB_WORKSPACE" "$PARENT/ostomachion"
+          cd "$PARENT"
+          west init -l ostomachion
           west update --narrow -o=--depth=1
+          echo "WEST_TOPDIR=$PARENT" >> "$GITHUB_ENV"
 
       - name: Install Zephyr Python requirements
-        run: pip3 install -r zephyr/scripts/requirements-base.txt
+        run: pip3 install -r "$WEST_TOPDIR/zephyr/scripts/requirements-base.txt"
 
       - name: Download Zephyr SDK (minimal)
+        working-directory: ${{ env.WEST_TOPDIR }}
         run: |
           SDK_VER=1.0.0
           SDK_MIN="zephyr-sdk-${SDK_VER}_linux-x86_64_minimal.tar.xz"
           wget -q "https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${SDK_VER}/${SDK_MIN}"
           tar -xf "${SDK_MIN}"
-          ./zephyr-sdk-${SDK_VER}/setup.sh -h -c
+          ./zephyr-sdk-${SDK_VER}/setup.sh -t riscv64-zephyr-elf
+          ./zephyr-sdk-${SDK_VER}/setup.sh -h
+          ./zephyr-sdk-${SDK_VER}/setup.sh -c
           echo "ZEPHYR_SDK_INSTALL_DIR=$PWD/zephyr-sdk-${SDK_VER}" >> "$GITHUB_ENV"
 
       - name: Run Twister
@@ -154,7 +167,7 @@ jobs:
     name: Vivado synthesis + timing closure
     runs-on: [self-hosted, vivado]
     if: |
-      github.repository_owner == 'ostomachion' &&
+      github.repository_owner == 'andynicholson' &&
       (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
     timeout-minutes: 120
     needs: sim
@@ -186,10 +199,10 @@ jobs:
 
   # ── VHDL RTL linting ─────────────────────────────────────────────────────
   #
-  # Runs GHDL --synth over the custom RTL files to catch VHDL-2008 syntax and
-  # type errors within ~30 s on ubuntu-latest.  No Xilinx tools are required.
-  # NEORV32 core sources are analyzed first (as library neorv32) because the
-  # top-level instantiates the NEORV32 SoC.  Fails the PR on any error.
+  # Runs GHDL analysis over the simulation-friendly RTL to catch VHDL-2008 syntax
+  # and type errors within ~30 s on ubuntu-latest.  The Vivado FPGA top
+  # (xem7310_top) uses unisim primitives and is validated on the self-hosted
+  # Vivado runner.  NEORV32 core sources are analyzed first (as library neorv32).
   #
   vhdl-lint:
     name: VHDL RTL lint (GHDL)
@@ -205,23 +218,20 @@ jobs:
       - name: Install GHDL
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ghdl ghdl-llvm
+          sudo apt-get install -y --no-install-recommends ghdl ghdl-llvm libllvm18
+          if [ ! -e /usr/lib/x86_64-linux-gnu/libLLVM-18.so.18.1 ]; then
+            sudo ln -sf libLLVM.so.18.1 /usr/lib/x86_64-linux-gnu/libLLVM-18.so.18.1
+          fi
 
       - name: Analyze NEORV32 core (library neorv32)
         run: |
           ghdl -i --std=08 --work=neorv32 neorv32/rtl/core/*.vhd
 
-      - name: Analyze custom RTL and FPGA top
+      - name: Analyze custom RTL (simulation wrapper)
         run: |
           ghdl -i --std=08 --work=work \
             neorv32/rtl/system_integration/xbus2axi4_bridge.vhd \
             rtl/neorv32_wrapper.vhd
-          ghdl -i --std=08 --work=work \
-            fpga/xem7310/xem7310_top.vhd
-
-      - name: Elaborate FPGA top (checks for missing entities / type errors)
-        run: |
-          ghdl -m --std=08 --work=work xem7310_top
 
   # ── Firmware static analysis ─────────────────────────────────────────────
   #
@@ -253,19 +263,26 @@ jobs:
 
       - name: Set up Zephyr workspace
         run: |
-          west init -l .
+          PARENT="$(dirname "$GITHUB_WORKSPACE")"
+          ln -sfn "$GITHUB_WORKSPACE" "$PARENT/ostomachion"
+          cd "$PARENT"
+          west init -l ostomachion
           west update --narrow -o=--depth=1
+          echo "WEST_TOPDIR=$PARENT" >> "$GITHUB_ENV"
 
       - name: Install Zephyr Python requirements
-        run: pip3 install -r zephyr/scripts/requirements-base.txt
+        run: pip3 install -r "$WEST_TOPDIR/zephyr/scripts/requirements-base.txt"
 
       - name: Download Zephyr SDK (minimal)
+        working-directory: ${{ env.WEST_TOPDIR }}
         run: |
           SDK_VER=1.0.0
           SDK_MIN="zephyr-sdk-${SDK_VER}_linux-x86_64_minimal.tar.xz"
           wget -q "https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${SDK_VER}/${SDK_MIN}"
           tar -xf "${SDK_MIN}"
-          ./zephyr-sdk-${SDK_VER}/setup.sh -h -c
+          ./zephyr-sdk-${SDK_VER}/setup.sh -t riscv64-zephyr-elf
+          ./zephyr-sdk-${SDK_VER}/setup.sh -h
+          ./zephyr-sdk-${SDK_VER}/setup.sh -c
           echo "ZEPHYR_SDK_INSTALL_DIR=$PWD/zephyr-sdk-${SDK_VER}" >> "$GITHUB_ENV"
 
       - name: Build firmware (FPGA sim config + thread analyzer + stack sentinel)

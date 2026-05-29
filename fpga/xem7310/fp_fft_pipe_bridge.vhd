@@ -1,6 +1,6 @@
 -- FrontPanel FFT Pipe Bridge
 -- Copyright (c) 2026 A P Nicholson , intothemist@gmail.com
--- SPDX-License-Identifier: Apache-2.0
+-- SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
 --
 -- Bulk-sample transport between the host PC (via FrontPanel BTPipe endpoints)
 -- and the NEORV32 SoC.  The CPU remains in the loop and still invokes the

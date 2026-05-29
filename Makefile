@@ -1,5 +1,6 @@
 NEORV32_HOME = ./neorv32
 GHDL_FLAGS   = --std=08
+GHDL_RUN_FLAGS ?= --max-stack-alloc=512
 
 CORE_SOURCES = $(wildcard $(NEORV32_HOME)/rtl/core/*.vhd)
 SIM_SOURCES  = sim/sim_uart_rx.vhd
@@ -71,7 +72,8 @@ simulate:
 		$(if $(WAVE),--wave=output.ghw) \
 		--stop-time=$(SIM_TIME) \
 		--ieee-asserts=disable \
-		--assert-level=error
+		--assert-level=error \
+		$(GHDL_RUN_FLAGS)
 
 # ---------- software build ------------------------------------------------
 sw:

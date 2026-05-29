@@ -1,5 +1,5 @@
 # testcase.yaml — Twister test definitions for the Ostomachion test suite
-# Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026  SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
 #
 # Usage:
 #   west twister -T zephyr_app/tests --integration

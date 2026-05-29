@@ -1,6 +1,6 @@
 /*
  * fft_accel.c — Zephyr MISC driver for the Ostomachion FFT accelerator pipeline
- * Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+ * Copyright (c) 2026  SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
  *
  * Device tree compatible: "ostomachion,fft-accel"
  *

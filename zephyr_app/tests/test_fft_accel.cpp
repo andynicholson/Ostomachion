@@ -1,5 +1,5 @@
 // test_fft_accel.cpp — ZTEST suite for the FFT hardware accelerator
-// Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026  SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
 //
 // Automated CI path: built when CONFIG_FFT_ACCEL=y and CONFIG_ZTEST=y.
 // These tests require the accelerator bitstream to be loaded in the FPGA.

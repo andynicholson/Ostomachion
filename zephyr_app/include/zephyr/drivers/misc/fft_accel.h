@@ -1,6 +1,6 @@
 /*
  * fft_accel.h — Public API for the Ostomachion FFT accelerator driver
- * Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+ * Copyright (c) 2026  SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
  */
 
 #ifndef ZEPHYR_DRIVERS_MISC_FFT_ACCEL_H_

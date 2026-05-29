@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2026
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
  *
  * neorv32_regs.h — Common definitions shared across all NEORV32 out-of-tree
  * Zephyr drivers.  Including this header makes cross-driver dependencies

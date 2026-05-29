@@ -1,6 +1,6 @@
 -- FrontPanel UART Bridge
 -- Copyright (c) 2026 A P Nicholson , intothemist@gmail.com
--- SPDX-License-Identifier: Apache-2.0
+-- SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
 --
 -- Bridges the NEORV32 UART0 serial interface to FrontPanel Pipe endpoints
 -- so that the host PC can access the bootloader and firmware console over

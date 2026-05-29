@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Ostomachion — initialise shell environment for Zephyr + Ostomachion builds
-# Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026  SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
 #
 # This script MUST be sourced (it activates a Python venv and exports vars).
 #

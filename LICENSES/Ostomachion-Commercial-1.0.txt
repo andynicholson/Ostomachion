@@ -1,0 +1,77 @@
+Ostomachion Commercial License 1.0
+====================================
+
+Copyright (C) 2026 A P Nicholson <intothemist@gmail.com>
+
+This document describes the alternative to the GNU General Public License
+(GPL-3.0-or-later) under which Ostomachion may be licensed for commercial
+and proprietary use.
+
+IMPORTANT: This file is not itself a license grant.  A commercial license
+is granted only under a signed written agreement between you and the
+copyright holder.
+
+
+1. When you need a commercial license
+-------------------------------------
+
+You need a commercial license if you wish to use, modify, or distribute
+Ostomachion (or derivative works) in ways that are not permitted under the
+GPL, including but not limited to:
+
+  - Linking or combining Ostomachion with proprietary code without
+    releasing corresponding source under the GPL
+  - Distributing Ostomachion or derivatives without providing source code
+    and license notices required by the GPL
+  - Using Ostomachion in a product whose overall licensing terms must
+    remain proprietary
+
+
+2. What a commercial license typically grants
+-----------------------------------------------
+
+Subject to payment and a signed agreement, a commercial license may grant
+a non-exclusive, worldwide license to:
+
+  - Use Ostomachion source code and build artifacts internally
+  - Modify Ostomachion for your products
+  - Distribute Ostomachion or derivatives in binary or source form under
+    your own proprietary license terms, without GPL copyleft obligations
+    on your combined work (subject to third-party licenses listed below)
+
+Specific rights, scope, territory, duration, support, and fees are defined
+in the signed agreement.
+
+
+3. Third-party components
+-------------------------
+
+A commercial Ostomachion license covers copyright in Ostomachion project
+files only.  It does not substitute for separate licenses you may need for:
+
+  - NEORV32 (BSD-3-Clause) — submodule at neorv32/
+  - Zephyr RTOS and its dependencies (primarily Apache-2.0)
+  - Xilinx Vivado IP and bitstream tools (proprietary)
+  - Opal Kelly FrontPanel SDK (proprietary)
+
+You remain responsible for complying with those third-party terms.
+
+
+4. How to obtain a commercial license
+-------------------------------------
+
+Contact the copyright holder to discuss terms and pricing:
+
+  A P Nicholson
+  Email: intothemist@gmail.com
+
+Include a brief description of your intended use, target product, and
+distribution model.
+
+
+5. Relationship to the GPL
+--------------------------
+
+If no commercial license agreement applies to you, Ostomachion is licensed
+to you solely under GPL-3.0-or-later.  See the LICENSE file at the
+repository root for the full GPL text.

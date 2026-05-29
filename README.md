@@ -1,3 +1,30 @@
+<p align="center">
+  <a href="https://github.com/andynicholson/Ostomachion/actions/workflows/ci.yml?query=branch%3Amaster+event%3Apush">
+    <img src="https://github.com/andynicholson/Ostomachion/actions/workflows/ci.yml/badge.svg?branch=master&event=push" alt="CI">
+  </a>
+  <a href="https://github.com/andynicholson/Ostomachion/actions/workflows/ci.yml?query=branch%3Amaster+event%3Apush">
+    <img src="https://img.shields.io/github/actions/workflow/status/andynicholson/Ostomachion/ci.yml?branch=master&label=VHDL%20lint" alt="VHDL lint">
+  </a>
+  <a href="https://github.com/andynicholson/Ostomachion/actions/workflows/ci.yml?query=branch%3Amaster+event%3Apush">
+    <img src="https://img.shields.io/github/actions/workflow/status/andynicholson/Ostomachion/ci.yml?branch=master&label=GHDL%20sim" alt="GHDL + Zephyr simulation">
+  </a>
+  <a href="https://github.com/andynicholson/Ostomachion/actions/workflows/ci.yml?query=branch%3Amaster+event%3Apush">
+    <img src="https://img.shields.io/github/actions/workflow/status/andynicholson/Ostomachion/ci.yml?branch=master&label=Twister" alt="Twister test suite">
+  </a>
+  <a href="https://github.com/andynicholson/Ostomachion/actions/workflows/ci.yml?query=branch%3Amaster+event%3Apush">
+    <img src="https://img.shields.io/github/actions/workflow/status/andynicholson/Ostomachion/ci.yml?branch=master&label=Firmware%20analysis" alt="Firmware static analysis">
+  </a>
+  <a href="https://github.com/andynicholson/Ostomachion/actions/workflows/ci.yml?query=branch%3Amaster+event%3Apush">
+    <img src="https://img.shields.io/badge/Vivado-self--hosted-blueviolet" alt="Vivado synthesis (self-hosted runner)">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/License-GPL--3.0--or--later-green.svg" alt="License: GPL-3.0-or-later">
+  </a>
+  <a href="LICENSES/Ostomachion-Commercial-1.0.txt">
+    <img src="https://img.shields.io/badge/Commercial-license-blue.svg" alt="Commercial license available">
+  </a>
+</p>
+
 Ostomachion is Archimedes' dissection puzzle — fourteen geometric pieces that
 fit together in hundreds of distinct ways.  The name captures the design
 philosophy: a small set of composable, interlocking parts that assemble into a complete, verified FPGA RTOS platform.
@@ -8,7 +35,7 @@ philosophy: a small set of composable, interlocking parts that assemble into a c
 
 ## What is Ostomachion?
 
-[NEORV32 RISC-V](https://github.com/stnolting/neorv32) SoC running [Zephyr RTOS](https://www.zephyrproject.org/) on FPGA bare metal - with an extensible DMA through a xFFT (or custom transform) RTL pipeline — one C++20 HAL from fabric to std::span.
+[NEORV32 RISC-V](https://github.com/stnolting/neorv32) SoC running [Zephyr RTOS](https://www.zephyrproject.org/) on FPGA bare metal - with an extensible accelerator pipeline architecture, including an DMA xFFT RTL pipeline - wrapped in C++20 HAL from fabric to std::span.
 
 The entire FPGA build is programmatic — a single Tcl script regenerates the full Vivado block design (IP configuration, clock tree, AXI address map, interconnect, and optional ILA debug probes) under headless `vivado -mode batch`, so every bitstream is reproducible from version-controlled text alone with no hand-edited checkpoints or saved GUI state anywhere in the tree.
 
@@ -153,6 +180,17 @@ See [GETTING_STARTED.md](GETTING_STARTED.md) for the full setup walkthrough.
 | `make uart-bridge` | Start FrontPanel UART bridge (PTY) |
 | `make test-accel-hw` | Upload and run FFT accelerator ZTEST suite |
 | `make shell-hw` | Upload interactive shell firmware |
+
+## License
+
+Ostomachion is dual-licensed under **GPL-3.0-or-later** or a **commercial
+license** from the copyright holder.  See [`LICENSE`](LICENSE) for the full
+GPL text and [`LICENSES/Ostomachion-Commercial-1.0.txt`](LICENSES/Ostomachion-Commercial-1.0.txt)
+for commercial terms.  Contact **intothemist@gmail.com** to obtain a
+commercial license.
+
+Third-party components (NEORV32, Zephyr, Xilinx IP, Opal Kelly FrontPanel)
+remain under their respective licenses.
 
 ## 🗺️ Known limitations
 

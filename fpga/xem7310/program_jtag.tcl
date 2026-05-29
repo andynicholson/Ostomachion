@@ -1,5 +1,5 @@
 ## Ostomachion — JTAG bitstream programming via Vivado Hardware Manager
-## Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+## Copyright (c) 2026  SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
 ##
 ## Programs the XEM7310-A200 FPGA via JTAG (volatile; erased on power-cycle).
 ## Requires an external JTAG cable (Xilinx Platform Cable USB II, Digilent

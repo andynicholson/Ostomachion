@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # gen_release_artifacts.sh — collect and stage release/v<VERSION>/ artifacts
-# Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026  SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
 #
 # Run this script after a successful 'make fpga-synth' to stage all required
 # certification artifacts into release/<version>/ for client delivery.

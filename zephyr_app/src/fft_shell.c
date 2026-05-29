@@ -1,6 +1,6 @@
 /*
  * fft_shell.c — Zephyr shell "fft" command
- * Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+ * Copyright (c) 2026  SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
  *
  * Provides interactive access to the FFT hardware accelerator from the
  * Zephyr shell (interactive / development firmware image, prj_shell.conf).

@@ -1,5 +1,6 @@
 # west.yml — Ostomachion workspace manifest
-# Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 A P Nicholson <intothemist@gmail.com>
+# SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
 #
 # Pins the exact Zephyr SHA and SDK version used to build and validate the
 # Ostomachion FFT accelerator platform.  Run the following to initialise a
