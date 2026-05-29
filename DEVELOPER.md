@@ -13,7 +13,8 @@ Fabric hierarchy (**`xem7310_top.vhd`** vs **`ostomachion_bd_wrapper`**) matches
 .
 ├── Makefile                          # Build orchestration (GHDL sim, Zephyr, FPGA)
 ├── west.yml                          # West manifest — pins Zephyr SHA + SDK version
-├── .github/workflows/ci.yml          # GitHub Actions CI (sim, twister, vivado-synth, …)
+├── .github/workflows/ci.yml          # GitHub Actions CI (sim, twister, vhdl-lint, …)
+├── .github/workflows/vivado-synth.yml  # Manual Vivado synthesis (self-hosted runner)
 ├── docs/
 │   ├── acceptance_test_procedure.md  # HIL / self-hosted runner expectations
 │   └── neorv32_upgrade_notes.md    # Checklist before bumping the neorv32 submodule
@@ -263,15 +264,20 @@ Use errno return codes instead of exceptions.
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` — five jobs on PR and push to `main`/`develop`:
+`.github/workflows/ci.yml` — four jobs on PR and push to `main`/`master`/`develop`:
 
 | Job | Runner | What it does |
 |-----|--------|-------------|
-| `sim` | ubuntu-latest | `west build` Zephyr with `prj.conf`, then `make SIM_TIME=400ms test-zephyr`; assert `PROJECT EXECUTION SUCCESSFUL` in the log |
+| `sim` | ubuntu-latest | `make ZEPHYR_SIM_TIME=800ms test-zephyr`; assert `PROJECT EXECUTION SUCCESSFUL` in the log |
 | `twister` | ubuntu-latest | `west twister -T zephyr_app/tests --integration` (after `sim` succeeds) |
-| `vivado-synth` | self-hosted, label `vivado` | `make fpga-synth && make fpga-check`, upload `.bit` + reports — **skipped on forks** and when `github.repository_owner != 'ostomachion'` |
-| `vhdl-lint` | ubuntu-latest | GHDL `-i/-m`: NEORV32 core lib, `xbus2axi4_bridge.vhd`, `rtl/neorv32_wrapper.vhd`, `fpga/xem7310/xem7310_top.vhd`; elaborate `xem7310_top` (no BD/Xilinx IP elaboration) |
+| `vhdl-lint` | ubuntu-latest | GHDL `-i`: NEORV32 core lib, `xbus2axi4_bridge.vhd`, `rtl/neorv32_wrapper.vhd` |
 | `firmware-analysis` | ubuntu-latest | clang-tidy, `nm --size-sort` memory map, thread analyser (runs after `twister`) |
+
+`.github/workflows/vivado-synth.yml` — **manual only** (`workflow_dispatch`):
+
+| Job | Runner | What it does |
+|-----|--------|-------------|
+| `vivado-synth` | self-hosted, label `vivado` | `make fpga-synth && make fpga-check`, upload `.bit` + reports — trigger from Actions tab |
 
 In-progress runs are cancelled when a new commit arrives on the same ref (`concurrency`).
 

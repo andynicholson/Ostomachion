@@ -1,0 +1,45 @@
+name: Vivado synthesis + timing closure
+
+# Manual-only FPGA build.  Requires a self-hosted runner with Vivado 2024.1+
+# and the label "vivado".  Does not run on PR/push — trigger from the Actions tab.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag, or SHA to build
+        required: false
+        default: master
+        type: string
+
+jobs:
+  vivado-synth:
+    name: Vivado synthesis + timing closure
+    runs-on: [self-hosted, vivado]
+    if: github.repository_owner == 'andynicholson'
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          ref: ${{ inputs.ref }}
+
+      - name: Run Vivado build
+        run: make fpga-synth
+
+      - name: Run quality gate checks
+        run: make fpga-check
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vivado-artifacts
+          path: |
+            build/xem7310/timing_summary.rpt
+            build/xem7310/utilization.rpt
+            build/xem7310/drc.rpt
+            build/xem7310/build_id.txt
+            build/xem7310/ostomachion_xem7310.bit
+            build/xem7310/ostomachion_xem7310.mcs

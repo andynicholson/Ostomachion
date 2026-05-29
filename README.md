@@ -14,8 +14,8 @@
   <a href="https://github.com/andynicholson/Ostomachion/actions/workflows/ci.yml?query=branch%3Amaster+event%3Apush">
     <img src="https://img.shields.io/github/actions/workflow/status/andynicholson/Ostomachion/ci.yml?branch=master&label=Firmware%20analysis" alt="Firmware static analysis">
   </a>
-  <a href="https://github.com/andynicholson/Ostomachion/actions/workflows/ci.yml?query=branch%3Amaster+event%3Apush">
-    <img src="https://img.shields.io/badge/Vivado-self--hosted-blueviolet" alt="Vivado synthesis (self-hosted runner)">
+  <a href="https://github.com/andynicholson/Ostomachion/actions/workflows/vivado-synth.yml">
+    <img src="https://img.shields.io/badge/Vivado-manual-blueviolet" alt="Vivado synthesis (manual workflow)">
   </a>
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-GPL--3.0--or--later-green.svg" alt="License: GPL-3.0-or-later">
