@@ -1,0 +1,11 @@
+# Ostomachion FFT-accelerator desktop demo
+# Tested on Python 3.10+ (CPython, Linux x86_64).
+#
+# The Opal Kelly FrontPanel Python module ('ok') is NOT on PyPI — it ships
+# with the FrontPanel SDK and is added to PYTHONPATH by
+# scripts/init_dev_env.sh (FRONTPANEL_DIR/API/Python).  Source that script
+# in the shell that runs this demo, or set PYTHONPATH manually.
+
+PyQt6>=6.4
+pyqtgraph>=0.13
+numpy>=1.24

@@ -35,3 +35,7 @@ if(CONFIG_SHELL)
     target_sources(app PRIVATE src/fft_shell.c)
   endif()
 endif()
+
+if(CONFIG_FFT_DEMO)
+  target_sources(app PRIVATE src/fft_demo_main.c)
+endif()

@@ -1,0 +1,28 @@
+# Ostomachion application-level Kconfig
+# Copyright (c) 2026  SPDX-License-Identifier: Apache-2.0
+
+menu "Ostomachion application"
+
+config FFT_DEMO
+	bool "Build the FFT accelerator host-pipe demo firmware"
+	depends on FFT_ACCEL
+	default n
+	help
+	  Enables compilation of src/fft_demo_main.c, which runs a dedicated
+	  thread that drives the FFT accelerator from host-provided sample
+	  frames carried over the FrontPanel BTPipe endpoints implemented by
+	  fp_fft_pipe_bridge.vhd in xem7310_top.vhd.
+
+	  The thread polls the bridge FIFO_IN at 0x90000000 for a full
+	  4096-sample frame, runs fft_accel_transform(), and pushes the
+	  result back through FIFO_OUT.  The HW cycle count is published
+	  via the bridge's REG_PUBLISH register so the host PyQt demo
+	  (tools/fft_demo/) can display the speed-up statistic.
+
+	  This config has no effect unless the bitstream was built with the
+	  fp_fft_pipe_bridge present (region 0x9000_0000 must respond to
+	  XBUS accesses).
+
+endmenu
+
+source "Kconfig.zephyr"

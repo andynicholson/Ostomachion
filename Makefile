@@ -36,12 +36,13 @@ ZEPHYR_BUILD_FPGA    = build_zephyr_fpga
 ZEPHYR_BUILD_HW_TEST = build_zephyr_hw_test
 ZEPHYR_BUILD_ACCEL   = build_zephyr_accel_test
 ZEPHYR_BUILD_SHELL   = build_zephyr_shell
+ZEPHYR_BUILD_DEMO    = build_zephyr_demo
 BIT_FILE             = build/xem7310/ostomachion_xem7310.bit
 MCS_FILE             = build/xem7310/ostomachion_xem7310.mcs
 
 .PHONY: all analyze simulate clean sw test-baremetal test-default test-zephyr zephyr \
         zephyr-fpga fpga-synth fpga-program fpga-flash fpga-fw fpga-check fpga-release \
-        test-hw test-accel-hw shell-hw uart-bridge
+        test-hw test-accel-hw shell-hw demo-hw uart-bridge
 
 # ---------- default flow (uses the image baked into neorv32/rtl/core) ------
 all: analyze simulate
@@ -125,7 +126,8 @@ clean: clean-ghdl
 	$(MAKE) -C $(SW_DIR) RISCV_PREFIX=$(RISCV_PREFIX) clean 2>/dev/null || true
 	rm -f test_imem_image.vhd zephyr_imem_image.vhd
 	rm -rf $(ZEPHYR_BUILD_DIR) $(ZEPHYR_BUILD_FPGA) $(ZEPHYR_BUILD_HW_TEST) \
-	       $(ZEPHYR_BUILD_ACCEL) $(ZEPHYR_BUILD_SHELL) $(ZEPHYR_APP_DIR)/build
+	       $(ZEPHYR_BUILD_ACCEL) $(ZEPHYR_BUILD_SHELL) $(ZEPHYR_BUILD_DEMO) \
+	       $(ZEPHYR_APP_DIR)/build
 
 # ---------- FPGA targets (Opal Kelly XEM7310-A200) ----------------------------
 
@@ -308,6 +310,37 @@ shell-hw:
 		echo "=== Signalled UART bridge to switch baud ===" || true; \
 	fi
 	@echo "=== Connect at 115200 baud — type 'help' for available commands ==="
+
+## Build the FFT-accelerator host-pipe demo firmware and upload to the FPGA.
+## Pairs with the PyQt6 desktop demo in tools/fft_demo/.
+##
+## Prerequisites:
+##   - Accelerator bitstream must be programmed (fpga-program).  The
+##     bitstream must include the fp_fft_pipe_bridge module (i.e. built
+##     from this branch); older bitstreams without WireOuts 0x24..0x26
+##     and BTPipes 0x81 / 0xA1 will not respond.
+##   - UART bridge running for upload (make uart-bridge); usual three-
+##     terminal flow described under uart-bridge.
+##
+## After upload, run the host UI:
+##   pip install -r tools/fft_demo/requirements.txt
+##   python3 -m fft_demo
+demo-hw:
+	@echo "=== Building Zephyr FFT-demo firmware ==="
+	west build -b $(ZEPHYR_BOARD) $(ZEPHYR_APP_DIR) \
+		-d $(ZEPHYR_BUILD_DEMO) --pristine=auto \
+		-- -DCMAKE_PROGRAM_PATH=$(IMAGE_GEN_DIR) \
+		   -DDTC_OVERLAY_FILE="$(CURDIR)/$(ZEPHYR_APP_DIR)/app.overlay;$(CURDIR)/$(ZEPHYR_APP_DIR)/app_fpga.overlay;$(CURDIR)/$(ZEPHYR_APP_DIR)/app_accel.overlay" \
+		   -DOVERLAY_CONFIG="$(CURDIR)/$(ZEPHYR_APP_DIR)/prj.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_fpga.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_accel.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_demo.conf"
+	$(call update-compile-commands,$(ZEPHYR_BUILD_DEMO))
+	@echo "=== Uploading FFT-demo firmware via UART bootloader ==="
+	python3 scripts/uart_upload.py $(UART_DEVICE) \
+		$(ZEPHYR_BUILD_DEMO)/zephyr/zephyr_exe.bin
+	@if [ -f /tmp/uart_bridge.pid ]; then \
+		kill -USR1 "$$(cat /tmp/uart_bridge.pid)" 2>/dev/null && \
+		echo "=== Signalled UART bridge to switch baud ===" || true; \
+	fi
+	@echo "=== Demo firmware running — launch python3 -m fft_demo to drive it ==="
 
 ## NOTE: FFT simulation target removed.
 ## The FFT core is now the Xilinx xfft IP (PG109), instantiated in the

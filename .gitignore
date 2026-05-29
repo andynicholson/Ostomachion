@@ -17,6 +17,7 @@ build_zephyr_fpga/
 build_zephyr_hw_test/
 build_zephyr_accel_test/
 build_zephyr_shell/
+build_zephyr_demo/
 
 # Miscellaneous build artifacts
 build_vivado.log
@@ -31,6 +32,10 @@ vivado*
 
 #clangd
 .cache
+
+# Python bytecode cache (from tools/fft_demo/, scripts/)
+__pycache__/
+*.py[cod]
 
 # SW build artifacts
 sw/test_gpio_uart/*.elf
