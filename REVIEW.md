@@ -105,7 +105,7 @@ and no XDC change is required.
 | M4 | `xem7310.xdc` | **No `set_clock_groups -asynchronous`** between `aclk` and `okUH0`; CDC is guarded only by name-matched `set_false_path` globs that silently match nothing if instances are renamed. Add the async clock group as the primary exception. |
 | M5 ✅ FIXED | `i2c_neorv32.c`, `spi_neorv32.c` | **`K_FOREVER` wait with unchecked `_nb` FIFO pushes in the ISR.** I2C: every ISR `twi_*_nb()` push is now checked and aborts to `done` on failure, and the completion wait uses a 1 s `TWI_XFER_TIMEOUT` backstop (releases the bus + disables IRQ on a lost FIRQ). SPI: the chained TX write in the ISR now guards `TX_FULL` and completes with `-EIO` rather than silently dropping the byte. (The SPI wait was `spi_context_wait_for_completion`, which already derives a master-mode timeout — not a literal `K_FOREVER` — so the genuine hazard there was the dropped-byte stall, now fixed.) |
 | M6 ✅ FIXED | `i2c_neorv32.c` | **Double STOP** on the normal IRQ completion path. Restructured `next_msg:` so each path (final-with-STOP, final-without-STOP, more-messages, error) issues at most one STOP. Also fixed a latent off-by-one: the STOP-flag decision now reads `msgs[msg_idx]` *before* `msg_idx++`. |
-| M7 🔍 | `spi_neorv32.c:240` | SPI polling reads `DATA` gated on `BUSY` rather than an RX-available flag → stale read on hardware; `<<3`/`<<6`/`BIT(10)` clock-field shifts are unguarded magic numbers. **Verify against the pinned NEORV32 revision** (`neorv32/` submodule not checked out here). Not addressed in this pass. |
+| M7 ✅ VERIFIED — NOT A BUG | `spi_neorv32.c` | Checked against NEORV32 v1.11.6 (`56e1324d`). **No defect.** (1) The polling `put → while(BUSY) → read DATA` sequence is the *exact* upstream `neorv32_spi_transfer()` pattern, and `SPI_CTRL_BUSY` (bit 31) is defined as "transceiver busy **or TX FIFO not empty**" — so when it clears the full-duplex byte has completed and the RX FIFO holds the result; reading `DATA` then is correct, not a stale read. (2) The clock-field shifts are right: `PRSC<<3`, `CDIV<<6`, `HIGHSPEED=BIT(10)` match upstream `SPI_CTRL_PRSC0=3`, `CDIV0=6`, `HIGHSPEED=10`. The original review flagged this as a risk pending header confirmation; the headers confirm the driver is correct. |
 | M8 ✅ FIXED | `wdt_neorv32.c`, `wdt/Kconfig` | **STRICT-without-LOCK** contradicted the "cannot be silently disabled" claim. Added opt-in `CONFIG_WDT_NEORV32_LOCK` (default n): when set, `setup()` also sets the CTRL LOCK bit so `disable()` returns `-EPERM` and the config is immutable until reset — that is what actually delivers tamper resistance. Corrected the Kconfig/`setup()` text to stop claiming STRICT alone prevents disable. Default-n keeps the existing `disable()`-based tests working. (RCAUSE reset-cause reporting remains unimplemented — deferred.) |
 | M9 | `tools/fft_demo/app.py` | **PyQt demo runs the whole FFT round-trip on the GUI thread** (`QTimer.singleShot` → blocking `recv_frame`/`send_frame`), freezing the UI up to 2 s. Move acquisition to a worker thread with queued signal/slot delivery. |
 | M10 | `ci.yml`, `vivado-synth.yml` | **Supply chain:** no third-party action is SHA-pinned (`@v4`); the self-hosted Vivado runner builds an arbitrary `inputs.ref` with no workspace cleanup. Pin actions to SHAs; add `git clean -ffdx` or use an ephemeral runner. |
@@ -186,8 +186,11 @@ considered closed:
 3. ✅ **M1/M2/M5/M6/M8** — driver correctness: overflow detection in fabric
    (pending HW verify, §3a), stale-IRQ DMA-reset reorder, bounded I2C wait +
    ISR push checks, SPI dropped-byte guard, I2C double-STOP, and the opt-in
-   WDT lock. ⏳ **M7** (SPI RX-available read) remains — needs the `neorv32/`
-   submodule checked out to verify the register bitfields.
+   WDT lock. ✅ **M7 verified NOT a bug** against NEORV32 v1.11.6 headers
+   (SPI read pattern and clock-field shifts are upstream-correct). The same
+   submodule check confirmed all SPI/TWI/WDT register bitfields touched by
+   M5/M6/M8 match upstream (`SPI_CTRL_*`, `TWI_CTRL_*`, `TWI_CMD_*`,
+   `WDT_CTRL_*`, and the WDT password).
 4. ⏳ **M4 / M3** — timing exceptions and CDC staging before real timing closure.
 5. ⏳ **Doc reconciliation pass** — address map, "stabilisation," overflow API,
    WDT guarantee. Treat docs as code: a claimed guarantee needs an enforcing
