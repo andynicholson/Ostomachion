@@ -289,6 +289,25 @@ static void neorv32_spi_isr(const struct device *dev)
 	if (spi_context_tx_on(ctx) || spi_context_rx_on(ctx)) {
 		uint8_t txd = 0U;
 
+		/* Harvesting the RX byte above means a transaction completed and a
+		 * TX-FIFO slot freed, so TX_FULL should be clear here.  Guard it
+		 * anyway: the polling path always calls wait_tx_ready() before a
+		 * write, but spinning is unacceptable in ISR context.  If the slot
+		 * is unexpectedly full, abort with -EIO rather than silently
+		 * dropping the byte — a dropped chained write produces no further
+		 * FIRQ and would stall the transfer until the spi_context timeout. */
+		uint32_t ctrl = neorv32_spi_reg_read(dev, NEORV32_SPI_CTRL);
+
+		if (ctrl & SPI_CTRL_TX_FULL) {
+			neorv32_spi_reg_write(dev, NEORV32_SPI_CTRL,
+					      ctrl & ~SPI_CTRL_IRQ_RX_AVAIL);
+			if (!(ctx->config->operation & SPI_HOLD_ON_CS)) {
+				neorv32_spi_reg_write(dev, NEORV32_SPI_DATA, SPI_DATA_CMD);
+			}
+			spi_context_complete(ctx, dev, -EIO);
+			return;
+		}
+
 		if (spi_context_tx_buf_on(ctx)) {
 			txd = *(const uint8_t *)ctx->tx_buf;
 		}
