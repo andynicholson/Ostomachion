@@ -93,10 +93,14 @@ architecture rtl of xem7310_top is
   -- GPIO2_DATA (0x08).  The latch is cleared by the same xfft aresetn that
   -- firmware pulses at the start of every transform, so the flag always
   -- reflects exactly the frame just computed.  See ACCEL_ARCH.md §2.3.
+  -- BD single-bit ports that originate from a vector source (xlslice output /
+  -- util_vector_logic Res) are emitted as STD_LOGIC_VECTOR(0 to 0), matching
+  -- the periph_resetn_o convention.  Declare the actuals as vector(0 downto 0)
+  -- and index (0) at use sites so the whole-array port association type-checks.
   signal fft_status_tvalid    : std_logic;
-  signal fft_status_overflow  : std_logic;
+  signal fft_status_overflow  : std_logic_vector(0 downto 0);
   signal fft_overflow_latched : std_logic := '0';
-  signal xfft_aresetn         : std_logic;
+  signal xfft_aresetn         : std_logic_vector(0 downto 0);
 
   -- ── NEORV32 scalar outputs (std_ulogic → converted to std_logic) ─────────
   signal uart0_txd_u : std_ulogic;
@@ -390,9 +394,9 @@ begin
   process (clk)
   begin
     if rising_edge(clk) then
-      if xfft_aresetn = '0' then
+      if xfft_aresetn(0) = '0' then
         fft_overflow_latched <= '0';
-      elsif fft_status_tvalid = '1' and fft_status_overflow = '1' then
+      elsif fft_status_tvalid = '1' and fft_status_overflow(0) = '1' then
         fft_overflow_latched <= '1';
       end if;
     end if;
