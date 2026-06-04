@@ -53,6 +53,7 @@
 #include <zephyr/drivers/misc/fft_accel.h>
 #include <zephyr/irq.h>
 #include <zephyr/sys/sys_io.h>
+#include <zephyr/sys/barrier.h>
 #include <zephyr/logging/log.h>
 
 LOG_MODULE_REGISTER(fft_accel, CONFIG_FFT_ACCEL_LOG_LEVEL);
@@ -329,6 +330,16 @@ int fft_accel_transform(const struct device *dev,
 		sys_write32(word, cfg->tx_bram_base + i * 4);
 	}
 
+	/* Ordering barrier: the TX-BRAM stores above and the DMA register
+	 * writes below target *different* AXI slaves through the SmartConnect,
+	 * which provides no global write-ordering guarantee.  sys_write32 is a
+	 * volatile store (compiler ordering only), so without an explicit fence
+	 * the MM2S LENGTH write that *triggers* the transfer (step 4) could
+	 * overtake the final BRAM store and the DMA would read stale input for
+	 * the last beat(s).  NEORV32 has no D-cache, so this is a store-ordering
+	 * issue, not a coherency one; a full data-memory fence is sufficient. */
+	barrier_dmem_fence_full();
+
 	/* 2. Reset xfft pipeline then DMA channels.
 	 *
 	 * Per PG109 §3, aresetn must be held low for at least two aclk cycles
@@ -425,6 +436,13 @@ int fft_accel_transform(const struct device *dev,
 		k_mutex_unlock(&data->xfer_lock);
 		return -ETIMEDOUT;
 	}
+
+	/* Ordering barrier: the S2MM IOC signals that the DMA has posted the
+	 * output frame to RX BRAM, but the CPU's load path has no guaranteed
+	 * ordering against those fabric-side writes.  Fence before the RX-BRAM
+	 * read loop (step 7) so we observe the committed output rather than
+	 * stale BRAM contents from a previous frame. */
+	barrier_dmem_fence_full();
 
 	int err = data->last_error;
 

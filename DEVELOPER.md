@@ -269,7 +269,7 @@ Use errno return codes instead of exceptions.
 | Job | Runner | What it does |
 |-----|--------|-------------|
 | `sim` | ubuntu-latest | `make ZEPHYR_SIM_TIME=800ms test-zephyr`; assert `PROJECT EXECUTION SUCCESSFUL` in the log |
-| `twister` | ubuntu-latest | `west twister -T zephyr_app/tests --integration` (after `sim` succeeds) |
+| `twister` | ubuntu-latest | `west twister -T zephyr_app --integration --exclude-tag hw` (after `sim` succeeds) |
 | `vhdl-lint` | ubuntu-latest | GHDL `-i`: NEORV32 core lib, `xbus2axi4_bridge.vhd`, `rtl/neorv32_wrapper.vhd` |
 | `firmware-analysis` | ubuntu-latest | clang-tidy, `nm --size-sort` memory map, thread analyser (runs after `twister`) |
 
@@ -313,8 +313,13 @@ PROJECT EXECUTION SUCCESSFUL
 ### West Twister
 
 ```bash
-west twister -T zephyr_app/tests --integration -v
+west twister -T zephyr_app --integration --exclude-tag hw -v
 ```
+
+> `testcase.yaml` lives at the `zephyr_app/` root (next to `CMakeLists.txt` /
+> `prj.conf`) so Twister has a buildable project; the ZTEST suites under
+> `zephyr_app/tests/` are compiled into the build by `CMakeLists.txt` when
+> `CONFIG_ZTEST=y`.
 
 | Test ID | Board | Type |
 |---------|-------|------|

@@ -2,11 +2,16 @@
 # Copyright (c) 2026  SPDX-License-Identifier: GPL-3.0-or-later OR LicenseRef-Ostomachion-Commercial-1.0
 #
 # Usage:
-#   west twister -T zephyr_app/tests --integration
+#   west twister -T zephyr_app --integration --exclude-tag hw
+#
+# This file lives at the application root (alongside CMakeLists.txt / prj.conf)
+# so Twister has a buildable Zephyr project; the ZTEST suites under tests/ are
+# pulled into the build by CMakeLists.txt when CONFIG_ZTEST=y.
 #
 # The neorv32 simulator platform is used for build verification and basic
-# configuration coverage.  Hardware-in-the-loop tests require a physical
-# XEM7310-A200 board connected to a self-hosted runner.
+# configuration coverage.  Hardware-in-the-loop tests ([hw] tag) require a
+# physical XEM7310-A200 board connected to a self-hosted runner and must be
+# excluded on hosted CI runners.
 
 tests:
   # ── SPI / I2C / GPIO baseline (builds for neorv32 sim target) ───────────

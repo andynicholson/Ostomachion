@@ -83,13 +83,15 @@ architecture rtl of fp_uart_bridge is
   signal rx_valid    : std_logic := '0';
 
   -- RX FIFO (sys_clk write → fp_clk read)
-  signal rxf_wr_en    : std_logic;
-  signal rxf_full     : std_logic;
-  signal rxf_rd_en    : std_logic;
-  signal rxf_dout     : std_logic_vector(7 downto 0);
-  signal rxf_empty    : std_logic;
-  signal rxf_rdcnt    : std_logic_vector(10 downto 0);
-  signal rxf_valid_r  : std_logic := '0';  -- registered valid flag, aligned with rxf_dout
+  signal rxf_wr_en       : std_logic;
+  signal rxf_full        : std_logic;
+  signal rxf_rd_en       : std_logic;
+  signal rxf_dout        : std_logic_vector(7 downto 0);
+  signal rxf_empty       : std_logic;
+  signal rxf_rdcnt       : std_logic_vector(10 downto 0);
+  signal rxf_valid_r     : std_logic := '0';  -- registered valid flag, aligned with rxf_dout
+  signal rxf_wr_rst_busy : std_logic;  -- sys_clk domain: gates wr_en
+  signal rxf_rd_rst_busy : std_logic;  -- fp_clk  domain: gates rd_en / rx_ready
 
   ---------------------------------------------------------------------------
   -- UART TX — serializes bytes toward NEORV32 uart0_rxd_i
@@ -100,12 +102,14 @@ architecture rtl of fp_uart_bridge is
   signal tx_shift    : std_logic_vector(8 downto 0) := (others => '1');
 
   -- TX FIFO (fp_clk write → sys_clk read, FWFT so data is ready immediately)
-  signal txf_wr_en    : std_logic;
-  signal txf_full     : std_logic;
-  signal txf_prog_full : std_logic;
-  signal txf_rd_en    : std_logic;
-  signal txf_dout     : std_logic_vector(7 downto 0);
-  signal txf_empty    : std_logic;
+  signal txf_wr_en       : std_logic;
+  signal txf_full        : std_logic;
+  signal txf_prog_full   : std_logic;
+  signal txf_rd_en       : std_logic;
+  signal txf_dout        : std_logic_vector(7 downto 0);
+  signal txf_empty       : std_logic;
+  signal txf_wr_rst_busy : std_logic;  -- fp_clk  domain: gates wr_en / tx_ready
+  signal txf_rd_rst_busy : std_logic;  -- sys_clk domain: gates rd_en
 
 begin
 
@@ -183,7 +187,7 @@ begin
   -- The valid flag rxf_valid_r is registered on the same edge so it
   -- arrives at po_data(8) aligned with rxf_dout on po_data(7:0).
   ---------------------------------------------------------------------------
-  rxf_wr_en <= rx_valid and not rxf_full;
+  rxf_wr_en <= rx_valid and not rxf_full and not rxf_wr_rst_busy;
 
   rx_fifo_i : xpm_fifo_async
     generic map (
@@ -218,8 +222,8 @@ begin
       empty         => rxf_empty,
       rd_data_count => rxf_rdcnt,
       wr_data_count => open,
-      wr_rst_busy   => open,
-      rd_rst_busy   => open,
+      wr_rst_busy   => rxf_wr_rst_busy,
+      rd_rst_busy   => rxf_rd_rst_busy,
       overflow      => open,
       underflow     => open,
       prog_full     => open,
@@ -239,7 +243,7 @@ begin
   -- Gate rd_en so empty-FIFO reads don't cause underflow.
   -- Register the "had data" flag so it arrives on the same cycle as
   -- rxf_dout (both one fp_clk after po_rd) — matching okPipeOut latency.
-  rxf_rd_en <= po_rd and not rxf_empty;
+  rxf_rd_en <= po_rd and not rxf_empty and not rxf_rd_rst_busy;
 
   process (fp_clk)
   begin
@@ -253,8 +257,10 @@ begin
   po_data(7 downto 0)    <= rxf_dout;
   rx_count               <= rxf_rdcnt;
 
-  tx_ready               <= not txf_prog_full;
-  rx_ready               <= not rxf_empty;
+  -- Hold the host flow-control flags low during reset recovery so the host
+  -- neither pushes (tx) nor pulls (rx) against a FIFO that XPM is resetting.
+  tx_ready               <= not txf_prog_full and not txf_wr_rst_busy;
+  rx_ready               <= not rxf_empty and not rxf_rd_rst_busy;
 
   ---------------------------------------------------------------------------
   -- TX Async FIFO: fp_clk (write) → sys_clk (read)
@@ -264,7 +270,7 @@ begin
   -- This ensures ep_ready deasserts before the FIFO is truly full,
   -- giving the BTPipeIn controller time to halt without data loss.
   ---------------------------------------------------------------------------
-  txf_wr_en <= pi_wr and not txf_full and pi_data(8);
+  txf_wr_en <= pi_wr and not txf_full and pi_data(8) and not txf_wr_rst_busy;
 
   tx_fifo_i : xpm_fifo_async
     generic map (
@@ -299,8 +305,8 @@ begin
       empty         => txf_empty,
       wr_data_count => open,
       rd_data_count => open,
-      wr_rst_busy   => open,
-      rd_rst_busy   => open,
+      wr_rst_busy   => txf_wr_rst_busy,
+      rd_rst_busy   => txf_rd_rst_busy,
       overflow      => open,
       underflow     => open,
       prog_full     => txf_prog_full,
@@ -329,9 +335,10 @@ begin
         tx_busy  <= '0';
         uart_rx_o <= '1';
       elsif tx_busy = '0' then
-        if txf_empty = '0' then
+        if txf_empty = '0' and txf_rd_rst_busy = '0' then
           -- Load start bit onto the line immediately; shift register holds
           -- data[7:0] and stop bit for subsequent tick periods.
+          -- rd_rst_busy gate: XPM drops reads during reset recovery.
           uart_rx_o  <= '0';                        -- start bit
           tx_shift   <= '1' & txf_dout;             -- stop & D7..D0
           txf_rd_en  <= '1';                        -- advance FIFO

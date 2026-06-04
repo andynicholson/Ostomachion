@@ -97,23 +97,27 @@ architecture rtl of fp_fft_pipe_bridge is
   signal frame_count_sys : unsigned(31 downto 0)         := (others => '0');
 
   -- ── FIFO IN (host → CPU): fp_clk write, sys_clk read, FWFT ────────────
-  signal fifo_in_wr_en     : std_logic;
-  signal fifo_in_full      : std_logic;
-  signal fifo_in_prog_full : std_logic;
-  signal fifo_in_dout      : std_logic_vector(31 downto 0);
-  signal fifo_in_rd_en     : std_logic;
-  signal fifo_in_empty     : std_logic;
-  signal fifo_in_rd_cnt    : std_logic_vector(13 downto 0);
-  signal fifo_in_wr_cnt    : std_logic_vector(13 downto 0);
+  signal fifo_in_wr_en       : std_logic;
+  signal fifo_in_full        : std_logic;
+  signal fifo_in_prog_full   : std_logic;
+  signal fifo_in_dout        : std_logic_vector(31 downto 0);
+  signal fifo_in_rd_en       : std_logic;
+  signal fifo_in_empty       : std_logic;
+  signal fifo_in_rd_cnt      : std_logic_vector(13 downto 0);
+  signal fifo_in_wr_cnt      : std_logic_vector(13 downto 0);
+  signal fifo_in_wr_rst_busy : std_logic;  -- fp_clk  domain: gates wr_en
+  signal fifo_in_rd_rst_busy : std_logic;  -- sys_clk domain: gates rd_en
 
   -- ── FIFO OUT (CPU → host): sys_clk write, fp_clk read, std (latency 1)
-  signal fifo_out_wr_en    : std_logic;
-  signal fifo_out_full     : std_logic;
-  signal fifo_out_dout     : std_logic_vector(31 downto 0);
-  signal fifo_out_rd_en    : std_logic;
-  signal fifo_out_empty    : std_logic;
-  signal fifo_out_rd_cnt   : std_logic_vector(13 downto 0);
-  signal fifo_out_wr_cnt   : std_logic_vector(13 downto 0);
+  signal fifo_out_wr_en       : std_logic;
+  signal fifo_out_full        : std_logic;
+  signal fifo_out_dout        : std_logic_vector(31 downto 0);
+  signal fifo_out_rd_en       : std_logic;
+  signal fifo_out_empty       : std_logic;
+  signal fifo_out_rd_cnt      : std_logic_vector(13 downto 0);
+  signal fifo_out_wr_cnt      : std_logic_vector(13 downto 0);
+  signal fifo_out_wr_rst_busy : std_logic;  -- sys_clk domain: gates wr_en
+  signal fifo_out_rd_rst_busy : std_logic;  -- fp_clk  domain: gates rd_en
 
   -- ── CDC of cycles + frame_counter from sys_clk → fp_clk ───────────────
   signal cycles_fp      : std_logic_vector(31 downto 0);
@@ -179,17 +183,23 @@ begin
   xbus_ack  <= ack_q;
 
   -- FIFO_IN read pulse: pop one word when REG_FIFO_POP is read.
+  -- Inhibited while rd_rst_busy is asserted — XPM drops reads issued during
+  -- reset recovery, which would silently desync the sample stream.
   fifo_in_rd_en <= '1' when (access_pulse = '1'
                              and xbus_we = '0'
                              and xbus_addr = REG_FIFO_POP
-                             and fifo_in_empty = '0')
+                             and fifo_in_empty = '0'
+                             and fifo_in_rd_rst_busy = '0')
                        else '0';
 
   -- FIFO_OUT write pulse: push wdat when REG_FIFO_PUSH is written.
+  -- Inhibited while wr_rst_busy is asserted — XPM drops writes issued during
+  -- reset recovery, which would silently drop an output sample.
   fifo_out_wr_en <= '1' when (access_pulse = '1'
                               and xbus_we = '1'
                               and xbus_addr = REG_FIFO_PUSH
-                              and fifo_out_full = '0')
+                              and fifo_out_full = '0'
+                              and fifo_out_wr_rst_busy = '0')
                         else '0';
 
   ---------------------------------------------------------------------------
@@ -200,7 +210,7 @@ begin
   -- prog_full threshold leaves one BTPipe block (1024 bytes = 256 words)
   -- free, matching the safety margin used by fp_uart_bridge.vhd.
   ---------------------------------------------------------------------------
-  fifo_in_wr_en <= pi_wr and not fifo_in_full;
+  fifo_in_wr_en <= pi_wr and not fifo_in_full and not fifo_in_wr_rst_busy;
 
   fifo_in_i : xpm_fifo_async
     generic map (
@@ -237,8 +247,8 @@ begin
       empty         => fifo_in_empty,
       rd_data_count => fifo_in_rd_cnt,
       wr_data_count => fifo_in_wr_cnt,
-      wr_rst_busy   => open,
-      rd_rst_busy   => open,
+      wr_rst_busy   => fifo_in_wr_rst_busy,
+      rd_rst_busy   => fifo_in_rd_rst_busy,
       overflow      => open,
       underflow     => open,
       prog_full     => fifo_in_prog_full,
@@ -254,7 +264,8 @@ begin
       dbiterr       => open
     );
 
-  pi_ready <= not fifo_in_prog_full;
+  -- Hold off the host BTPipeIn while the write side is in reset recovery.
+  pi_ready <= not fifo_in_prog_full and not fifo_in_wr_rst_busy;
 
   ---------------------------------------------------------------------------
   -- FIFO OUT: CPU → host
@@ -303,8 +314,8 @@ begin
       empty         => fifo_out_empty,
       rd_data_count => fifo_out_rd_cnt,
       wr_data_count => fifo_out_wr_cnt,
-      wr_rst_busy   => open,
-      rd_rst_busy   => open,
+      wr_rst_busy   => fifo_out_wr_rst_busy,
+      rd_rst_busy   => fifo_out_rd_rst_busy,
       overflow      => open,
       underflow     => open,
       prog_full     => open,
@@ -320,9 +331,12 @@ begin
       dbiterr       => open
     );
 
-  fifo_out_rd_en <= po_rd and not fifo_out_empty;
+  -- Gate the read side with rd_rst_busy: XPM drops reads during reset
+  -- recovery, and po_ready must stay low so the host BTPipeOut does not
+  -- advance against a FIFO that is not yet serving data.
+  fifo_out_rd_en <= po_rd and not fifo_out_empty and not fifo_out_rd_rst_busy;
   po_data        <= fifo_out_dout;
-  po_ready       <= not fifo_out_empty;
+  po_ready       <= not fifo_out_empty and not fifo_out_rd_rst_busy;
 
   ---------------------------------------------------------------------------
   -- WireOut status (fp_clk domain)

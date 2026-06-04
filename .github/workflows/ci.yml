@@ -91,8 +91,9 @@ jobs:
 
   # ── Zephyr Twister (all configs) ─────────────────────────────────────────
   #
-  # Runs `west twister` using the testcase.yaml in zephyr_app/tests/.
-  # Does NOT require hardware; the neorv32 sim board is used where possible.
+  # Runs `west twister` using the testcase.yaml at the zephyr_app root.
+  # HW-only cases are excluded via --exclude-tag hw; the neorv32 sim board is
+  # used where possible.
   #
   twister:
     name: Twister test suite
@@ -141,9 +142,15 @@ jobs:
 
       - name: Run Twister
         run: |
+          set -o pipefail
+          # -T points at the application root (where testcase.yaml lives next
+          # to CMakeLists.txt / prj.conf); --exclude-tag hw drops the cases
+          # that require a physical XEM7310 board.  pipefail ensures a Twister
+          # failure fails the step rather than being masked by tee's exit code.
           west twister \
-            -T zephyr_app/tests \
+            -T zephyr_app \
             --integration \
+            --exclude-tag hw \
             --inline-logs \
             -v \
             2>&1 | tee twister.log
@@ -248,8 +255,9 @@ jobs:
       - name: Build firmware (FPGA sim config + thread analyzer + stack sentinel)
         working-directory: zephyr_app
         run: |
+          set -o pipefail
           west build \
-            -b neorv32 \
+            -b neorv32/neorv32/minimalboot \
             -d ../build_analysis \
             -- \
             -DCONF_FILE=prj.conf \
@@ -261,24 +269,37 @@ jobs:
 
       - name: Run clang-tidy on application sources
         run: |
+          set -o pipefail
           cd build_analysis
+          # --warnings-as-errors='*' makes clang-tidy exit non-zero on any
+          # finding so this is a real gate; pipefail propagates that exit code
+          # through tee.  Triage findings rather than re-muting the gate.
           clang-tidy \
             --config-file=../zephyr_app/.clang-tidy \
+            --warnings-as-errors='*' \
             --quiet \
             -p compile_commands.json \
             $(find ../zephyr_app/src ../zephyr_app/drivers -name '*.c' -o -name '*.cpp') \
-            2>&1 | tee ../clang_tidy.log || true
-          echo "clang-tidy done (non-zero exit is non-blocking)"
+            2>&1 | tee ../clang_tidy.log
 
       - name: Generate memory map (nm --size-sort)
         run: |
-          riscv64-unknown-elf-nm --size-sort --print-size \
-            build_analysis/zephyr/zephyr.elf \
-            > memory_map.txt 2>&1 || \
-          riscv64-linux-gnu-nm --size-sort --print-size \
-            build_analysis/zephyr/zephyr.elf \
-            > memory_map.txt 2>&1 || true
-          echo "=== Top 20 symbols by size ===" && head -20 memory_map.txt || true
+          set -euo pipefail
+          # Pick whichever RISC-V nm is actually installed (the workflow
+          # installs binutils-riscv64-linux-gnu).  Fail loudly if neither
+          # exists or the ELF is missing, instead of uploading an error log
+          # disguised as a memory map.
+          NM=""
+          for cand in riscv64-unknown-elf-nm riscv64-linux-gnu-nm; do
+            if command -v "$cand" >/dev/null 2>&1; then NM="$cand"; break; fi
+          done
+          if [ -z "$NM" ]; then
+            echo "::error::no RISC-V nm found (expected riscv64-linux-gnu-nm)"
+            exit 1
+          fi
+          test -f build_analysis/zephyr/zephyr.elf
+          "$NM" --size-sort --print-size build_analysis/zephyr/zephyr.elf > memory_map.txt
+          echo "=== Top 20 symbols by size ===" && tail -20 memory_map.txt
 
       - name: Upload analysis artifacts
         if: always()

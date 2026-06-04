@@ -220,7 +220,7 @@ make fpga-synth
 
 # 6. Run full regression
 make SIM_TIME=400ms test-zephyr
-west twister -T zephyr_app/tests --integration
+west twister -T zephyr_app --integration --exclude-tag hw
 
 # 7. Hardware acceptance test (ATP-01 through ATP-10)
 # See docs/acceptance_test_procedure.md
