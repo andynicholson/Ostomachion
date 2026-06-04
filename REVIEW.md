@@ -95,12 +95,12 @@ and no XDC change is required.
 
 ---
 
-## 3. Major findings (⏳ TODO — not addressed in this pass)
+## 3. Major findings
 
 | ID | File | Summary |
 |----|------|---------|
-| M1 | `fft_accel.c` | **Overflow detection is dead code.** `last_overflow` is declared/cleared/read but **never set** anywhere. `fft_accel_get_last_overflow()` always returns false. Either route `m_axis_status_tdata[0]` to a readable register and set the flag, or delete the API. |
-| M2 | `fft_accel.c:323,352` | **Stale-IRQ window.** DMA channels are reset *after* `k_sem_reset()` + the 4096-word fill; a late IOC/ERR ISR in that window re-gives the sem and the next `k_sem_take` returns immediately on stale data. Reset the DMA channels *before* `k_sem_reset()`. |
+| M1 ✅ FIXED 🔍 | `ostomachion_bd.tcl`, `xem7310_top.vhd`, `fft_accel.c` | **Overflow detection was dead code** (`last_overflow` never set). Implemented in fabric: the BD slices `m_axis_status_tdata[0]` out and exposes it (+ its `tvalid` and the xfft `aresetn`) as ports; `xem7310_top.vhd` holds a sticky latch (cleared by the per-transform `aresetn` pulse) fed into the AXI GPIO input channel; the driver reads it at `GPIO_DATA2` (0x08) after IOC and sets `last_overflow`. **🔍 The fabric portions require Vivado synthesis to verify** — see §3a. |
+| M2 ✅ FIXED | `fft_accel.c` | **Stale-IRQ window.** `k_sem_reset()` moved to *after* both DMA channels are reset and the xfft is back out of reset, but before either channel is armed — so a late IOC/ERR ISR from a prior timed-out transfer can no longer survive into the next one. (Previously the reset preceded the ~4096-word fill, leaving the window open.) |
 | M3 | `fft_beat_counter.vhd`, `fp_fft_pipe_bridge.vhd:348` | **CDC contradicts the "stabilisation" docs.** Beat counts feed `okWireOut` combinationally with no synchronizer staging; the 32-bit `cycles`/`frame_count` cross via `xpm_cdc_array_single` (per-bit, can tear). Use `xpm_cdc_array_single` for the quasi-static beat counts and `xpm_cdc_handshake` for the multi-bit cycle count. |
 | M4 | `xem7310.xdc` | **No `set_clock_groups -asynchronous`** between `aclk` and `okUH0`; CDC is guarded only by name-matched `set_false_path` globs that silently match nothing if instances are renamed. Add the async clock group as the primary exception. |
 | M5 | `i2c_neorv32.c:420`, `spi_neorv32.c:346` | **`K_FOREVER` waits with unchecked `_nb` FIFO pushes in the ISR.** A single dropped push / lost FIRQ hangs the calling thread permanently. Use bounded `k_sem_take` timeouts and check the `_nb` return codes. |
@@ -109,6 +109,30 @@ and no XDC change is required.
 | M8 | `wdt_neorv32.c:164` | **STRICT-without-LOCK** contradicts the Kconfig claim that the WDT "cannot be silently disabled"; `disable()` just writes 0. RCAUSE reset-cause reporting is documented but unimplemented. |
 | M9 | `tools/fft_demo/app.py` | **PyQt demo runs the whole FFT round-trip on the GUI thread** (`QTimer.singleShot` → blocking `recv_frame`/`send_frame`), freezing the UI up to 2 s. Move acquisition to a worker thread with queued signal/slot delivery. |
 | M10 | `ci.yml`, `vivado-synth.yml` | **Supply chain:** no third-party action is SHA-pinned (`@v4`); the self-hosted Vivado runner builds an arbitrary `inputs.ref` with no workspace cleanup. Pin actions to SHAs; add `git clean -ffdx` or use an ephemeral runner. |
+
+### 3a. M1 fabric change — hardware verification checklist 🔍
+
+The overflow path touches the block design and top RTL, **neither of which can
+be synthesized or simulated in the review environment** (no Vivado / Artix-7,
+and GHDL cannot elaborate the BD wrapper or `unisim`/`xpm` primitives). The
+following must be confirmed on the next `vivado-synth` run before M1 is
+considered closed:
+
+- **`m_axis_status_tdata` width.** The Tcl queries the pin width and only
+  inserts an `xlslice` when it is > 1 bit. Confirm the slice (or the
+  straight-through connect) elaborates and that bit 0 is the overflow flag for
+  this xfft config (PG109: `OVFLO` is the LSB of the status word).
+- **AXI GPIO dual-channel.** Confirm `C_IS_DUAL=1` with `gpio2_io_i` as a
+  1-bit input synthesizes and that `GPIO2_DATA` (0x08) reads bit 0 within the
+  existing `0x80` range (no address-map change needed).
+- **BD wrapper port names.** The new scalar ports (`fft_status_tvalid`,
+  `fft_status_overflow`, `xfft_aresetn_o`, `fft_overflow_latched`) should pass
+  through `make_wrapper` verbatim (Vivado only mangles bus/interface ports).
+  Verify the generated `ostomachion_bd_wrapper.vhd` matches the names used in
+  `xem7310_top.vhd`.
+- **End-to-end.** With a deliberately over-amplitude input frame, confirm
+  `fft_accel_get_last_overflow()` returns true, and that it returns false for a
+  well-scaled frame (the latch clears on the per-transform `aresetn`).
 
 ---
 
@@ -159,8 +183,9 @@ and no XDC change is required.
    gates can fail.
 2. ✅ **C1 fences, C3 FIFO reset-busy** — the two genuine data-corruption /
    lockup bugs in the shipped datapath.
-3. ⏳ **M1/M2/M5/M6/M8** — driver correctness (implement-or-remove overflow,
-   reorder the DMA reset, bounded waits, double-STOP, WDT lock contradiction).
+3. ✅ **M1/M2** — overflow detection implemented in fabric (pending HW verify,
+   §3a) and the stale-IRQ DMA-reset reorder. ⏳ **M5/M6/M8** remain — bounded
+   waits, I2C double-STOP, WDT lock contradiction.
 4. ⏳ **M4 / M3** — timing exceptions and CDC staging before real timing closure.
 5. ⏳ **Doc reconciliation pass** — address map, "stabilisation," overflow API,
    WDT guarantee. Treat docs as code: a claimed guarantee needs an enforcing

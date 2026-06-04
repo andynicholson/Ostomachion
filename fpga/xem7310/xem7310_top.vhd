@@ -86,6 +86,18 @@ architecture rtl of xem7310_top is
   signal periph_rstn : std_logic_vector(0 downto 0);
   signal mext_irq    : std_logic;
 
+  -- ── xfft overflow capture (m_axis_status_tdata[0], qualified by tvalid) ──
+  -- The BD slices the overflow bit out (fft_status_overflow) alongside its
+  -- valid strobe (fft_status_tvalid).  We latch it sticky here and feed it
+  -- back into the BD's AXI GPIO input channel so the CPU can read it at
+  -- GPIO2_DATA (0x08).  The latch is cleared by the same xfft aresetn that
+  -- firmware pulses at the start of every transform, so the flag always
+  -- reflects exactly the frame just computed.  See ACCEL_ARCH.md §2.3.
+  signal fft_status_tvalid    : std_logic;
+  signal fft_status_overflow  : std_logic;
+  signal fft_overflow_latched : std_logic := '0';
+  signal xfft_aresetn         : std_logic;
+
   -- ── NEORV32 scalar outputs (std_ulogic → converted to std_logic) ─────────
   signal uart0_txd_u : std_ulogic;
   signal spi_clk_u   : std_ulogic;
@@ -363,8 +375,28 @@ begin
       fft_dbg_s_data_tready    => fft_dbg_s_data_tready,
       fft_dbg_m_data_tvalid    => fft_dbg_m_data_tvalid,
       fft_dbg_m_data_tready    => fft_dbg_m_data_tready,
-      fft_dbg_m_data_tlast     => fft_dbg_m_data_tlast
+      fft_dbg_m_data_tlast     => fft_dbg_m_data_tlast,
+      fft_status_tvalid        => fft_status_tvalid,
+      fft_status_overflow      => fft_status_overflow,
+      xfft_aresetn_o           => xfft_aresetn,
+      fft_overflow_latched     => fft_overflow_latched
     );
+
+  -- ── xfft overflow sticky latch ───────────────────────────────────────────
+  -- Set when the xfft asserts m_axis_status_tvalid with the overflow bit high;
+  -- held until the xfft pipeline is reset (aresetn low), which firmware pulses
+  -- at the start of every transform.  Result is fed back into the BD's AXI
+  -- GPIO input channel (gpio2_io_i) for the CPU to read at GPIO2_DATA 0x08.
+  process (clk)
+  begin
+    if rising_edge(clk) then
+      if xfft_aresetn = '0' then
+        fft_overflow_latched <= '0';
+      elsif fft_status_tvalid = '1' and fft_status_overflow = '1' then
+        fft_overflow_latched <= '1';
+      end if;
+    end if;
+  end process;
 
   -- ── FFT m_axis_data beat counter ─────────────────────────────────────────
   -- Passive observer that counts xfft output beats (tvalid && tready) and
