@@ -399,8 +399,13 @@ class _AcquisitionWorker(QtCore.QObject):
             try:
                 result = self._process_one_frame(frame)
             except TransportError as exc:
+                # Capture the device state at the moment of failure so we can
+                # tell apart wait_frame_done timeouts from fifo_out stalls and
+                # see whether frame_counter advanced past us, fell behind, or
+                # wrapped weirdly across the M3 handshake.
+                state = self._snapshot_state()
                 self._running = False
-                self.failed.emit(f"transport: {exc}")
+                self.failed.emit(f"transport: {exc}  [{state}]")
                 break
             except Exception:  # noqa: BLE001
                 self._running = False
@@ -411,6 +416,26 @@ class _AcquisitionWorker(QtCore.QObject):
             # Deliver any queued stop()/set_input()/close() calls.
             QtCore.QCoreApplication.processEvents()
         self.stopped.emit()
+
+    def _snapshot_state(self) -> str:
+        # Best-effort device-state dump for failure messages.  Does not raise:
+        # if the transport is wedged we still want to print whatever we can.
+        try:
+            in_cnt, out_cnt = self._transport.fifo_counts()
+        except Exception:  # noqa: BLE001
+            in_cnt = out_cnt = -1
+        try:
+            cur_frame = self._transport.frame_counter()
+        except Exception:  # noqa: BLE001
+            cur_frame = -1
+        try:
+            cur_cycles = self._transport.hw_cycles()
+        except Exception:  # noqa: BLE001
+            cur_cycles = -1
+        return (f"last_frame_n={self._last_frame_n} "
+                f"device_frame={cur_frame} "
+                f"fifo_in={in_cnt} fifo_out={out_cnt} "
+                f"hw_cycles={cur_cycles}")
 
     def _process_one_frame(self, input_q15) -> dict:
         input_complex = q15_to_complex(input_q15)
