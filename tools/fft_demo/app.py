@@ -347,6 +347,17 @@ class _AcquisitionWorker(QtCore.QObject):
         if not self._open:
             self.failed.emit("Open FrontPanel first.")
             return
+        # Resync to the device's current frame counter on every (re)start so
+        # a previous timed-out run cannot poison this one with a stale
+        # _last_frame_n that wait_frame_done would never see equal again.
+        try:
+            self._last_frame_n = self._transport.frame_counter()
+        except TransportError as exc:
+            self.failed.emit(f"transport: {exc}")
+            return
+        self._pending_lock.lock()
+        self._pending_frame = None  # drop anything stale from the prior run
+        self._pending_lock.unlock()
         self._running = True
         self._run_loop()
 
@@ -370,11 +381,20 @@ class _AcquisitionWorker(QtCore.QObject):
         while self._running:
             self._pending_lock.lock()
             frame = self._pending_frame
+            # CONSUME the staged frame: clearing it under the lock guarantees
+            # one transform per push.  If we left it set, the loop would race
+            # ahead of the GUI's _on_frame_ready -> _push_input cycle and
+            # re-send the same input frame, queueing duplicate output frames
+            # in the host-pipe FIFO.  Eventually the FIFO/firmware backpressure
+            # stalls frame_count_o and the next recv_frame times out.
+            self._pending_frame = None
             self._pending_lock.unlock()
             if frame is None:
-                # No input staged yet — let the event loop run and retry.
-                QtCore.QThread.msleep(2)
+                # No input staged yet — yield briefly and re-poll.  We process
+                # events here so queued slots (set_input, stop, close) actually
+                # get delivered between iterations.
                 QtCore.QCoreApplication.processEvents()
+                QtCore.QThread.msleep(2)
                 continue
             try:
                 result = self._process_one_frame(frame)
@@ -521,9 +541,12 @@ class FftDemoWindow(QtWidgets.QMainWindow):
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.stats.set_status("running", ok=True)
-        # Stage the first input frame, then start the worker loop.
-        self._push_input.emit(self.source_panel.make_frame())
+        # Order matters: request the start FIRST (worker resyncs frame_counter
+        # there), THEN stage the first input frame.  Both are queued slots, so
+        # Qt preserves order — but reading frame_counter before pushing input
+        # makes the dependency obvious in the source.
         self._request_start.emit()
+        self._push_input.emit(self.source_panel.make_frame())
 
     def on_stop(self) -> None:
         self.running = False
