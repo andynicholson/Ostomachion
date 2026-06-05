@@ -21,7 +21,6 @@ tests:
     tags: [baseline, spi, i2c, gpio]
     extra_configs:
       - CONFIG_ZTEST=y
-      - CONFIG_ZTEST_NEW_API=y
     harness: ztest
     harness_config:
       fixture: neorv32_sim
@@ -34,9 +33,8 @@ tests:
     extra_configs:
       - CONFIG_FFT_ACCEL=y
       - CONFIG_ZTEST=y
-      - CONFIG_ZTEST_NEW_API=y
     extra_args:
-      - OVERLAY_CONFIG=app_accel.overlay
+      - DTC_OVERLAY_FILE=app.overlay;app_fpga.overlay;app_accel.overlay
 
   # ── Shell / interactive firmware (compile-only on sim) ───────────────────
   ostomachion.shell.compile:
@@ -47,7 +45,7 @@ tests:
       - CONFIG_SHELL=y
       - CONFIG_FFT_ACCEL=y
     extra_args:
-      - OVERLAY_CONFIG=app_accel.overlay
+      - DTC_OVERLAY_FILE=app.overlay;app_fpga.overlay;app_accel.overlay
 
   # ── WDT driver build verification (compile + sim run on neorv32 sim) ─────
   # WDT DTS node is only in app_fpga.overlay; tests skip gracefully when the
@@ -58,7 +56,6 @@ tests:
     tags: [wdt]
     extra_configs:
       - CONFIG_ZTEST=y
-      - CONFIG_ZTEST_NEW_API=y
       - CONFIG_WATCHDOG=y
     harness: ztest
     harness_config:
@@ -76,15 +73,20 @@ tests:
   #      (BOOT_MODE_SELECT=0) at 19200 baud on the external UART adapter.
   #
   # These tests are tagged [hw] so they can be excluded from CI-only runs:
-  #   west twister -T zephyr_app/tests --exclude-tag hw
+  #   west twister -T zephyr_app --exclude-tag hw
+  #
+  # platform_allow points at the buildable neorv32/neorv32/minimalboot
+  # target so Twister will accept the testcase definitions on a hosted
+  # runner; the [hw] tag is the actual gate that keeps these out of
+  # hosted-CI runs.  Self-hosted xem7310 runners pick them up via
+  # '--filter-tag hw' (or the equivalent integration-tag selection).
   #
   ostomachion.hw.peripherals:
-    platform_allow: xem7310
+    platform_allow: neorv32/neorv32/minimalboot
     build_only: false
     tags: [hw, spi, i2c, gpio, wdt]
     extra_configs:
       - CONFIG_ZTEST=y
-      - CONFIG_ZTEST_NEW_API=y
       - CONFIG_WATCHDOG=y
       - CONFIG_WDT_NEORV32=y
       - CONFIG_SPI_NEORV32_INTERRUPT=y
@@ -97,12 +99,11 @@ tests:
       fixture: xem7310_hw
 
   ostomachion.hw.fft:
-    platform_allow: xem7310
+    platform_allow: neorv32/neorv32/minimalboot
     build_only: false
     tags: [hw, fft, accelerator]
     extra_configs:
       - CONFIG_ZTEST=y
-      - CONFIG_ZTEST_NEW_API=y
       - CONFIG_FFT_ACCEL=y
       - CONFIG_WATCHDOG=y
       - CONFIG_WDT_NEORV32=y

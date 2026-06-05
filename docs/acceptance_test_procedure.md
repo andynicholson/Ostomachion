@@ -415,7 +415,7 @@ on the repository with the label **`xem7310`**:
 6. Set `UART_DEVICE` environment variable on the runner to the correct `/dev/ttyUSBx` path.
 
 The HIL CI jobs are automatically excluded from `ubuntu-latest` runners
-(`platform_allow: xem7310`). To run only HIL tests locally:
+(`tags: [hw]`, filtered out via `--exclude-tag hw`). To run only HIL tests locally:
 ```bash
-west twister -T zephyr_app --filter-tags hw -p xem7310
+west twister -T zephyr_app --filter-tag hw -p neorv32/neorv32/minimalboot
 ```
