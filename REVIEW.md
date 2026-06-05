@@ -110,29 +110,61 @@ and no XDC change is required.
 | M9 | `tools/fft_demo/app.py` | **PyQt demo runs the whole FFT round-trip on the GUI thread** (`QTimer.singleShot` → blocking `recv_frame`/`send_frame`), freezing the UI up to 2 s. Move acquisition to a worker thread with queued signal/slot delivery. |
 | M10 | `ci.yml`, `vivado-synth.yml` | **Supply chain:** no third-party action is SHA-pinned (`@v4`); the self-hosted Vivado runner builds an arbitrary `inputs.ref` with no workspace cleanup. Pin actions to SHAs; add `git clean -ffdx` or use an ephemeral runner. |
 
-### 3a. M1 fabric change — hardware verification checklist 🔍
+### 3a. M1 fabric change — hardware verification checklist
 
-The overflow path touches the block design and top RTL, **neither of which can
-be synthesized or simulated in the review environment** (no Vivado / Artix-7,
-and GHDL cannot elaborate the BD wrapper or `unisim`/`xpm` primitives). The
-following must be confirmed on the next `vivado-synth` run before M1 is
-considered closed:
+Verified on a remote **Vivado 2025.1** host (Artix-7 `xc7a200tfbg484-1`) against
+branch HEAD. Status of each item:
 
-- **`m_axis_status_tdata` width.** The Tcl queries the pin width and only
-  inserts an `xlslice` when it is > 1 bit. Confirm the slice (or the
-  straight-through connect) elaborates and that bit 0 is the overflow flag for
-  this xfft config (PG109: `OVFLO` is the LSB of the status word).
-- **AXI GPIO dual-channel.** Confirm `C_IS_DUAL=1` with `gpio2_io_i` as a
-  1-bit input synthesizes and that `GPIO2_DATA` (0x08) reads bit 0 within the
-  existing `0x80` range (no address-map change needed).
-- **BD wrapper port names.** The new scalar ports (`fft_status_tvalid`,
-  `fft_status_overflow`, `xfft_aresetn_o`, `fft_overflow_latched`) should pass
-  through `make_wrapper` verbatim (Vivado only mangles bus/interface ports).
-  Verify the generated `ostomachion_bd_wrapper.vhd` matches the names used in
-  `xem7310_top.vhd`.
-- **End-to-end.** With a deliberately over-amplitude input frame, confirm
-  `fft_accel_get_last_overflow()` returns true, and that it returns false for a
-  well-scaled frame (the latch clears on the per-transform `aresetn`).
+- ✅ **`m_axis_status_tdata` width.** The width-querying Tcl ran against the real
+  xfft IP; `validate_bd_design` + `make_wrapper` completed cleanly and the
+  `xlslice`-vs-straight-through branch resolved without error. (Bit 0 = `OVFLO`
+  per PG109 still to be confirmed by the over-amplitude HW test below.)
+- ✅ **AXI GPIO dual-channel.** `C_IS_DUAL=1` with `gpio2_io_i` synthesized; the
+  generated wrapper exposes the input port and the existing `0x80` range is
+  unchanged (no address-map edit needed).
+- ✅ **BD wrapper port names.** The generated `ostomachion_bd_wrapper.vhd`
+  exposes `fft_status_tvalid`, `xfft_aresetn_o`, `fft_overflow_latched`, and
+  `fft_status_overflow`. **This surfaced a real bug:** single-bit ports sourced
+  from a vector are emitted as `STD_LOGIC_VECTOR(0 to 0)`, but `xem7310_top.vhd`
+  had declared the matching actuals as scalar `std_logic` — a type error that
+  failed `synth_design` elaboration. Fixed (commit "Fix M1 scalar/vector port
+  mismatch …"): both actuals are now `std_logic_vector(0 downto 0)`, indexed
+  `(0)` at the latch. Full top + BD now elaborates with **0 Errors, 0 Critical
+  Warnings**. This bug was invisible to GHDL/local review.
+- 🔍 **End-to-end (still requires the board).** With a deliberately
+  over-amplitude input frame, confirm `fft_accel_get_last_overflow()` returns
+  true, and false for a well-scaled frame (the latch clears on the per-transform
+  `aresetn`). Not possible without the XEM7310 in the loop.
+
+### 3b. Timing closure — baseline correction + regression check
+
+An initial `build/xem7310/timing_summary.rpt` on the remote (dated Jun 1,
+`25e235f4-dirty`) showed **WNS −3.673 ns / 202 failing endpoints** and a full
+**DDR3 MIG** (`mig_0`, 800 MHz `freq_refclk`, a 24,993-endpoint `clk_pll_i`).
+The current tree has **no MIG** — that report came from a *different
+in-development branch* and is **not a valid baseline**. The correct baseline is
+`master`, which closes timing with the present constraint set.
+
+Regression scope of this branch vs `master` is therefore the relevant question,
+and it is small and low-risk:
+- **`xem7310.xdc` is unchanged vs `master`** → zero clock-constraint deltas; the
+  same exceptions that let master close still apply.
+- **No new clock-domain crossing was introduced.** The M1 overflow path is
+  entirely `aclk → aclk` (status latch) → AXI GPIO → CPU; it never touches
+  `okClk`/`okUH0`. C3's added logic (FIFO reset-busy AND-gates) is same-domain.
+- A full `make fpga-synth` on this branch HEAD is **in progress** to confirm
+  WNS/WHS ≥ 0 and quantify the margin cost; results to be appended here.
+
+> **Note (PR hygiene, not timing):** `xem7310_top.vhd` was rewritten with CRLF
+> line endings on this branch (master is LF), so git reports ~1470 changed lines
+> where the real content delta is only +37/−1. Normalize to LF (`dos2unix`) and
+> recommit before the PR. No synthesis impact.
+
+> **M3/M4 remain open and are the real timing-robustness work:** the current
+> closure relies on name-matched `set_false_path` globs (M4) rather than a
+> `set_clock_groups -asynchronous` between `aclk` and `okUH0`, and the multi-bit
+> `cycles` CDC can tear (M3). These don't block this branch (XDC unchanged) but
+> should be done before depending on the constraints across instance renames.
 
 ---
 
