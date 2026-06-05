@@ -131,10 +131,41 @@ branch HEAD. Status of each item:
   mismatch …"): both actuals are now `std_logic_vector(0 downto 0)`, indexed
   `(0)` at the latch. Full top + BD now elaborates with **0 Errors, 0 Critical
   Warnings**. This bug was invisible to GHDL/local review.
-- 🔍 **End-to-end (still requires the board).** With a deliberately
-  over-amplitude input frame, confirm `fft_accel_get_last_overflow()` returns
-  true, and false for a well-scaled frame (the latch clears on the per-transform
-  `aresetn`). Not possible without the XEM7310 in the loop.
+- ✅ **End-to-end on the XEM7310 DUT.** Ran a new `fft overflow` shell command
+  (amplitude sweep from quiet to full-scale random complex) on real hardware via
+  the FrontPanel UART bridge. Findings:
+  - All transforms complete correctly (4096 beats/frame, PG109-correct) and the
+    overflow readback register reads cleanly (`GPIO2 = 0x00000000`, not floating)
+    — so the dual-channel GPIO input path and CPU read are functional.
+  - With the production scaling schedule, `overflow=false` at *every* amplitude
+    including full-scale random. This is **correct behaviour, not a stuck flag**:
+    the config word `0x1555` decodes to a per-stage right-shift of `[2,2,2,2,2,2]`
+    = ÷4 per radix-4 stage × 6 = **÷4096 exact unity gain** — the conservative
+    schedule under which in-range Q1.15 input cannot overflow an intermediate
+    stage. No normal input trips the flag by design.
+  - **Positive-assertion proof (flag is not stuck-at-0) — CONFIRMED on the DUT.**
+    Built a throwaway bitstream with stage 1 unscaled (`0x1551`, ÷1024 total) so
+    full-scale input overflows an intermediate stage, programmed it, and reran
+    `fft overflow`. Result:
+    ```
+    rand peak~ 1024  overflow=false  GPIO2=0x00000000
+    rand peak~ 8190  overflow=false  GPIO2=0x00000000
+    rand peak~32760  overflow=TRUE   GPIO2=0x00000001
+    clear-check quiet frame after full-scale  overflow=false
+    saw_false=1 saw_true=1 clears_after_high=1  PASS
+    ```
+    plus the driver's `LOG_WRN("FFT overflow occurred …")` fired. This proves the
+    *entire* M1 chain toggles correctly: xfft `m_axis_status_tdata[0]` → fabric
+    sticky latch (`GPIO2` bit 0) → driver `last_overflow` → `LOG_WRN`, and the
+    per-transform `aresetn` clears the latch. The under-scaling edit was reverted
+    immediately (BD tcl back to `5461`); the throwaway config is **not** in the
+    tree, and the production bitstream (sha `06afbae5…`) was restored to the DUT.
+
+**M1 verdict: fully verified.** On the production unity-gain schedule the flag
+correctly stays low for all in-range input; on a deliberately under-scaled
+config it asserts and clears exactly as designed. Permanent test artifact added:
+the `fft overflow` shell command. Upload-path robustness fix (`uart_upload.py`:
+retry + longer FrontPanel-pipe handshake timeout) committed alongside.
 
 ### 3b. Timing closure — baseline correction + regression check
 

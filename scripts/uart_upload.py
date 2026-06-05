@@ -110,14 +110,19 @@ def main():
     try:
         configure_port(fd, args.baud)
 
-        # Abort auto-boot
-        os.write(fd, b" ")
-        time.sleep(0.2)
-        drain(fd, timeout=0.3)
-
-        # Send upload command
-        os.write(fd, b"u")
-        found, resp = wait_for(fd, b"Awaiting neorv32_exe.bin", timeout=5.0)
+        # Abort auto-boot (retry: the FrontPanel USB-pipe round-trip can exceed
+        # the old fixed 5s, and a single stray byte can desync the prompt).
+        found = False
+        for attempt in range(3):
+            os.write(fd, b" ")
+            time.sleep(0.3)
+            drain(fd, timeout=0.5)
+            os.write(fd, b"u")
+            found, resp = wait_for(fd, b"Awaiting neorv32_exe.bin", timeout=20.0)
+            if found:
+                break
+            print(f"  (retry {attempt+1}: no Awaiting yet)", file=sys.stderr)
+            drain(fd, timeout=1.0)
         if not found:
             print("Bootloader response error!", file=sys.stderr)
             print("Reset processor before starting the upload.", file=sys.stderr)
