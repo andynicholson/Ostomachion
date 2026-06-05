@@ -99,7 +99,6 @@ jobs:
     name: Twister test suite
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: sim   # only run if the basic sim passes
 
     steps:
       - name: Checkout
@@ -219,7 +218,6 @@ jobs:
     name: Firmware static analysis
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: twister   # only run after the build-only Twister check passes
 
     steps:
       - name: Checkout
