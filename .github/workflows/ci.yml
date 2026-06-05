@@ -126,7 +126,16 @@ jobs:
           echo "WEST_TOPDIR=$PARENT" >> "$GITHUB_ENV"
 
       - name: Install Zephyr Python requirements
-        run: pip3 install -r "$WEST_TOPDIR/zephyr/scripts/requirements-base.txt"
+        # Twister transitively imports twisterlib.hardwaremap (even with no
+        # hardware targets), which needs natsort + friends.  natsort lives in
+        # requirements-run-test.txt; pyelftools/ply etc. live in
+        # requirements-build-test.txt.  Without these, Twister fails to load
+        # before it can run a single testcase.
+        run: |
+          pip3 install \
+            -r "$WEST_TOPDIR/zephyr/scripts/requirements-base.txt" \
+            -r "$WEST_TOPDIR/zephyr/scripts/requirements-build-test.txt" \
+            -r "$WEST_TOPDIR/zephyr/scripts/requirements-run-test.txt"
 
       - name: Download Zephyr SDK (minimal)
         working-directory: ${{ env.WEST_TOPDIR }}
@@ -238,7 +247,16 @@ jobs:
           echo "WEST_TOPDIR=$PARENT" >> "$GITHUB_ENV"
 
       - name: Install Zephyr Python requirements
-        run: pip3 install -r "$WEST_TOPDIR/zephyr/scripts/requirements-base.txt"
+        # Twister transitively imports twisterlib.hardwaremap (even with no
+        # hardware targets), which needs natsort + friends.  natsort lives in
+        # requirements-run-test.txt; pyelftools/ply etc. live in
+        # requirements-build-test.txt.  Without these, Twister fails to load
+        # before it can run a single testcase.
+        run: |
+          pip3 install \
+            -r "$WEST_TOPDIR/zephyr/scripts/requirements-base.txt" \
+            -r "$WEST_TOPDIR/zephyr/scripts/requirements-build-test.txt" \
+            -r "$WEST_TOPDIR/zephyr/scripts/requirements-run-test.txt"
 
       - name: Download Zephyr SDK (minimal)
         working-directory: ${{ env.WEST_TOPDIR }}
