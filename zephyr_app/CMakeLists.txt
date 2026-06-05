@@ -20,6 +20,8 @@ if(CONFIG_ZTEST)
     tests/test_spi.cpp
     tests/test_i2c.cpp
     tests/test_gpio.cpp
+    # Hardware-independent filter-mask math: runs on the NEORV32 sim model.
+    tests/test_filter_mask.cpp
   )
   if(CONFIG_WDT_NEORV32)
     target_sources(app PRIVATE tests/test_wdt.cpp)

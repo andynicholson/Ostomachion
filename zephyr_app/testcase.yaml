@@ -25,6 +25,20 @@ tests:
     harness_config:
       fixture: neorv32_sim
 
+  # ── Filter-mask synthesis math (hardware-independent; runs on sim) ──────
+  # The pure per-bin mask synthesis touches no Xilinx IP, so it runs on the
+  # NEORV32 GHDL model exactly like the SPI/I2C/GPIO suites.  Companion to the
+  # host-native host_tests/test_filter_mask.cpp.
+  ostomachion.filter.mask:
+    platform_allow: neorv32/neorv32/minimalboot
+    build_only: false
+    tags: [filter]
+    extra_configs:
+      - CONFIG_ZTEST=y
+    harness: ztest
+    harness_config:
+      fixture: neorv32_sim
+
   # ── FFT accelerator suite (compile-only on sim; runs on HW with bitstream)
   ostomachion.fft.compile:
     platform_allow: neorv32/neorv32/minimalboot

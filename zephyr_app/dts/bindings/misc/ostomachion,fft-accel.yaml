@@ -36,12 +36,19 @@ properties:
   reg-names:
     required: true
     description: |
-      Must be "dma", "tx_bram", "rx_bram", "intc", "gpio" in that order.
+      Must start with "dma", "tx_bram", "rx_bram", "intc", "gpio" in that order.
         dma     — AXI DMA control registers (128 B at 0x40000000)
         tx_bram — TX BRAM input buffer (32 KB at 0x41000000)
         rx_bram — RX BRAM output buffer (32 KB at 0x41008000)
         intc    — AXI INTC (128 B decode at 0x40010000; PG099 regs in low 32 B)
-        gpio    — AXI GPIO (128 B at 0x40020000; bit 0 = xfft aresetn)
+        gpio    — AXI GPIO (128 B at 0x40020000; ch1 bit0 = xfft aresetn,
+                  ch1 bit1 = filter bypass; ch2 bit0/bit1 = overflow readback)
+
+      OPTIONAL trailing entry (filter-pipeline bitstream only):
+        coeff_bram — per-bin complex filter coefficient BRAM
+                     (16 KB at 0x42000000; 4096 × {im,re} Q1.15).
+      When absent the driver runs forward-FFT-only and
+      fft_accel_load_coeffs() returns -ENOTSUP.
 
   dma-max-bytes:
     type: int

@@ -61,13 +61,24 @@ LOG_MODULE_REGISTER(fft_accel, CONFIG_FFT_ACCEL_LOG_LEVEL);
 #define DT_DRV_COMPAT ostomachion_fft_accel
 
 /* ── AXI GPIO register offsets (Xilinx PG144) ───────────────────────────── */
-#define GPIO_DATA   0x00  /* Ch1 data (output): bit 0 = xfft_aresetn gate     */
-#define GPIO_DATA2  0x08  /* Ch2 data (input):  bit 0 = latched xfft overflow */
+#define GPIO_DATA   0x00  /* Ch1 data (output): bit0 = xfft_aresetn gate,
+			   *                    bit1 = filter bypass select   */
+#define GPIO_DATA2  0x08  /* Ch2 data (input):  bit0 = latched xfft overflow,
+			   *                    bit1 = aggregated stage overflow */
 
-/* xfft overflow flag, read from the AXI GPIO input channel.  Set in fabric
- * when m_axis_status_tdata[0] is high during a frame; cleared by the xfft
- * aresetn pulse this driver issues at the start of every transform. */
-#define GPIO_OVERFLOW BIT(0)
+/* GPIO ch1 output bits (xem7310_top.vhd routing). */
+#define GPIO_ARESETN       BIT(0)  /* 1 = xfft running, 0 = pipeline reset      */
+#define GPIO_FILTER_BYPASS BIT(1)  /* 1 = S2MM <- forward FFT (bins),
+				    * 0 = S2MM <- filter + IFFT (round trip).
+				    * Unimplemented (RAZ/WI) on a forward-only
+				    * bitstream, so writes are harmless there.   */
+
+/* xfft overflow flags, read from the AXI GPIO input channel.  bit0 is set in
+ * fabric when xfft_0 m_axis_status_tdata[0] is high during a frame; bit1
+ * aggregates xfft_0 OR xfft_1 OR normalizer-saturation.  Both are cleared by
+ * the xfft aresetn pulse this driver issues at the start of every transform. */
+#define GPIO_OVERFLOW     BIT(0)
+#define GPIO_OVERFLOW_AGG BIT(1)
 
 /* ── AXI DMA register offsets (simple/register-direct mode) ─────────────── */
 #define DMA_MM2S_DMACR  0x00  /* MM2S DMA Control Register   */
@@ -120,13 +131,14 @@ LOG_MODULE_REGISTER(fft_accel, CONFIG_FFT_ACCEL_LOG_LEVEL);
 /* ── Driver config / data structs ──────────────────────────────────────── */
 
 struct fft_accel_config {
-	uintptr_t dma_base;     /* AXI DMA base address          */
-	uintptr_t tx_bram_base; /* TX BRAM base address          */
-	uintptr_t rx_bram_base; /* RX BRAM base address          */
-	uintptr_t intc_base;    /* AXI INTC base address         */
-	uintptr_t gpio_base;    /* AXI GPIO base (xfft reset)    */
-	uint32_t  dma_max_bytes; /* Maximum DMA transfer length, bytes */
-	uint32_t  irq_num;      /* NEORV32 mext IRQ line         */
+	uintptr_t dma_base;       /* AXI DMA base address          */
+	uintptr_t tx_bram_base;   /* TX BRAM base address          */
+	uintptr_t rx_bram_base;   /* RX BRAM base address          */
+	uintptr_t intc_base;      /* AXI INTC base address         */
+	uintptr_t gpio_base;      /* AXI GPIO base (xfft reset)    */
+	uintptr_t coeff_bram_base; /* Filter coeff BRAM base, 0 if absent (no filter HW) */
+	uint32_t  dma_max_bytes;  /* Maximum DMA transfer length, bytes */
+	uint32_t  irq_num;        /* NEORV32 mext IRQ line         */
 };
 
 struct fft_accel_data {
@@ -134,6 +146,7 @@ struct fft_accel_data {
 	struct k_mutex xfer_lock;
 	int            last_error;    /* set by ISR on DMA error; read by transform */
 	bool           last_overflow; /* read from GPIO overflow latch after IOC; cleared at transform start */
+	bool           filter_bypass; /* shadow of GPIO ch1 bit1; true = forward FFT only */
 };
 
 /* ── Register accessors ─────────────────────────────────────────────────── */
@@ -169,6 +182,22 @@ static inline void gpio_wr(const struct fft_accel_config *cfg,
 static inline uint32_t gpio_rd(const struct fft_accel_config *cfg, uint32_t off)
 {
 	return sys_read32(cfg->gpio_base + off);
+}
+
+/**
+ * gpio_data_word() — compose the GPIO ch1 output word.
+ *
+ * bit0 (GPIO_ARESETN) is the per-transform xfft reset gate; bit1
+ * (GPIO_FILTER_BYPASS) selects the S2MM source (forward FFT vs filtered IFFT).
+ * The reset sequence toggles bit0 while bit1 must hold its selected value, so
+ * every GPIO_DATA write goes through here rather than writing a bare 0/1 (which
+ * would clear the bypass bit mid-transform).  The shadow lives in data->
+ * filter_bypass because the GPIO output channel is write-only.
+ */
+static inline uint32_t gpio_data_word(bool aresetn_high, bool filter_bypass)
+{
+	return (aresetn_high ? GPIO_ARESETN : 0u) |
+	       (filter_bypass ? GPIO_FILTER_BYPASS : 0u);
 }
 
 /**
@@ -271,21 +300,30 @@ static void fft_accel_isr(const struct device *dev)
 /* ── Public API ─────────────────────────────────────────────────────────── */
 
 /**
- * fft_accel_transform() — run one N-point complex FFT.
+ * fft_accel_run() — shared transform worker for the FFT-only and filtered paths.
  *
- * Serialised by an internal mutex: a second caller blocks until the first
- * call returns.  Not safe for use from ISR context.
+ * The DMA / INTC / aresetn sequence is byte-for-byte identical whether or not
+ * the filter is engaged; the ONLY difference is which datapath the fabric
+ * routes to S2MM, selected by GPIO ch1 bit1.  Keeping a single worker (rather
+ * than forking the load-bearing sequence) preserves every ordering invariant
+ * in ACCEL_ARCH.md §3-§4.  @p filter_bypass is latched into data->filter_bypass
+ * under the mutex so the reset-sequence GPIO writes carry the right selection.
  *
- * @param dev  FFT accelerator device
- * @param in   Input samples (re/im Q1.15), length n
- * @param out  Output buffer, same size
- * @param n    Transform size (must be 4096; other values return -EINVAL)
+ * Serialised by an internal mutex: a second caller blocks until the first call
+ * returns.  Not safe for use from ISR context.
+ *
+ * @param dev           FFT accelerator device
+ * @param in            Input samples (re/im Q1.15), length n
+ * @param out           Output buffer, same size
+ * @param n             Transform size (must be 4096; other values return -EINVAL)
+ * @param filter_bypass true = forward FFT bins to S2MM; false = filter + IFFT
  * @return 0 on success, negative errno on error or timeout
  */
-int fft_accel_transform(const struct device *dev,
-			const struct fft_sample_t *in,
-			struct fft_sample_t *out,
-			size_t n)
+static int fft_accel_run(const struct device *dev,
+			 const struct fft_sample_t *in,
+			 struct fft_sample_t *out,
+			 size_t n,
+			 bool filter_bypass)
 {
 	if (!device_is_ready(dev)) {
 		return -ENODEV;
@@ -324,8 +362,9 @@ int fft_accel_transform(const struct device *dev,
 
 	/* Serialise concurrent callers */
 	k_mutex_lock(&data->xfer_lock, K_FOREVER);
-	data->last_error    = 0;
-	data->last_overflow = false;
+	data->last_error     = 0;
+	data->last_overflow  = false;
+	data->filter_bypass  = filter_bypass;  /* drives GPIO ch1 bit1 in the reset seq */
 
 	/* 1. Write input samples to TX BRAM */
 	for (size_t i = 0; i < n; i++) {
@@ -361,7 +400,9 @@ int fft_accel_transform(const struct device *dev,
 	 * register writes.  At 100 MHz, 1 us = 100 cycles (50× margin over the
 	 * 2-cycle minimum).
 	 */
-	gpio_wr(cfg, GPIO_DATA, 0x0);  /* assert xfft reset (aresetn=0) */
+	/* assert xfft reset (aresetn=0), holding the bypass selection for this
+	 * transform */
+	gpio_wr(cfg, GPIO_DATA, gpio_data_word(false, data->filter_bypass));
 	k_busy_wait(1);                /* hold aresetn=0 for >=2 aclk cycles */
 
 	/* Check each reset explicitly.  dma_reset_channel() returns 0 or a
@@ -373,12 +414,14 @@ int fft_accel_transform(const struct device *dev,
 		reset_err = dma_reset_channel(cfg, DMA_S2MM_DMACR);
 	}
 	if (reset_err != 0) {
-		gpio_wr(cfg, GPIO_DATA, 0x1);  /* release xfft reset before exit */
+		/* release xfft reset before exit */
+		gpio_wr(cfg, GPIO_DATA, gpio_data_word(true, data->filter_bypass));
 		k_mutex_unlock(&data->xfer_lock);
 		return reset_err;              /* -ETIMEDOUT, not a blanket -EIO */
 	}
 
-	gpio_wr(cfg, GPIO_DATA, 0x1);  /* release xfft reset (aresetn=1) */
+	/* release xfft reset (aresetn=1), bypass selection unchanged */
+	gpio_wr(cfg, GPIO_DATA, gpio_data_word(true, data->filter_bypass));
 	k_busy_wait(1);                /* let xfft pipeline come out of reset */
 
 	/* Discard any stale completion left by a previously timed-out transfer.
@@ -476,8 +519,14 @@ int fft_accel_transform(const struct device *dev,
 	 * after this frame's S2MM IOC is safe regardless of the intra-frame ordering
 	 * of the status beat relative to the final data beat (PG109 does not pin
 	 * that ordering).  Read it via the AXI GPIO input channel rather than the
-	 * ISR, where the ch2 edge vs. latch timing would be racy.  See ACCEL_ARCH §2.3. */
-	data->last_overflow = (gpio_rd(cfg, GPIO_DATA2) & GPIO_OVERFLOW) != 0;
+	 * ISR, where the ch2 edge vs. latch timing would be racy.  See ACCEL_ARCH §2.3.
+	 *
+	 * bit0 is xfft_0's overflow; bit1 aggregates xfft_0 OR xfft_1 OR the filter
+	 * normalizer saturation (only meaningful on the filter bitstream, where it
+	 * also flags an overflow that occurred in the inverse stage during a
+	 * filtered transform).  bit1 reads as 0 on a forward-only bitstream. */
+	data->last_overflow =
+		(gpio_rd(cfg, GPIO_DATA2) & (GPIO_OVERFLOW | GPIO_OVERFLOW_AGG)) != 0;
 
 	if (data->last_overflow) {
 		LOG_WRN("FFT overflow occurred — results may be corrupted; "
@@ -515,6 +564,122 @@ int fft_accel_transform(const struct device *dev,
 
 	k_mutex_unlock(&data->xfer_lock);
 	return err;
+}
+
+/**
+ * fft_accel_transform() — run one N-point complex forward FFT.
+ *
+ * Bypasses the filter/IFFT datapath, so out[] holds the raw frequency bins
+ * (the pre-filter behaviour).  On the filter bitstream this is selected by
+ * routing the forward-FFT output straight to S2MM; on a forward-only bitstream
+ * the bypass bit is unimplemented and the result is identical.
+ */
+int fft_accel_transform(const struct device *dev,
+			const struct fft_sample_t *in,
+			struct fft_sample_t *out,
+			size_t n)
+{
+	return fft_accel_run(dev, in, out, n, /*filter_bypass=*/true);
+}
+
+/**
+ * fft_accel_transform_filtered() — run one N-point FFT → filter → IFFT.
+ *
+ * Selects the filtered datapath, so out[] holds the time-domain inverse of the
+ * coefficient-scaled spectrum.  Load the coefficient table first with
+ * fft_accel_load_coeffs(); with an all-pass table this reduces to a unity
+ * round trip (out ≈ in within the documented LSB budget).
+ */
+int fft_accel_transform_filtered(const struct device *dev,
+				 const struct fft_sample_t *in,
+				 struct fft_sample_t *out,
+				 size_t n)
+{
+	return fft_accel_run(dev, in, out, n, /*filter_bypass=*/false);
+}
+
+/**
+ * fft_accel_load_coeffs() — program the per-bin complex filter coefficients.
+ *
+ * Writes the 4096-entry {im[31:16], re[15:0]} Q1.15 table into the fabric
+ * coefficient BRAM, mirroring the TX-BRAM fill idiom (same packing, same
+ * store-ordering fence rationale as ACCEL_ARCH.md §C1).  Held under xfer_lock
+ * so it cannot race an in-flight transform's coeff reads.
+ */
+int fft_accel_load_coeffs(const struct device *dev,
+			  const struct fft_sample_t *coeffs,
+			  size_t n)
+{
+	if (!device_is_ready(dev)) {
+		return -ENODEV;
+	}
+
+	const struct fft_accel_config *cfg = dev->config;
+	struct fft_accel_data *data = dev->data;
+
+	/* No coeff BRAM in this bitstream (forward-FFT-only build): the DTS node
+	 * has no "coeff_bram" region, so the base is 0.  Fail explicitly rather
+	 * than scribbling over address 0. */
+	if (cfg->coeff_bram_base == 0) {
+		return -ENOTSUP;
+	}
+
+	/* The coeff BRAM is sized for exactly one N=4096 frame. */
+	if (n != 4096) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&data->xfer_lock, K_FOREVER);
+
+	for (size_t i = 0; i < n; i++) {
+		uint32_t word = ((uint32_t)(uint16_t)coeffs[i].im << 16) |
+				(uint32_t)(uint16_t)coeffs[i].re;
+		sys_write32(word, cfg->coeff_bram_base + i * 4);
+	}
+
+	/* Ordering barrier: the coeff-BRAM stores and the next transform's DMA
+	 * trigger target different AXI slaves through the SmartConnect with no
+	 * global write-ordering guarantee (identical reasoning to the TX-BRAM
+	 * fence in fft_accel_run).  Fence so the full table is visible to the
+	 * fabric complex-multiplier before any subsequent transform starts. */
+	barrier_dmem_fence_full();
+
+	k_mutex_unlock(&data->xfer_lock);
+	return 0;
+}
+
+/**
+ * fft_accel_set_filter_bypass() — select the S2MM output source.
+ *
+ * Updates the shadow and the GPIO ch1 output immediately (so an interactive
+ * caller sees the change without a transform).  The next fft_accel_run() also
+ * re-applies the shadow under the mutex, so the per-transform wrappers remain
+ * authoritative.  Held under xfer_lock so a concurrent transform's
+ * reset-sequence GPIO writes are not interleaved with this RMW.
+ */
+void fft_accel_set_filter_bypass(const struct device *dev, bool bypass)
+{
+	if (!device_is_ready(dev)) {
+		return;
+	}
+	const struct fft_accel_config *cfg = dev->config;
+	struct fft_accel_data *data = dev->data;
+
+	k_mutex_lock(&data->xfer_lock, K_FOREVER);
+	data->filter_bypass = bypass;
+	/* Leave aresetn released (1); a transform re-pulses it as needed. */
+	gpio_wr(cfg, GPIO_DATA, gpio_data_word(true, bypass));
+	k_mutex_unlock(&data->xfer_lock);
+}
+
+/** fft_accel_get_filter_bypass() — return the current bypass selection. */
+bool fft_accel_get_filter_bypass(const struct device *dev)
+{
+	if (!device_is_ready(dev)) {
+		return true;  /* no device → behaves as forward-FFT-only */
+	}
+	const struct fft_accel_data *data = dev->data;
+	return data->filter_bypass;
 }
 
 /**
@@ -557,6 +722,12 @@ bool fft_accel_get_last_overflow(const struct device *dev)
 		.rx_bram_base = DT_INST_REG_ADDR_BY_NAME(inst, rx_bram),	\
 		.intc_base    = DT_INST_REG_ADDR_BY_NAME(inst, intc),		\
 		.gpio_base    = DT_INST_REG_ADDR_BY_NAME(inst, gpio),		\
+		/* coeff_bram is optional: present only on the filter bitstream.	\
+		 * Absent → 0, and fft_accel_load_coeffs() returns -ENOTSUP. */	\
+		.coeff_bram_base =						\
+			COND_CODE_1(DT_INST_REG_HAS_NAME(inst, coeff_bram),	\
+				(DT_INST_REG_ADDR_BY_NAME(inst, coeff_bram)),	\
+				(0)),						\
 		.dma_max_bytes = DT_INST_PROP(inst, dma_max_bytes),		\
 		.irq_num      = DT_INST_IRQN(inst),				\
 	};									\
@@ -568,6 +739,13 @@ bool fft_accel_get_last_overflow(const struct device *dev)
 									\
 		k_sem_init(&data->irq_sem, 0, 1);				\
 		k_mutex_init(&data->xfer_lock);					\
+									\
+		/* Default to forward-FFT-only behaviour: a freshly-booted		\
+		 * filter bitstream then matches the pre-filter design until a		\
+		 * filtered transform is explicitly requested.  Drive the GPIO		\
+		 * (aresetn released, bypass selected) to match the shadow. */	\
+		data->filter_bypass = true;					\
+		gpio_wr(cfg, GPIO_DATA, gpio_data_word(true, true));		\
 									\
 		/* Initialise AXI INTC: enable channels 0,1,2 and master */	\
 		intc_wr(cfg, INTC_IER, INTC_CH_MM2S | INTC_CH_S2MM | INTC_CH_FRAME_DONE); \
