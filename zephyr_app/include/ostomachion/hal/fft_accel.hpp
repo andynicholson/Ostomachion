@@ -83,9 +83,11 @@ public:
     /**
      * @brief Return true if the last submit() detected xfft fixed-point overflow.
      *
-     * The overflow flag is set by the ISR and cleared at the start of each
-     * fft_accel_transform() call.  Check this after submit() returns 0 to
-     * detect silent magnitude corruption.
+     * The overflow flag is captured by a fabric sticky latch and read back over
+     * the AXI GPIO input channel inside fft_accel_transform() (NOT via an
+     * interrupt — see ACCEL_ARCH.md §2.3); it reflects the most recent
+     * transform.  Check this after submit() returns 0 to detect silent
+     * magnitude corruption.
      */
     [[nodiscard]] bool last_overflow() const noexcept override
     {

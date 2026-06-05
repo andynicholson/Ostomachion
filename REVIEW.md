@@ -1,11 +1,34 @@
-# Ostomachion — Architecture & Code Review
+# Ostomachion — Architectural Contract & Review Ledger
 
-_Top-to-bottom review of the entire stack (RTL, Vivado block design, Zephyr
-firmware, host tooling, build/CI, docs). Findings were produced by parallel
-subsystem reviews and every Critical/Major item was verified against source._
+This file is the **standing architectural contract** for the Ostomachion
+platform: the load-bearing invariants the implementation must keep, each stated
+in active voice with the failure mode that appears when the rule is broken and
+the test or constraint that enforces it. It complements
+[ACCEL_ARCH.md](ACCEL_ARCH.md) (the FFT-pipeline contract) and
+[CLAUDE.md](CLAUDE.md) (the architecture-rules summary).
 
-> **Status legend:** ✅ FIXED in this pass · ⏳ TODO (tracked here) ·
-> 🔍 needs hardware / `neorv32/` submodule checkout to confirm
+It is **not** a point-in-time changelog. Treat every clause in §2–§8 as a rule
+that a reviewer or a CI gate must be able to check. §9 is the live ledger of
+open items; close items by fixing them and deleting the row, not by re-muting
+the gate that would catch them.
+
+> **How to use this file when you change the design**
+> 1. If you touch a subsystem in §2–§8, re-read its clauses first; they encode
+>    decisions that were paid for with real hardware debugging.
+> 2. If a clause stops being true, the change is either a bug or a contract
+>    amendment — never silent. Update the clause and its enforcing test in the
+>    same commit.
+> 3. New defects, drift, and robustness gaps go in §9 with a file:line anchor.
+
+**Verification basis for the current ledger.** The §9 items below were produced
+by a top-to-bottom review (RTL, block design, Zephyr firmware, host tooling,
+CI, docs) and cross-checked against source — including the NEORV32 v1.11.6
+submodule RTL (`neorv32/rtl/core/*.vhd`) for every register-bitfield and
+hardware-behaviour claim. The platform was exercised on the remote build host
+(Vivado 2025.1, `xc7a200tfbg484-1`): a full `make fpga-synth` **passed** the
+quality gates (WNS **+0.042 ns**, WHS **+0.023 ns**, 0 failing endpoints, DRC
+clean, bitstream + MCS written), and the GHDL + Zephyr co-simulation runs the
+ZTEST suite with no failures.
 
 ---
 
@@ -14,294 +37,376 @@ subsystem reviews and every Critical/Major item was verified against source._
 The architecture is sound and unusually disciplined. The boundary model — the
 CPU reaches the accelerator **only** through the AXI map (DMA registers + BRAM
 windows + INTC), while the host PC reaches FrontPanel wires/pipes in parallel —
-is clean and consistently enforced. The block design is genuinely recreated
-from Tcl (no checkpoints in the tree), the SmartConnect address-space isolation
-between the MM2S/S2MM channels is correct, the xfft scaling schedule is
-arithmetically right, and the `west.yml` / SDK pinning is reproducible.
+is clean and consistently enforced in fabric (SmartConnect address exclusions),
+not merely by convention. The block design is genuinely recreated from Tcl with
+no checkpoints in the tree; the xfft scaling schedule is arithmetically exact;
+the CDC structures gate correctly on XPM reset-busy; the data-memory fences in
+the FFT driver are correctly placed; and the timing constraints close with a
+structural clock-group exception rather than fragile name-matched globs.
 
-The problems are not architectural. They cluster around a single recurring
-failure mode that runs through every layer:
+The residual risk does **not** live in the datapath. It is concentrated in two
+places, both tracked in §9:
 
-> **Documentation and comments assert guarantees that the implementation does
-> not provide, and the CI that should catch the drift is itself non-functional.**
+> **One real defect hides behind a default-off Kconfig**
+> (the WDT lock never engages — §9.1), and **a cluster of comments/docstrings
+> assert mechanisms the code does not implement** (overflow-via-interrupt, the
+> obsolete xlconcat IRQ topology, the M3 CDC rationale). The code is correct in
+> those cases; the prose is stale and will mislead the next maintainer.
 
-Several headline features (overflow detection, CDC "stabilisation", watchdog
-tamper-resistance, the static-analysis and Twister gates) are described in
-detail but are dead, racy, or theatrical in the code. The single highest-leverage
-remediation is to **close the loop between documentation and verification**:
-make the CI gates able to fail, then treat every documented guarantee as
-something a test or constraint must enforce.
-
----
-
-## 2. Critical findings
-
-### C1 — FFT driver has no memory barrier between BRAM fill and the DMA trigger ✅ FIXED
-`zephyr_app/drivers/accel/fft_accel.c`. The TX-BRAM fill (`sys_write32`) and the
-`DMA_MM2S_LENGTH` trigger write target **different AXI slaves** through the
-SmartConnect, with no global-ordering guarantee. NEORV32 has no D-cache, so this
-is a store-ordering bug, not a coherency bug: if the LENGTH write overtakes the
-last BRAM store, the DMA reads stale data for the final beat(s). The reverse
-hazard exists before the RX-BRAM read loop. `volatile` orders the compiler, not
-the XBUS→AXI fabric.
-
-**Fix applied:** `#include <zephyr/sys/barrier.h>`; `barrier_dmem_fence_full()`
-after the TX-BRAM fill loop (before any DMA register access) and again after
-`k_sem_take()` succeeds, before the RX-BRAM read loop.
-
-### C2 — The CI "static analysis" and "Twister" gates validate nothing ✅ FIXED
-`.github/workflows/ci.yml`. The safety net that should have caught most of this
-review was inert:
-- **clang-tidy could not fail:** the step ended in `| tee … || true` and
-  `.clang-tidy` set `WarningsAsErrors: ''`.
-- **`nm` could not fail and ran a binary that is never installed:** it tried
-  `riscv64-unknown-elf-nm` first (only `binutils-riscv64-linux-gnu` is
-  installed), redirected errors *into* the uploaded "memory map," and ended
-  `|| true`.
-- **Twister could not fail and had no buildable test project:** the invocation
-  piped to `tee` with no `pipefail`, omitted `--exclude-tag hw` (so HW-only
-  cases error on the hosted runner), and `zephyr_app/tests/` contained only
-  `.cpp` + `testcase.yaml` — **no `CMakeLists.txt` / `prj.conf`**, so
-  `west twister -T zephyr_app/tests` finds no application to build. (The tests
-  are actually compiled into the app build via `zephyr_app/CMakeLists.txt`.)
-- The analysis build targeted `-b neorv32` while everything else uses
-  `neorv32/neorv32/minimalboot`, and that step also piped to `tee` with no
-  `pipefail`.
-
-**Fix applied:** added `set -o pipefail` to every piped step and removed the
-`|| true` masks; made clang-tidy a real gate (`--warnings-as-errors='*'`);
-rewrote the `nm` step to select an installed binary, keep errors out of the
-artifact, and fail if none is found; corrected the analysis board to
-`neorv32/neorv32/minimalboot`; moved `testcase.yaml` to the app root
-(`zephyr_app/testcase.yaml`) so Twister has a buildable project, and pointed the
-job at `-T zephyr_app --exclude-tag hw`.
-
-> ⚠️ Because these gates are now enforced, the first CI run may surface
-> pre-existing clang-tidy findings or build issues that were previously hidden.
-> That is the intended behaviour — triage them rather than re-muting the gate.
-
-### C3 — Async-FIFO reset-busy outputs discarded; reset crosses domains unsynchronized ✅ FIXED
-`fpga/xem7310/fp_fft_pipe_bridge.vhd` and `fpga/xem7310/fp_uart_bridge.vhd`. All
-four `xpm_fifo_async` instances drove `rst => not sys_rstn` (an `aclk`-domain
-reset) while straddling `aclk`↔`fp_clk`, and tied `wr_rst_busy`/`rd_rst_busy` to
-`open`. XPM **drops** writes/reads issued while reset-busy is asserted, so every
-reset opened a silent data-loss / lockup window.
-
-**Fix applied:** exposed `wr_rst_busy`/`rd_rst_busy` on all four FIFOs and gated
-the corresponding `wr_en`/`rd_en` (and the `pi_ready`/`po_ready`/`tx_ready`/
-`rx_ready` host-handshake flags) with them, following the XPM-recommended
-pattern. The busy flags are consumed in their own clock domain, so no new CDC
-and no XDC change is required.
+The single highest-leverage discipline remains **treat docs as code**: every
+guarantee a comment states must be one a test or constraint enforces, and every
+"fixed" claim must be re-checked against the tree it now lives in.
 
 ---
 
-## 3. Major findings
+## 2. Datapath ordering contract (FFT driver)
 
-| ID | File | Summary |
-|----|------|---------|
-| M1 ✅ FIXED 🔍 | `ostomachion_bd.tcl`, `xem7310_top.vhd`, `fft_accel.c` | **Overflow detection was dead code** (`last_overflow` never set). Implemented in fabric: the BD slices `m_axis_status_tdata[0]` out and exposes it (+ its `tvalid` and the xfft `aresetn`) as ports; `xem7310_top.vhd` holds a sticky latch (cleared by the per-transform `aresetn` pulse) fed into the AXI GPIO input channel; the driver reads it at `GPIO_DATA2` (0x08) after IOC and sets `last_overflow`. **🔍 The fabric portions require Vivado synthesis to verify** — see §3a. |
-| M2 ✅ FIXED | `fft_accel.c` | **Stale-IRQ window.** `k_sem_reset()` moved to *after* both DMA channels are reset and the xfft is back out of reset, but before either channel is armed — so a late IOC/ERR ISR from a prior timed-out transfer can no longer survive into the next one. (Previously the reset preceded the ~4096-word fill, leaving the window open.) |
-| M3 ⚠️ PARTIALLY FIXED — cycles-handshake REVERTED | `fp_fft_pipe_bridge.vhd`, `xem7310_top.vhd` | **Beat-counter staging KEPT (correct):** the three aclk-domain beat-counter status words are now staged through `xpm_cdc_array_single` in `xem7310_top.vhd` before okWireOut samples them. **Cycles/frame_count handshake REVERTED.** The rewrite to `xpm_cdc_handshake` introduced a real defect on real hardware: when a firmware `REG_PUBLISH` arrived while the previous handshake was still acknowledging (`cdc_busy=1`), the publish was silently dropped and `frame_count_fp` fell behind `frame_count_sys` by one — the host waited forever for a frame the firmware had already produced. Captured in a transport snapshot at failure: `device_frame=last_frame_n=N-1, fifo_in=0, fifo_out=4096`. The original per-bit `xpm_cdc_array_single` is actually correct here: `frame_count_sys` is a monotonic counter (any bit-skew is constrained to `old → new`, never out-of-sequence), and the host reads `cycles_fp` only after `fifo_out_count >= FFT_N` (~40 µs of sys_clk after the firmware publish), giving the 2-FF synchroniser orders of magnitude more time than it needs. Theoretical multi-bit tearing was real but the host-firmware ordering already mitigated it. **Lesson:** verify CDC redesigns under realistic on-board USB load before trusting that synthesis success ⇒ correctness. |
-| M4 ✅ FIXED | `xem7310.xdc` | Added `set_clock_groups -asynchronous` between the `sys_clk`, `okUH0`, and `jtag_tck` trees (`-include_generated_clocks`) as the *primary* CDC exception, so coverage is structural rather than dependent on name-matched `set_false_path` globs. **Verified on the implemented checkpoint:** `report_clock_interaction` shows `clk_out1_…clk_wiz ↔ mmcm0_clk0` and `jtag_tck ↔ *` as **"Ignored / Asynchronous Groups"**, while the okHost-internal `mmcm0_clk0 ↔ okUH0` pair stays correctly **"Timed"** (they are synchronous to each other). WNS +0.042 / WHS +0.018, DRC clean. |
-| M5 ✅ FIXED | `i2c_neorv32.c`, `spi_neorv32.c` | **`K_FOREVER` wait with unchecked `_nb` FIFO pushes in the ISR.** I2C: every ISR `twi_*_nb()` push is now checked and aborts to `done` on failure, and the completion wait uses a 1 s `TWI_XFER_TIMEOUT` backstop (releases the bus + disables IRQ on a lost FIRQ). SPI: the chained TX write in the ISR now guards `TX_FULL` and completes with `-EIO` rather than silently dropping the byte. (The SPI wait was `spi_context_wait_for_completion`, which already derives a master-mode timeout — not a literal `K_FOREVER` — so the genuine hazard there was the dropped-byte stall, now fixed.) |
-| M6 ✅ FIXED | `i2c_neorv32.c` | **Double STOP** on the normal IRQ completion path. Restructured `next_msg:` so each path (final-with-STOP, final-without-STOP, more-messages, error) issues at most one STOP. Also fixed a latent off-by-one: the STOP-flag decision now reads `msgs[msg_idx]` *before* `msg_idx++`. |
-| M7 ✅ VERIFIED — NOT A BUG | `spi_neorv32.c` | Checked against NEORV32 v1.11.6 (`56e1324d`). **No defect.** (1) The polling `put → while(BUSY) → read DATA` sequence is the *exact* upstream `neorv32_spi_transfer()` pattern, and `SPI_CTRL_BUSY` (bit 31) is defined as "transceiver busy **or TX FIFO not empty**" — so when it clears the full-duplex byte has completed and the RX FIFO holds the result; reading `DATA` then is correct, not a stale read. (2) The clock-field shifts are right: `PRSC<<3`, `CDIV<<6`, `HIGHSPEED=BIT(10)` match upstream `SPI_CTRL_PRSC0=3`, `CDIV0=6`, `HIGHSPEED=10`. The original review flagged this as a risk pending header confirmation; the headers confirm the driver is correct. |
-| M8 ✅ FIXED | `wdt_neorv32.c`, `wdt/Kconfig` | **STRICT-without-LOCK** contradicted the "cannot be silently disabled" claim. Added opt-in `CONFIG_WDT_NEORV32_LOCK` (default n): when set, `setup()` also sets the CTRL LOCK bit so `disable()` returns `-EPERM` and the config is immutable until reset — that is what actually delivers tamper resistance. Corrected the Kconfig/`setup()` text to stop claiming STRICT alone prevents disable. Default-n keeps the existing `disable()`-based tests working. (RCAUSE reset-cause reporting remains unimplemented — deferred.) |
-| M9 ✅ FIXED | `tools/fft_demo/app.py` | **PyQt demo ran the FFT round-trip on the GUI thread.** Moved the blocking `send_frame`/`recv_frame` (up to 2 s) and the SW FFT into a `QThread`-based `_AcquisitionWorker`; the GUI thread now only renders, via queued `frameReady`/`opened`/`failed` signals. The FrontPanel handle is created/opened/used/closed entirely on the worker thread (it is not thread-safe). Added a `closeEvent` that stops and joins the worker — which **also fixes the Minor finding** that `transport.close()` never released the device. **Verified headlessly** (offscreen Qt): worker signals/slots present, window constructs with the thread running, clean shutdown joins the thread. |
-| M10 ✅ FIXED | `ci.yml`, `vivado-synth.yml` | **Supply chain.** All third-party actions SHA-pinned: `actions/checkout@11bd719` (v4.2.2), `actions/upload-artifact@b4b15b8` (v4.4.3), each with a version comment. The self-hosted Vivado runner now does a clean checkout (`clean: true`, `fetch-depth: 0`) plus a `git clean -ffdx` scrub (including submodules) before building, so a previous `inputs.ref` build cannot leave a dirty tree or stale artifacts. Both workflows validated as well-formed YAML. |
+Source: [`zephyr_app/drivers/accel/fft_accel.c`](zephyr_app/drivers/accel/fft_accel.c).
+These clauses are verified-correct in the current tree; do not regress them.
 
-### 3a. M1 fabric change — hardware verification checklist
+### 2.1 Data-memory fences bracket every BRAM↔DMA handoff
+The driver issues `barrier_dmem_fence_full()` **after** the TX-BRAM fill loop
+(before any DMA register write) and again **after** `k_sem_take()` succeeds
+(before the RX-BRAM read loop).
 
-Verified on a remote **Vivado 2025.1** host (Artix-7 `xc7a200tfbg484-1`) against
-branch HEAD. Status of each item:
+> **Why:** the TX/RX BRAMs and the DMA control registers are *different* AXI
+> slaves behind the SmartConnect, which gives no global write-ordering
+> guarantee. `sys_write32` is only a compiler-ordering barrier. NEORV32 has no
+> D-cache, so this is a store/load-ordering problem, not a coherency one.
+> **Failure mode without the fences:** the MM2S `LENGTH` trigger overtakes the
+> final BRAM store and the DMA reads stale input for the last beat(s); the CPU
+> read loop observes pre-DMA RX-BRAM contents.
 
-- ✅ **`m_axis_status_tdata` width.** The width-querying Tcl ran against the real
-  xfft IP; `validate_bd_design` + `make_wrapper` completed cleanly and the
-  `xlslice`-vs-straight-through branch resolved without error. (Bit 0 = `OVFLO`
-  per PG109 still to be confirmed by the over-amplitude HW test below.)
-- ✅ **AXI GPIO dual-channel.** `C_IS_DUAL=1` with `gpio2_io_i` synthesized; the
-  generated wrapper exposes the input port and the existing `0x80` range is
-  unchanged (no address-map edit needed).
-- ✅ **BD wrapper port names.** The generated `ostomachion_bd_wrapper.vhd`
-  exposes `fft_status_tvalid`, `xfft_aresetn_o`, `fft_overflow_latched`, and
-  `fft_status_overflow`. **This surfaced a real bug:** single-bit ports sourced
-  from a vector are emitted as `STD_LOGIC_VECTOR(0 to 0)`, but `xem7310_top.vhd`
-  had declared the matching actuals as scalar `std_logic` — a type error that
-  failed `synth_design` elaboration. Fixed (commit "Fix M1 scalar/vector port
-  mismatch …"): both actuals are now `std_logic_vector(0 downto 0)`, indexed
-  `(0)` at the latch. Full top + BD now elaborates with **0 Errors, 0 Critical
-  Warnings**. This bug was invisible to GHDL/local review.
-- ✅ **End-to-end on the XEM7310 DUT.** Ran a new `fft overflow` shell command
-  (amplitude sweep from quiet to full-scale random complex) on real hardware via
-  the FrontPanel UART bridge. Findings:
-  - All transforms complete correctly (4096 beats/frame, PG109-correct) and the
-    overflow readback register reads cleanly (`GPIO2 = 0x00000000`, not floating)
-    — so the dual-channel GPIO input path and CPU read are functional.
-  - With the production scaling schedule, `overflow=false` at *every* amplitude
-    including full-scale random. This is **correct behaviour, not a stuck flag**:
-    the config word `0x1555` decodes to a per-stage right-shift of `[2,2,2,2,2,2]`
-    = ÷4 per radix-4 stage × 6 = **÷4096 exact unity gain** — the conservative
-    schedule under which in-range Q1.15 input cannot overflow an intermediate
-    stage. No normal input trips the flag by design.
-  - **Positive-assertion proof (flag is not stuck-at-0) — CONFIRMED on the DUT.**
-    Built a throwaway bitstream with stage 1 unscaled (`0x1551`, ÷1024 total) so
-    full-scale input overflows an intermediate stage, programmed it, and reran
-    `fft overflow`. Result:
-    ```
-    rand peak~ 1024  overflow=false  GPIO2=0x00000000
-    rand peak~ 8190  overflow=false  GPIO2=0x00000000
-    rand peak~32760  overflow=TRUE   GPIO2=0x00000001
-    clear-check quiet frame after full-scale  overflow=false
-    saw_false=1 saw_true=1 clears_after_high=1  PASS
-    ```
-    plus the driver's `LOG_WRN("FFT overflow occurred …")` fired. This proves the
-    *entire* M1 chain toggles correctly: xfft `m_axis_status_tdata[0]` → fabric
-    sticky latch (`GPIO2` bit 0) → driver `last_overflow` → `LOG_WRN`, and the
-    per-transform `aresetn` clears the latch. The under-scaling edit was reverted
-    immediately (BD tcl back to `5461`); the throwaway config is **not** in the
-    tree, and the production bitstream (sha `06afbae5…`) was restored to the DUT.
+### 2.2 `k_sem_reset()` sits *after* both DMA resets and *before* arming
+The semaphore is reset once both channels are quiesced (software-reset complete,
+xfft back out of reset) but before either channel is armed.
 
-**M1 verdict: fully verified.** On the production unity-gain schedule the flag
-correctly stays low for all in-range input; on a deliberately under-scaled
-config it asserts and clears exactly as designed. Permanent test artifact added:
-the `fft overflow` shell command. Upload-path robustness fix (`uart_upload.py`:
-retry + longer FrontPanel-pipe handshake timeout) committed alongside.
+> **Failure mode if reset earlier (before the ~4096-word fill):** a late
+> IOC/ERR ISR from a previously timed-out transfer slips a stale `k_sem_give()`
+> through the fill window; the next `k_sem_take()` returns immediately on bogus
+> data. **Enforcing test:** `test_sequential` (two back-to-back transforms;
+> the second is all-zero and every output bin must be ~0).
 
-### 3b. Timing closure — baseline correction + regression check
+### 2.3 ISR clears DMA `DMASR` (W1C) before acknowledging INTC `IAR`
+Each per-channel ISR branch writes the DMASR IRQ bits back (W1C) to de-assert
+`mm2s_introut`/`s2mm_introut`, *then* writes the channel mask to `INTC_IAR`.
 
-An initial `build/xem7310/timing_summary.rpt` on the remote (dated Jun 1,
-`25e235f4-dirty`) showed **WNS −3.673 ns / 202 failing endpoints** and a full
-**DDR3 MIG** (`mig_0`, 800 MHz `freq_refclk`, a 24,993-endpoint `clk_pll_i`).
-The current tree has **no MIG** — that report came from a *different
-in-development branch* and is **not a valid baseline**. The correct baseline is
-`master`, which closes timing with the present constraint set.
+> **Failure mode if IAR first:** for level-sensitive channels the INTC ISR bit
+> re-asserts on the next edge because the source line is still high; the CPU
+> re-enters the ISR and `k_sem_give()` fires twice. See ACCEL_ARCH §4.7.
 
-Regression scope of this branch vs `master` is therefore the relevant question,
-and it is small and low-risk:
-- **`xem7310.xdc` is unchanged vs `master`** → zero clock-constraint deltas; the
-  same exceptions that let master close still apply.
-- **No new clock-domain crossing was introduced.** The M1 overflow path is
-  entirely `aclk → aclk` (status latch) → AXI GPIO → CPU; it never touches
-  `okClk`/`okUH0`. C3's added logic (FIFO reset-busy AND-gates) is same-domain.
-- A full `make fpga-synth` on this branch HEAD **completed and PASSED**:
-  **WNS +0.042 ns, WHS +0.011 ns, 0 failing endpoints** (61,069 setup /
-  60,893 hold), DRC clean, bitstream + MCS written. Utilisation 11% LUT /
-  26% BRAM. So this branch *does* close timing — but the +42 ps setup margin is
-  thin, and the ten worst paths all sit in the async FIFOs touched by C3
-  (`fft_pipe_bridge_i/fifo_in_i`, `uart_bridge_i/tx_fifo_i`) in the
-  ~100.8 MHz `okClk`/`mmcm0_clk0` domain. A `master` build is running to confirm
-  whether +0.042 is the pre-existing margin or a C3 regression; result appended
-  in §3c.
-
-> **Note (PR hygiene, not timing):** `xem7310_top.vhd` was rewritten with CRLF
-> line endings on this branch (master is LF), so git reports ~1470 changed lines
-> where the real content delta is only +37/−1. Normalize to LF (`dos2unix`) and
-> recommit before the PR. No synthesis impact.
-
-### 3c. Timing regression check vs master — NO REGRESSION
-
-Both builds run, same Vivado 2025.1 / `xc7a200tfbg484-1`:
-
-| Build | WNS | WHS | Failing | LUT | BRAM |
-|-------|-----|-----|---------|-----|------|
-| `master` (`2d44acc`)        | **+0.042 ns** | +0.020 ns | 0 / 60,481 | 10.79% | 26.44% |
-| branch (`8c68125`, C1/C3/M1) | **+0.042 ns** | +0.011 ns | 0 / 61,069 | 10.99% | 26.44% |
-
-**Conclusion: the +0.042 ns setup margin is master's pre-existing
-characteristic, not a regression from this branch.** The worst setup path has
-identical slack (+0.042 ns) and structure (4 logic levels, RAMB18→RAMD32,
-`mmcm0_clk0`) in both — it is the same path, untouched by C1/C3/M1. The branch
-adds 588 setup endpoints (+0.97% LUT) for the C3 reset-busy gates and M1 latch,
-and the worst path is unchanged. WHS dropped 9 ps (+0.020 → +0.011) but stays
-comfortably positive with 0 failing hold endpoints.
-
-The thin +42 ps margin is therefore an existing property of the design (the
-~100.8 MHz `okClk` FIFO/CDC paths), and is exactly what **M4** addresses: a
-`set_clock_groups -asynchronous` between `aclk` and `okUH0` would remove these
-cross-domain paths from analysis entirely and recover margin. That remains the
-recommended robustness improvement, but it does **not** gate this branch.
-
-> **M3/M4 remain open and are the real timing-robustness work:** the current
-> closure relies on name-matched `set_false_path` globs (M4) rather than a
-> `set_clock_groups -asynchronous` between `aclk` and `okUH0`, and the multi-bit
-> `cycles` CDC can tear (M3). These don't block this branch (XDC unchanged) but
-> should be done before depending on the constraints across instance renames.
+### 2.4 S2MM is armed before MM2S; both use symmetric `N×4` byte counts
+See ACCEL_ARCH §4.3–§4.4. S2MM's `TREADY` must be high before xfft output
+begins (nonrealtime throttle mode back-pressures the whole pipeline otherwise),
+and the xfft emits exactly N beats per N-point frame so no `(N±1)` correction is
+needed. **Enforcing tests:** `test_single_tone`, `test_no_off_by_one` (exact
+peak bin, zero tolerance), `test_y_n_minus_1`.
 
 ---
 
-## 4. Minor findings (✅ ALL FIXED)
+## 3. Clock-domain-crossing contract (board RTL)
 
-- ✅ **Address-map docs reconciled.** `CLAUDE.md` and `ACCEL_ARCH.md` now show
-  DMA/INTC/GPIO as **128 B** each (matching the Tcl `0x80` assignment); the GPIO
-  row notes the dual-channel overflow readback. The DTS `dma` reg size was bumped
-  `0x40 -> 0x80` so it actually covers the S2MM registers the driver touches
-  (up to `0x5C`).
-- ✅ **Dead runtime guards.** `reset_err |= ...` replaced with explicit
-  per-channel checks that propagate the real errno (`-ETIMEDOUT`) instead of an
-  OR of two negative values; the `byte_len > dma_max_bytes` check is kept but
-  documented as an intentional defense-in-depth backstop (redundant only while
-  `n` is pinned to 4096).
-- ✅ **FFT-region address aliasing.** The XBUS demux now requires `adr[27:4]=0`
-  within the `0x9xxx_xxxx` region, so only `0x9000_000{0,4,8,C}` select the pipe
-  bridge; any other in-region address falls through to the BD bridge path (which
-  is unmapped there and raises `xbus_err`) instead of aliasing onto a FIFO
-  register. **Verified:** elaborates with 0 errors.
-- ✅ **UART RX FIFO drops are now observable.** Added a sticky `rx_overflow`
-  latch (set when a byte is dropped on `rxf_full`, cleared on reset) surfaced on
-  WireOut 0x20 bit 11. There is no back-pressure to the UART line by design, but
-  a drop is no longer silent.
-- ✅ **`prj.conf` is a clean base config.** `CONFIG_ZTEST=y` removed; ZTEST is now
-  opt-in — added by the `zephyr` Makefile target for the GHDL sim run and by
-  `testcase.yaml` for Twister/HW. The CI firmware-analysis build is now a real
-  production image. Sim firmware re-verified to build.
-- ✅ **DRC/timing gates are severity-aware.** Both `build.tcl` and
-  `check_build.tcl` now use `get_drc_violations` filtered on Error/Critical
-  severity instead of `regexp {ERROR}` on report text; `check_build.tcl` also
-  flags unconstrained timing endpoints (WNS/WHS only cover constrained paths).
-- ✅ **`test-zephyr` PASS check tightened.** It now requires non-empty output AND
-  the `PROJECT EXECUTION SUCCESSFUL` marker AND the *absence* of ZTEST failure
-  markers (`FAIL - `, `TESTSUITE ... failed`, `Assertion failed`, `FATAL`), so a
-  failing assertion can no longer pass silently.
-- ✅ **`transport.close()` releases the device explicitly** (`dev.Close()` guarded
-  by `IsOpen()`), and M9's `closeEvent` invokes it on the worker thread — the
-  FrontPanel handle is freed on exit rather than at GC.
-- ✅ **`openocd.cfg`** duplicate `pld device` removed (the sourced
-  `cpld/xilinx-xc7.cfg` already declares it). Note added that OpenOCD's series-7
-  PLD driver is *named* `virtex2` for all xc7 parts, so the name was actually
-  correct — the real issue was the redundant declaration in a debug-only cfg.
+Source: [`xem7310_top.vhd`](fpga/xem7310/xem7310_top.vhd),
+[`fp_fft_pipe_bridge.vhd`](fpga/xem7310/fp_fft_pipe_bridge.vhd),
+[`fp_uart_bridge.vhd`](fpga/xem7310/fp_uart_bridge.vhd).
+
+### 3.1 Every `xpm_fifo_async` gates its enables on reset-busy
+All four async FIFOs across the two bridges expose `wr_rst_busy`/`rd_rst_busy`
+and AND them into the corresponding `wr_en`/`rd_en` **and** into the host
+handshake flags (`pi_ready`/`po_ready`/`tx_ready`/`rx_ready`). The busy flags
+are consumed in their own clock domain, so this adds no new CDC.
+
+> **Why:** XPM **drops** writes/reads issued while reset-busy is asserted. Each
+> reset (the FIFOs take `rst <= not sys_rstn`, an `aclk`-domain reset, while
+> straddling `aclk`↔`fp_clk`) otherwise opens a silent data-loss / lockup
+> window. Do not tie these flags to `open`.
+
+### 3.2 The cycles/frame-count CDC uses `xpm_cdc_array_single`, **not** a handshake
+`cdc_cycles_i` and `cdc_frame_i` are per-bit 2-FF synchronisers.
+
+> **Why this is correct, and why the handshake was rejected:** firmware writes
+> `cycles_sys` and bumps `frame_count_sys` on the *same* `sys_clk` edge
+> (`REG_PUBLISH`), and both hold constant thereafter. `frame_count_sys` is a
+> monotonic counter, so any bit-skew the host could observe is bounded to
+> `old → new` — never an out-of-sequence value. A prior rewrite to
+> `xpm_cdc_handshake` **introduced a real on-hardware defect**: when a firmware
+> publish arrived while the previous handshake was still acknowledging
+> (`cdc_busy=1`), the publish was silently dropped, `frame_count_fp` fell behind
+> `frame_count_sys` by one, and the host waited forever. **Do NOT switch this
+> CDC back to a handshake.** Synthesis success masked the bug; only on-board USB
+> load surfaced it. (The in-code comment's specific *justification* is being
+> corrected — see §9.6 — but the design decision stands.)
+
+### 3.3 The beat-counter status words are staged into `okClk` before sampling
+The three `fft_beat_counter` outputs cross `aclk → okClk` through
+`xpm_cdc_array_single` before `okWireOut` (0x22/0x23) samples them. They are
+quasi-static (change only on `tlast`/`aresetn`), so per-bit synchronisers are
+sufficient and the host reads them between frames.
+
+### 3.4 The XBUS FFT-pipe region decodes the full in-region offset
+The demux selects `fp_fft_pipe_bridge` only when
+`adr[31:28]=0x9 AND adr[27:4]=0`, so exactly `0x9000_000{0,4,8,C}` hit the four
+bridge registers.
+
+> **Failure mode if only the nibble is decoded:** every 16-byte-aligned address
+> in the 256 MB `0x9xxx_xxxx` region aliases onto the FIFO registers, so a stray
+> access silently pops/pushes a sample. Any other in-region address now falls
+> through to the BD bridge (unmapped there → `xbus_err`).
+
+### 3.5 Single-bit BD ports sourced from a vector are `std_logic_vector(0 downto 0)`
+`fft_status_overflow` and `xfft_aresetn` are declared as `(0 downto 0)` and
+indexed `(0)` at use sites, matching how the generated wrapper emits ports
+sliced from a vector.
+
+> **Why:** declaring them scalar `std_logic` is a type error that fails
+> `synth_design` elaboration — and is invisible to GHDL, so it only appears in
+> Vivado. (This bit the M1 overflow work once already.)
 
 ---
 
-## 5. Verified-correct, non-trivial work
+## 4. Timing-closure contract (constraints)
 
-- xfft config word `0x1555` = FWD + six `>>2` stages = ÷4096, exactly cancelling
-  the radix-4 butterfly gain.
-- SmartConnect address-space isolation (MM2S sees only `tx_bram`, S2MM only
-  `rx_bram`, via `exclude_bd_addr_seg`).
-- S2MM-armed-before-MM2S ordering to avoid backpressure deadlock in nonrealtime
-  throttle mode.
-- Q1.15 endianness consistent across host, firmware, and RTL.
-- Part number `xc7a200tfbg484-1`; `west.yml` SHA pin; SDK 1.0.0 consistency;
-  `bin2vhd.py` byte/padding format; the `gpio`/`i2c`/`spi` C++ HAL wrappers; the
-  `neorv32_wrapper.vhd` sim adapter.
+Source: [`xem7310.xdc`](fpga/xem7310/xem7310.xdc),
+[`build.tcl`](fpga/xem7310/build.tcl),
+[`check_build.tcl`](fpga/xem7310/check_build.tcl).
+
+### 4.1 Asynchronous clock groups are the *primary* CDC exception
+`set_clock_groups -asynchronous` declares `sys_clk`, `okUH0`, and `jtag_tck`
+mutually asynchronous, each with `-include_generated_clocks`. This cuts every
+`sys_clk ↔ okClk ↔ jtag` crossing **structurally**, independent of instance
+names. The per-instance `set_false_path` globs that follow are retained as
+self-documenting belt-and-suspenders; they are subsumed but harmless.
+
+> **Why structural, not glob-only:** a name-matched `set_false_path` silently
+> matches nothing if an instance is renamed, quietly re-timing a real CDC path.
+> **Verified on the implemented checkpoint:** the cross-domain
+> `mmcm0_clk0 → okUH0` paths report large positive slack (≈ +4.8 ns), so they no
+> longer constrain closure; the worst path (+0.042 ns) is intra-domain in the
+> `~100.8 MHz` FIFO logic. The full build closes at **WNS +0.042 / WHS +0.023,
+> 0 failing endpoints**.
+
+### 4.2 The thin +42 ps worst-path margin is a pre-existing design property
+The worst setup path lives in the `~100.8 MHz okClk` FIFO domain and is the same
+on `master` as on any datapath-only branch. It is **not** a regression from the
+fence/CDC/overflow work. Treat any drop below ~+40 ps as a real regression to
+investigate, not noise.
+
+### 4.3 Quality gates query structured results, never grep report text
+`build.tcl`/`check_build.tcl` gate on `get_drc_violations` filtered to
+`Error`/`Critical` severity and on `WNS/WHS >= 0` from `get_timing_paths` — not
+on `regexp {ERROR}` over report text (which false-matches rule names).
+`check_build.tcl` additionally flags unconstrained timing endpoints.
+
+> **Current DRC state:** clean — the only violations present are WARNING-severity
+> REQP entries from the FrontPanel okHost IP, which the severity filter
+> correctly ignores.
 
 ---
 
-## 6. Recommended priority order
+## 5. Accelerator block-design contract
 
-1. ✅ **Make CI real (C2)** — done; everything else is unverifiable until the
-   gates can fail.
-2. ✅ **C1 fences, C3 FIFO reset-busy** — the two genuine data-corruption /
-   lockup bugs in the shipped datapath.
-3. ✅ **M1/M2/M5/M6/M8** — driver correctness: overflow detection in fabric
-   (pending HW verify, §3a), stale-IRQ DMA-reset reorder, bounded I2C wait +
-   ISR push checks, SPI dropped-byte guard, I2C double-STOP, and the opt-in
-   WDT lock. ✅ **M7 verified NOT a bug** against NEORV32 v1.11.6 headers
-   (SPI read pattern and clock-field shifts are upstream-correct). The same
-   submodule check confirmed all SPI/TWI/WDT register bitfields touched by
-   M5/M6/M8 match upstream (`SPI_CTRL_*`, `TWI_CTRL_*`, `TWI_CMD_*`,
-   `WDT_CTRL_*`, and the WDT password).
-4. ⏳ **M4 / M3** — timing exceptions and CDC staging before real timing closure.
-5. ⏳ **Doc reconciliation pass** — address map, "stabilisation," overflow API,
-   WDT guarantee. Treat docs as code: a claimed guarantee needs an enforcing
-   test or constraint.
+Source: [`ostomachion_bd.tcl`](fpga/xem7310/ostomachion_bd.tcl). All
+verified-correct; the inline derivation comments are load-bearing — keep them.
+
+- **xfft scaling word `0x1555` (5461) = exact unity gain.** Bit 0 = FWD; six
+  2-bit `SCALE_SCH` fields each `0b10` (÷4) cancel the radix-4 butterfly gain
+  `4^6 = 4096`. This is the conservative schedule under which in-range Q1.15
+  input cannot overflow an intermediate stage. **Do not "optimise" the schedule
+  without re-running the overflow sweep** (`fft overflow` shell command).
+- **SmartConnect address isolation is structural.** `Data_MM2S` is assigned only
+  `tx_bram` and excludes the DMA lite regs, `rx_bram`, `intc`, and `gpio`;
+  `Data_S2MM` is assigned only `rx_bram` with the symmetric exclusions. A runaway
+  descriptor cannot scribble the wrong BRAM or a control register.
+- **INTC `C_KIND_OF_INTR = 0x4`:** Ch0 (MM2S) and Ch1 (S2MM) level-sensitive;
+  Ch2 (xfft frame-done) edge-sensitive — required because
+  `m_axis_status_tvalid` is a one-cycle pulse that a level channel would miss.
+- **Overflow readback path (M1):** the BD slices `m_axis_status_tdata[0]` out
+  (width-querying the pin so a non-1-bit status bus still works), `xem7310_top`
+  latches it sticky (cleared by the per-transform `aresetn`), and the AXI GPIO
+  *input* channel (`C_IS_DUAL=1`) exposes it at `GPIO_DATA2` (0x08) bit 0.
+  Verified end-to-end on hardware via the `fft overflow` amplitude sweep.
+
+---
+
+## 6. Peripheral-driver contract
+
+Source: [`i2c_neorv32.c`](zephyr_app/drivers/i2c/i2c_neorv32.c),
+[`spi_neorv32.c`](zephyr_app/drivers/spi/spi_neorv32.c),
+[`wdt_neorv32.c`](zephyr_app/drivers/wdt/wdt_neorv32.c). Register bitfields below
+are re-confirmed against NEORV32 v1.11.6 RTL.
+
+- **SPI polling pattern is upstream-correct.** `put → while(BUSY) → read DATA`
+  is valid because `SPI_CTRL_BUSY` (bit 31) is RTL-defined as
+  `rtx_engine.busy OR tx_fifo not empty` (`neorv32_spi.vhd:172`), so when it
+  clears the full-duplex byte is complete and the RX FIFO holds the result. The
+  clock-field shifts (`PRSC<<3`, `CDIV<<6`, `HIGHSPEED=BIT(10)`,
+  `IRQ_RX_AVAIL=BIT(20)`) all match the RTL constants.
+- **SPI ISR guards the chained TX write.** A `TX_FULL` slot completes the
+  transfer with `-EIO` rather than silently dropping a byte (which would stall
+  until the spi_context timeout).
+- **I2C ISR checks every `twi_*_nb()` push and issues at most one STOP per path.**
+  The STOP-flag decision reads `msgs[msg_idx]` *before* `msg_idx++` (no
+  one-past-the-end read on the final message). A bounded `TWI_XFER_TIMEOUT`
+  (1 s) backstops a lost FIRQ so a dropped interrupt cannot hang the caller
+  forever.
+- **WDT honours STRICT; tamper-resistance requires the LOCK bit.** STRICT alone
+  does not prevent a plain `CTRL = 0` disable — only the LOCK bit does. The
+  `CONFIG_WDT_NEORV32_LOCK` opt-in is meant to deliver that. **⚠ The lock does
+  not currently engage — see §9.1.**
+
+---
+
+## 7. Host-tooling contract
+
+Source: [`tools/fft_demo/`](tools/fft_demo/), [`scripts/`](scripts/).
+
+- **The FrontPanel handle lives entirely on the worker `QThread`.** It is
+  created, opened, used, and closed only on that thread (the Opal Kelly handle
+  is not thread-safe); the GUI thread renders via queued signals. `closeEvent`
+  stops and joins the worker, and `transport.close()` releases the device via
+  `IsOpen()/Close()` so a lingering handle cannot block the next open.
+- **Frame ordering is publish-before-push.** Firmware writes `REG_PUBLISH`
+  (latches `cycles_sys` *and* bumps `frame_count_sys` on one edge) before pushing
+  the output frame, so when the host sees `frame_counter` advance, `hw_cycles` is
+  already valid. Wrap is handled by `(n - prev) & 0xFFFFFFFF`.
+- **Q1.15 wire format is `{im[31:16], re[15:0]}` little-endian** and is
+  consistent across host pack/unpack, the RTL bridge, and the firmware
+  (`fft_demo_main.c`, `fft_accel.c`). Verified end-to-end.
+
+---
+
+## 8. CI / build-gate contract
+
+Source: [`.github/workflows/ci.yml`](.github/workflows/ci.yml),
+[`vivado-synth.yml`](.github/workflows/vivado-synth.yml),
+[`Makefile`](Makefile), [`testcase.yaml`](zephyr_app/testcase.yaml).
+
+Every gate must be able to **fail**. The following hold today; keep them:
+
+- Every piped CI step sets `set -o pipefail`; there are no `|| true` masks.
+- clang-tidy runs with `--warnings-as-errors='*'` (overriding the empty
+  `WarningsAsErrors` in `.clang-tidy`), so any finding fails the step.
+- The `nm` step selects an installed RISC-V binary and exits 1 if none/the ELF
+  is missing, keeping error text out of the uploaded memory map.
+- Twister builds a real project at the `zephyr_app/` root and excludes the `hw`
+  tag; the DRC/timing gates are severity-aware (§4.3).
+- `make test-zephyr` passes only on non-empty UART output **and**
+  `PROJECT EXECUTION SUCCESSFUL` **and** the absence of `FAIL -`/`Assertion
+  failed`/`FATAL`/failed-suite markers.
+- The firmware-analysis build uses `prj.conf` (a real production image; ZTEST is
+  opt-in, never baked into the base config).
+- Third-party GitHub Actions are SHA-pinned with version comments.
+
+> **Known robustness gaps in these gates are tracked in §9.7–§9.9.** They do not
+> make a gate inert *today*, but they would let one pass silently under a future
+> layout change.
+
+---
+
+## 9. Open ledger
+
+Each item is a confirmed defect, drift, or robustness gap with a source anchor.
+Close an item by fixing it and deleting its row. Items resolved on a branch stay
+recorded under §9.0 (with the durable lesson) until the PR merges, then collapse
+into the relevant §2–§8 clause.
+
+### 9.0 — Resolved in branch `fix/review-2-findings`
+
+The following were fixed in this branch and **build-verified** on the remote
+(Vivado 2025.1 host): `west twister -T zephyr_app --integration --exclude-tag hw`
+builds all four configurations (`baseline`, `shell.compile`, `wdt.compile`,
+`fft.compile`) clean under `-Werror`, 0 failed / 0 errored. The two functional
+fixes live in HW-only code paths (see notes) and are additionally **verified by
+construction against the NEORV32 v1.11.6 RTL**; full runtime confirmation needs
+the `xem7310` HIL runner.
+
+- **9.1 CRITICAL — WDT LOCK now engages** ([`wdt_neorv32.c`](zephyr_app/drivers/wdt/wdt_neorv32.c)).
+  `wdt_setup()` was writing `EN|STRICT|LOCK|TIMEOUT` in one CTRL write, but
+  [`neorv32_wdt.vhd:95`](neorv32/rtl/core/neorv32_wdt.vhd#L95) only latches LOCK
+  if EN was *already* set (`ctrl.lock <= data(lock) and ctrl.enable`), so with
+  `CONFIG_WDT_NEORV32_LOCK=y` the lock never engaged and `disable()` still
+  succeeded — the tamper-resistance did not exist (masked because the Kconfig
+  defaults off). **Fix:** the lock is now a *second* CTRL write (`EN|STRICT|
+  TIMEOUT`, then `… |LOCK`) so EN is already 1 when LOCK latches.
+  *HW-only path (lock defaults off); needs a HIL test that asserts `disable()`
+  returns `-EPERM` under lock.*
+  > **Lesson:** the NEORV32 WDT requires a two-step enable-then-lock; a combined
+  > write silently no-ops the lock. Synthesis/compile cannot catch this — it is
+  > a hardware-semantics contract.
+
+- **9.2 MAJOR — I2C interrupt path now skips zero-length messages**
+  ([`i2c_neorv32.c`](zephyr_app/drivers/i2c/i2c_neorv32.c)). The IRQ state
+  machine lacked the polling path's `len==0` skip, so a zero-length message
+  (bus scan / SMBus quick command) dereferenced `buf[0]` of an empty buffer and
+  clocked one stray byte. **Fix:** skip leading zero-length messages at transfer
+  start and trailing ones at each `next_msg` advance, matching the polling path.
+  *HW-only path (`CONFIG_I2C_NEORV32_INTERRUPT`); the GHDL sim uses the polling
+  path.*
+
+- **9.3–9.7 — confirmed drift corrected** (code was already right; prose was
+  stale): the three overflow docstrings now describe the GPIO-latch readback
+  (not an interrupt); `app_accel.overlay` header now describes the v1.1 AXI INTC
+  topology (not the obsolete xlconcat/IRQ-0); the `fft_accel.c` overflow-stability
+  comment is re-anchored on the latch/aresetn argument; both `fp_fft_pipe_bridge`
+  M3 comments now give the correct same-edge-publish rationale (and a "do NOT
+  reintroduce a handshake" warning); the I2C FIRQ comment now states the real
+  level condition + spurious-entry guard; `prj_accel.conf`, `DEVELOPER.md` tree,
+  `main.cpp` suite list, and the binding-YAML `dma` aperture (now `0x80`) are
+  reconciled.
+
+### CI robustness gaps (latent, not inert today)
+
+#### 9.8 — clang-tidy / Twister can pass on an empty selection
+[`ci.yml:295-325`](.github/workflows/ci.yml#L295-L325): the clang-tidy step pipes
+the selected-file list into `xargs` **without `-r`/`--no-run-if-empty`**, and
+GNU `xargs` runs the command once on empty input (verified: exit 0). If the path
+filter ever selects zero files, clang-tidy processes nothing and the gate passes
+silently. Likewise [`ci.yml:158-164`](.github/workflows/ci.yml#L158-L164):
+Twister exits 0 if `--integration` narrows the selection to zero testcases.
+> **Fix:** assert the file list is non-empty before `xargs` (and/or add `-r`);
+> after Twister, assert ≥1 testcase actually built/ran.
+
+#### 9.9 — Accelerator and WDT drivers are never linted, and no ZTEST covers overflow
+The firmware-analysis build uses `prj.conf`, so `drivers/accel/fft_accel.c`
+(gated `CONFIG_FFT_ACCEL`) and `drivers/wdt/wdt_neorv32.c`
+(gated `CONFIG_WDT_NEORV32`) are absent from `compile_commands.json` and never
+tidied — both are on CLAUDE.md's "do not change casually" list. Separately, the
+overflow path (§5, ACCEL_ARCH §2.3) is verified only by the interactive
+`fft overflow` shell command, never by an automated ZTEST, so CI cannot regress
+the M1 chain.
+> **Fix:** run a second clang-tidy pass against a config that enables
+> `CONFIG_FFT_ACCEL`/`CONFIG_WDT_NEORV32`, and add a ZTEST that asserts
+> `overflow == false` for an in-range frame (the positive-assertion case needs
+> the deliberately under-scaled bitstream and stays HIL-only).
+
+#### 9.10 — `test_y_n_minus_1` is a weak guard for the under-length-S2MM mode
+[`test_fft_accel.cpp:222-242`](zephyr_app/tests/test_fft_accel.cpp#L222-L242)
+asserts only `mag_sq(g_out[4095]) > 0`. Because the file-scope buffer is reused,
+a stale value left in `BRAM[4095]` by a prior frame would also pass. **Fix:**
+clear `g_out[N-1]` to a sentinel before the transform, or assert it is
+comparable to the symmetric peak `g_out[1]`.
+
+---
+
+## 10. Verified-correct, do-not-regress (quick index)
+
+These were checked against source (and, where noted, NEORV32 v1.11.6 RTL) and
+are correct. They are the implicit acceptance set for any future change.
+
+- xfft `0x1555` = ÷4096 exact unity gain; SmartConnect MM2S/S2MM isolation;
+  INTC edge/level per channel; the dual-channel GPIO overflow readback.
+- The FFT driver fences (§2.1), `k_sem_reset` ordering (§2.2), ISR W1C→IAR
+  ordering (§2.3), S2MM-before-MM2S arming and symmetric `N×4` (§2.4).
+- All four XPM FIFOs gate on reset-busy (§3.1); `array_single` (not handshake)
+  for cycles/frame-count (§3.2); beat-counter staging (§3.3); the XBUS region
+  decode (§3.4); `(0 downto 0)` port typing (§3.5).
+- `set_clock_groups -asynchronous` as the primary CDC cut; the build closes at
+  WNS +0.042 / WHS +0.023 with 0 failing endpoints; DRC clean (§4).
+- SPI polling pattern and clock-field shifts (RTL-confirmed); SPI ISR
+  dropped-byte guard; I2C single-STOP + off-by-one fix + bounded timeout (§6).
+- PyQt demo threading + handle lifecycle; publish-before-push frame ordering;
+  Q1.15 endianness across host/RTL/firmware (§7).
+- The CI gates can fail (pipefail, warnings-as-errors, severity-aware DRC,
+  strict `test-zephyr` PASS check, SHA-pinned actions) (§8).
+- The eight `ostomachion_fft` ZTESTs map name-for-name to ACCEL_ARCH §6 failure
+  modes; the off-by-one and stale-IRQ guards use zero/tight tolerances.

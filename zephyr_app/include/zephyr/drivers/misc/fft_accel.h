@@ -49,11 +49,14 @@ int fft_accel_transform(const struct device *dev,
 /**
  * @brief Check whether the last transform produced a fixed-point overflow.
  *
- * The xfft IP fires an interrupt on m_axis_status_tvalid when the scaled
- * accumulator would have overflowed.  If this flag is true the output bins
- * may contain corrupted values.  Reduce the input amplitude or re-examine
- * the scaling schedule.  The flag is cleared at the start of each
- * fft_accel_transform() call.
+ * The xfft overflow flag (m_axis_status_tdata[0]) is NOT delivered through the
+ * interrupt path.  A fabric sticky latch records it (set on any scaled-stage
+ * overflow during the frame, cleared by the per-transform aresetn pulse), and
+ * fft_accel_transform() reads it back over the AXI GPIO input channel
+ * (GPIO_DATA2 bit 0) after the S2MM completion — see ACCEL_ARCH.md §2.3.  If
+ * this flag is true the output bins may contain corrupted values; reduce the
+ * input amplitude or re-examine the scaling schedule.  The flag reflects the
+ * most recent fft_accel_transform() call.
  *
  * @param dev  Pointer to FFT accelerator device.
  * @return true if overflow was detected in the last transform, false otherwise.

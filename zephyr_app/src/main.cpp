@@ -5,8 +5,10 @@
 //
 // Architecture overview:
 //   - The ztest framework (CONFIG_ZTEST=y) provides its own main() that
-//     discovers and runs all registered ZTEST_SUITE instances
-//     (tests/test_spi.cpp, tests/test_i2c.cpp) before returning.
+//     discovers and runs all registered ZTEST_SUITE instances under tests/
+//     before returning: test_spi, test_i2c, test_gpio, plus test_wdt
+//     (CONFIG_WDT_NEORV32) and test_fft_accel (CONFIG_FFT_ACCEL) — see
+//     CMakeLists.txt for the gating.
 //   - A SYS_INIT hook sets GPIO pin 0 (LED0) high early in the boot sequence.
 //     This gives the simulation testbench an immediate proof-of-life signal
 //     (gpio_toggle_cnt increments from 0→1) before the polling test drivers

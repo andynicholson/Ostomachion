@@ -12,7 +12,7 @@
 #
 #   fft_accel: fft-accel@40000000 {
 #       compatible = "ostomachion,fft-accel";
-#       reg = <0x40000000 0x40>,     /* AXI DMA control registers  (64 B)  */
+#       reg = <0x40000000 0x80>,     /* AXI DMA control registers (128 B)  */
 #             <0x41000000 0x8000>,   /* TX BRAM                   (32 KB)  */
 #             <0x41008000 0x8000>,   /* RX BRAM                   (32 KB)  */
 #             <0x40010000 0x80>,     /* AXI INTC (128 B AXI aperture)      */
@@ -37,7 +37,7 @@ properties:
     required: true
     description: |
       Must be "dma", "tx_bram", "rx_bram", "intc", "gpio" in that order.
-        dma     — AXI DMA control registers (64 B at 0x40000000)
+        dma     — AXI DMA control registers (128 B at 0x40000000)
         tx_bram — TX BRAM input buffer (32 KB at 0x41000000)
         rx_bram — RX BRAM output buffer (32 KB at 0x41008000)
         intc    — AXI INTC (128 B decode at 0x40010000; PG099 regs in low 32 B)

@@ -27,11 +27,19 @@
  *
  *   CONFIG_I2C_NEORV32_INTERRUPT=y
  *     Interrupt-driven path: uses a state machine driven by the TWI FIRQ
- *     (FIRQ 7).  The FIRQ fires unconditionally whenever TWI_CTRL_RX_AVAIL
- *     is asserted — i.e., after every RTX command completes (address phase,
- *     write data, read data).  START and STOP commands produce no RX FIFO
- *     entry and therefore do not trigger the FIRQ; they are "fire and
- *     forget" writes to the TX FIFO.
+ *     (FIRQ 7).  NOTE the actual hardware condition: per neorv32_twi.vhd the
+ *     FIRQ is a LEVEL, asserted while
+ *         enable AND (TX FIFO empty) AND (engine idle)
+ *     — it is NOT a per-RTX-completion or RX_AVAIL pulse.  This means the FIRQ
+ *     is already asserted the instant the peripheral is enabled-and-idle,
+ *     before any byte is sent, and re-asserts whenever the engine drains to
+ *     idle (after each RTX, and after START/STOP which produce no RX entry).
+ *
+ *     What makes the state machine correct despite the level semantics: the
+ *     ISR re-checks TWI_CTRL_RX_AVAIL and returns early when no RX entry is
+ *     present (the spurious-entry guard below), so an enable-while-idle FIRQ or
+ *     a START/STOP-only idle FIRQ does no work; only an RTX that deposits an RX
+ *     byte advances the state machine.
  *
  *     The calling thread blocks on a semaphore; the ISR drives all byte
  *     transfers through the state machine and signals completion.
@@ -370,13 +378,23 @@ next_msg:
 			goto done_no_stop;   /* STOP already attempted */
 		}
 		data->msg_idx++;
+		/* Skip trailing zero-length messages (matches the polling path,
+		 * which `continue`s over len==0 and ignores their flags). */
+		while (data->msg_idx < data->num_msgs &&
+		       data->msgs[data->msg_idx].len == 0U) {
+			data->msg_idx++;
+		}
 		if (data->msg_idx >= data->num_msgs) {
 			goto done_no_stop;   /* all messages done, STOP issued */
 		}
 	} else {
 		data->msg_idx++;
+		while (data->msg_idx < data->num_msgs &&
+		       data->msgs[data->msg_idx].len == 0U) {
+			data->msg_idx++;
+		}
 		if (data->msg_idx >= data->num_msgs) {
-			/* Final message had no STOP flag: release the bus. */
+			/* Final message(s) had no STOP flag: release the bus. */
 			(void)twi_stop_nb(dev);
 			goto done_no_stop;
 		}
@@ -425,6 +443,21 @@ static int neorv32_i2c_transfer_irq(const struct device *dev, struct i2c_msg *ms
 		return 0;
 	}
 
+	/* Skip leading zero-length messages so the first message we drive has a
+	 * byte to transfer.  The polling path skips len==0 messages entirely
+	 * (no START/STOP, no buf[0] access); the ISR state machine must match, or
+	 * STATE_ADDR would dereference buf[0] of an empty buffer and clock one
+	 * unintended byte onto the bus (e.g. an SMBus quick command or a bus scan
+	 * that sends address only).  If EVERY message is zero-length there is
+	 * nothing to do. */
+	uint8_t first = 0U;
+	while (first < num_msgs && msgs[first].len == 0U) {
+		first++;
+	}
+	if (first >= num_msgs) {
+		return 0;
+	}
+
 	/* Ensure the bus is idle after any previous STOP (executes asynchronously). */
 	err = twi_wait_idle(dev);
 	if (err < 0) {
@@ -434,7 +467,7 @@ static int neorv32_i2c_transfer_irq(const struct device *dev, struct i2c_msg *ms
 	/* Set up state machine */
 	data->msgs     = msgs;
 	data->num_msgs = num_msgs;
-	data->msg_idx  = 0U;
+	data->msg_idx  = first;
 	data->byte_idx = 0U;
 	data->addr     = addr;
 	data->result   = 0;
@@ -453,9 +486,10 @@ static int neorv32_i2c_transfer_irq(const struct device *dev, struct i2c_msg *ms
 		return err;
 	}
 
-	/* Write address RTX: this produces an RX entry → FIRQ fires → ISR runs */
+	/* Write address RTX: this produces an RX entry → FIRQ fires → ISR runs.
+	 * Use msgs[first] (the first non-zero-length message) for the R/W bit. */
 	uint8_t addr_byte = (uint8_t)((addr << 1U) |
-				      ((msgs[0].flags & I2C_MSG_READ) ? 1U : 0U));
+				      ((msgs[first].flags & I2C_MSG_READ) ? 1U : 0U));
 
 	err = twi_rtx_nb(dev, addr_byte, false);
 	if (err < 0) {

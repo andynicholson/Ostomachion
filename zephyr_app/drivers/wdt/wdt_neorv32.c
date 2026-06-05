@@ -165,19 +165,30 @@ static int wdt_neorv32_setup(const struct device *dev, uint8_t options)
 		return -EINVAL;
 	}
 
-	/* Build and write the CTRL register:
-	 *   EN=1, STRICT=1 (reject wrong password / locked writes),
-	 *   LOCK per CONFIG_WDT_NEORV32_LOCK (1 = tamper-proof, disable() blocked),
-	 *   TIMEOUT=data->timeout_ticks. */
+	/* Build the CTRL word: EN=1, STRICT=1 (reject wrong password / locked
+	 * writes), TIMEOUT=data->timeout_ticks.  LOCK is applied separately below. */
 	uint32_t ctrl = WDT_CTRL_EN | WDT_CTRL_STRICT |
 			(data->timeout_ticks << WDT_CTRL_TIMEOUT_LSB);
-#ifdef CONFIG_WDT_NEORV32_LOCK
-	ctrl |= WDT_CTRL_LOCK;
-#endif
 	wdt_wr(config, WDT_CTRL, ctrl);
 
 	/* Feed immediately to start the counter from the fresh timeout value */
 	wdt_wr(config, WDT_RESET, WDT_PASSWORD);
+
+#ifdef CONFIG_WDT_NEORV32_LOCK
+	/* Engage the LOCK bit in a SECOND CTRL write.
+	 *
+	 * The NEORV32 WDT latches LOCK only if EN is ALREADY set from a prior
+	 * write — neorv32_wdt.vhd qualifies it as
+	 *   ctrl.lock <= data(lock) and ctrl.enable;  -- "lock only if already enabled"
+	 * so writing EN and LOCK in the same word (as an earlier version did) leaves
+	 * LOCK=0 because ctrl.enable is still 0 at that edge.  The first write above
+	 * sets EN; this write re-sends the full config with LOCK added, and because
+	 * EN is now already 1 the hardware latches LOCK.  After this, CTRL is
+	 * immutable until the next hardware reset and wdt_disable() returns -EPERM.
+	 * The write targets CTRL while still unlocked, so STRICT does not trip a
+	 * reset on it. */
+	wdt_wr(config, WDT_CTRL, ctrl | WDT_CTRL_LOCK);
+#endif
 
 	LOG_INF("WDT enabled: timeout_ticks=%u (%.1f s at %u Hz)",
 		data->timeout_ticks,

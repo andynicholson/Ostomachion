@@ -43,6 +43,30 @@ architectural layers documented in [README.md](README.md#the-fourteen-pieces).
    invoked by `make fpga-synth`.  Quality gates in
    [`fpga/xem7310/check_build.tcl`](fpga/xem7310/check_build.tcl).
 
+6. **All development happens on branches, merged via squash PRs.**  `master`
+   (and `main`/`develop`) are protected: never commit or push directly to them.
+   Every change — code, RTL, docs — lands through this flow:
+
+   ```bash
+   git checkout -b <type>/<short-topic>     # feat/, fix/, chore/, docs/, ci/
+   # ... edit, build, verify ...
+   git push -u origin <branch>
+   gh pr create --base master --fill        # open the PR
+   gh pr merge   --squash --delete-branch    # squash-merge once CI + review pass
+   ```
+
+   - **Squash-merge only** — one logical change becomes one commit on `master`,
+     so history stays linear and bisectable.  Do not use merge commits or
+     rebase-merge.
+   - The PR must pass the automatic CI jobs (below) before merge.  Self-hosted
+     Vivado synthesis is manual; run it for any RTL/constraints/BD change and
+     cite the WNS/WHS/DRC result in the PR.
+   - Branch names are typed: `feat/`, `fix/`, `chore/`, `docs/`, `ci/`,
+     `refactor/`.  Delete the branch on merge (`--delete-branch`).
+   - Record any non-obvious architectural decision or revert as a clause in
+     [REVIEW.md](REVIEW.md) (the standing architectural contract / open ledger)
+     in the same PR — treat docs as code.
+
 ---
 
 ## Fabric hierarchy
