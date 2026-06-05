@@ -120,26 +120,21 @@ architecture rtl of fp_fft_pipe_bridge is
   signal fifo_out_rd_rst_busy : std_logic;  -- fp_clk  domain: gates rd_en
 
   -- ── CDC of cycles + frame_counter from sys_clk → fp_clk ───────────────
-  -- cycles crosses atomically via xpm_cdc_handshake (M3): cycles_sys can change
-  -- in all 32 bits at once, so per-bit xpm_cdc_array_single could land different
-  -- bits on different fp_clk edges (a torn value).  frame_count on the fp side
-  -- is derived from the handshake completion (dest_req) so it only advances once
-  -- the matching cycles value has landed coherently — preserving the host
-  -- contract "new frame_count ⇒ cycles is fresh and valid".
+  -- Per-bit xpm_cdc_array_single is appropriate here:
+  --   * frame_count_sys is a monotonically-incrementing counter, so any
+  --     bit-tearing the host could see is constrained to (old) → (new); it
+  --     never produces an out-of-sequence value for a counter that increments
+  --     by 1 per frame.
+  --   * cycles_sys is read by the host ONLY after it sees fifo_out_count rise
+  --     to FFT_N (~40 µs of sys_clk after the firmware's REG_PUBLISH write),
+  --     which is two orders of magnitude longer than the 2-FF synchroniser
+  --     resolves in, so any transient bit-skew has settled long before.
+  -- An earlier rewrite to xpm_cdc_handshake ("M3") silently dropped publishes
+  -- when the fp-side handshake hadn't completed yet (cdc_busy=1), causing
+  -- frame_count_fp to fall behind frame_count_sys and the host's
+  -- wait_frame_done to time out at random frames.  Reverted.
   signal cycles_fp      : std_logic_vector(31 downto 0);
-  signal frame_count_fp : std_logic_vector(31 downto 0) := (others => '0');
-
-  -- Handshake control (sys side): one src_send pulse per REG_PUBLISH write,
-  -- guarded by cdc_busy so a new transfer is not launched until the previous
-  -- one is acknowledged (src_rcv).  REG_PUBLISH happens once per frame, far
-  -- slower than the handshake latency, so this never actually stalls a publish.
-  signal cdc_src_send : std_logic := '0';
-  signal cdc_src_rcv  : std_logic;
-  signal cdc_busy     : std_logic := '0';
-  signal publish_pulse : std_logic;
-
-  -- fp side: handshake completion strobe; increments frame_count_fp.
-  signal cdc_dest_req : std_logic;
+  signal frame_count_fp : std_logic_vector(31 downto 0);
 
 begin
 
@@ -200,32 +195,6 @@ begin
   xbus_rdat <= rdat_q;
   xbus_ack  <= ack_q;
 
-  -- ── Handshake source control (sys_clk) ────────────────────────────────
-  -- publish_pulse: 1-cycle strobe when the CPU writes REG_PUBLISH (the same
-  -- event that latches cycles_sys and bumps frame_count_sys above).
-  publish_pulse <= '1' when (access_pulse = '1' and xbus_we = '1'
-                             and xbus_addr = REG_PUBLISH) else '0';
-
-  process (sys_clk)
-  begin
-    if rising_edge(sys_clk) then
-      if sys_rstn = '0' then
-        cdc_src_send <= '0';
-        cdc_busy     <= '0';
-      else
-        cdc_src_send <= '0';                 -- default: single-cycle pulse
-        if cdc_busy = '0' then
-          if publish_pulse = '1' then
-            -- cycles_sys updates on this same edge; launch the transfer.
-            cdc_src_send <= '1';
-            cdc_busy     <= '1';
-          end if;
-        elsif cdc_src_rcv = '1' then
-          cdc_busy <= '0';                   -- transfer acknowledged; ready again
-        end if;
-      end if;
-    end if;
-  end process;
 
   -- FIFO_IN read pulse: pop one word when REG_FIFO_POP is read.
   -- Inhibited while rd_rst_busy is asserted — XPM drops reads issued during
@@ -396,54 +365,43 @@ begin
   fifo_out_count_o <= "00" & fifo_out_rd_cnt;
 
   ---------------------------------------------------------------------------
-  -- cycles CDC, sys_clk → fp_clk, via xpm_cdc_handshake (M3).
+  -- cycles + frame_counter CDC, sys_clk → fp_clk.
   --
-  -- cycles_sys is an arbitrary 32-bit value that can change in every bit on a
-  -- single REG_PUBLISH write.  A per-bit synchroniser (xpm_cdc_array_single)
-  -- can therefore present a torn value on fp_clk when bits resolve on different
-  -- edges.  The handshake macro transfers the whole bus atomically: dest_out is
-  -- only updated (and dest_req pulsed) once the full word has crossed coherently.
-  --
-  -- DEST_EXT_HSK=0 → internal auto-acknowledge, so dest_ack is tied low and the
-  -- fp side just observes dest_req.  src_send is single-cycle and re-armed only
-  -- after src_rcv (see the cdc_busy guard in the sys process above).
+  -- Both values are quasi-static (they only change once per frame), and the
+  -- host reads them only after seeing fifo_out_count >= FFT_N — by which
+  -- point the synchroniser has long since resolved.  Per-bit array_single is
+  -- correct here; the earlier handshake rewrite was an over-correction (see
+  -- the cycles_fp / frame_count_fp signal-decl comment above).
   ---------------------------------------------------------------------------
-  cdc_cycles_i : xpm_cdc_handshake
+  cdc_cycles_i : xpm_cdc_array_single
     generic map (
-      DEST_EXT_HSK   => 0,
       DEST_SYNC_FF   => 2,
       INIT_SYNC_FF   => 0,
       SIM_ASSERT_CHK => 0,
-      SRC_SYNC_FF    => 2,
+      SRC_INPUT_REG  => 1,
       WIDTH          => 32
     )
     port map (
       src_clk  => sys_clk,
       src_in   => cycles_sys,
-      src_send => cdc_src_send,
-      src_rcv  => cdc_src_rcv,
       dest_clk => fp_clk,
-      dest_req => cdc_dest_req,
-      dest_ack => '0',
       dest_out => cycles_fp
     );
 
-  ---------------------------------------------------------------------------
-  -- frame_count (fp_clk): derived from handshake completion, NOT separately
-  -- synchronised.  Incrementing on each dest_req pulse guarantees the count the
-  -- host sees only advances after the matching cycles value has landed in
-  -- cycles_fp — so the hosts rule "new frame_count ⇒ cycles is fresh and
-  -- coherent" holds by construction.  frame_count_sys remains the sys-side
-  -- bookkeeping counter (e.g. for the CPU), but is no longer raw-CDCd.
-  ---------------------------------------------------------------------------
-  process (fp_clk)
-  begin
-    if rising_edge(fp_clk) then
-      if cdc_dest_req = '1' then
-        frame_count_fp <= std_logic_vector(unsigned(frame_count_fp) + 1);
-      end if;
-    end if;
-  end process;
+  cdc_frame_i : xpm_cdc_array_single
+    generic map (
+      DEST_SYNC_FF   => 2,
+      INIT_SYNC_FF   => 0,
+      SIM_ASSERT_CHK => 0,
+      SRC_INPUT_REG  => 1,
+      WIDTH          => 32
+    )
+    port map (
+      src_clk  => sys_clk,
+      src_in   => std_logic_vector(frame_count_sys),
+      dest_clk => fp_clk,
+      dest_out => frame_count_fp
+    );
 
   hw_cycles_o   <= cycles_fp;
   frame_count_o <= frame_count_fp;
