@@ -120,19 +120,24 @@ architecture rtl of fp_fft_pipe_bridge is
   signal fifo_out_rd_rst_busy : std_logic;  -- fp_clk  domain: gates rd_en
 
   -- ── CDC of cycles + frame_counter from sys_clk → fp_clk ───────────────
-  -- Per-bit xpm_cdc_array_single is appropriate here:
+  -- Per-bit xpm_cdc_array_single is correct here:
   --   * frame_count_sys is a monotonically-incrementing counter, so any
   --     bit-tearing the host could see is constrained to (old) → (new); it
   --     never produces an out-of-sequence value for a counter that increments
   --     by 1 per frame.
-  --   * cycles_sys is read by the host ONLY after it sees fifo_out_count rise
-  --     to FFT_N (~40 µs of sys_clk after the firmware's REG_PUBLISH write),
-  --     which is two orders of magnitude longer than the 2-FF synchroniser
-  --     resolves in, so any transient bit-skew has settled long before.
+  --   * cycles_sys and frame_count_sys are written on the SAME sys_clk edge
+  --     (the REG_PUBLISH access below) and then held constant.  Each value goes
+  --     through its own identical 2-FF synchroniser, so by the time the host
+  --     observes frame_count_fp advance, cycles_fp (clocked into fp_clk from a
+  --     value that stopped changing on the same source edge) has resolved to
+  --     the matching frame.  The host reading cycles right after the counter
+  --     bump therefore cannot latch a stale value — correctness does NOT depend
+  --     on the host deferring the cycles read until fifo_out_count >= FFT_N.
   -- An earlier rewrite to xpm_cdc_handshake ("M3") silently dropped publishes
   -- when the fp-side handshake hadn't completed yet (cdc_busy=1), causing
   -- frame_count_fp to fall behind frame_count_sys and the host's
-  -- wait_frame_done to time out at random frames.  Reverted.
+  -- wait_frame_done to time out at random frames.  Reverted — do NOT
+  -- reintroduce a handshake here (synthesis success masked the on-board defect).
   signal cycles_fp      : std_logic_vector(31 downto 0);
   signal frame_count_fp : std_logic_vector(31 downto 0);
 
@@ -367,11 +372,12 @@ begin
   ---------------------------------------------------------------------------
   -- cycles + frame_counter CDC, sys_clk → fp_clk.
   --
-  -- Both values are quasi-static (they only change once per frame), and the
-  -- host reads them only after seeing fifo_out_count >= FFT_N — by which
-  -- point the synchroniser has long since resolved.  Per-bit array_single is
-  -- correct here; the earlier handshake rewrite was an over-correction (see
-  -- the cycles_fp / frame_count_fp signal-decl comment above).
+  -- Both values are quasi-static (they change once per frame) and are written
+  -- on the same sys_clk edge (REG_PUBLISH), so cycles_fp is valid by the time
+  -- the host observes frame_count_fp advance.  Per-bit array_single is correct
+  -- here; the earlier xpm_cdc_handshake rewrite was a regression (it dropped
+  -- publishes under USB load).  See the signal-decl comment above for the full
+  -- rationale and the "do NOT reintroduce a handshake" note.
   ---------------------------------------------------------------------------
   cdc_cycles_i : xpm_cdc_array_single
     generic map (

@@ -470,11 +470,13 @@ int fft_accel_transform(const struct device *dev,
 	int err = data->last_error;
 
 	/* Sample the latched xfft overflow flag for this frame.  The fabric latch
-	 * was cleared by the aresetn pulse in step 2 and set if any beat overflowed
-	 * the scaled fixed-point accumulator; it is stable by the time S2MM IOC has
-	 * fired (the status stream precedes the final data beat).  Read it via the
-	 * AXI GPIO input channel rather than the ISR, where the ch2 edge vs. latch
-	 * timing would be racy. */
+	 * was cleared by the aresetn pulse in step 2 and is set on ANY tvalid &&
+	 * overflow during the frame; it then holds until the NEXT aresetn pulse.
+	 * Because nothing clears it until the next transform's reset, reading it
+	 * after this frame's S2MM IOC is safe regardless of the intra-frame ordering
+	 * of the status beat relative to the final data beat (PG109 does not pin
+	 * that ordering).  Read it via the AXI GPIO input channel rather than the
+	 * ISR, where the ch2 edge vs. latch timing would be racy.  See ACCEL_ARCH §2.3. */
 	data->last_overflow = (gpio_rd(cfg, GPIO_DATA2) & GPIO_OVERFLOW) != 0;
 
 	if (data->last_overflow) {
@@ -518,9 +520,11 @@ int fft_accel_transform(const struct device *dev,
 /**
  * fft_accel_get_last_overflow() — check whether the last transform overflowed.
  *
- * The xfft IP fires an interrupt on m_axis_status_tvalid when the
- * fixed-point accumulator would have overflowed.  This function returns true
- * if that event was recorded during the most recent fft_accel_transform() call.
+ * The xfft overflow bit (m_axis_status_tdata[0]) is captured by a fabric sticky
+ * latch (cleared by the per-transform aresetn pulse) and read back over the AXI
+ * GPIO input channel (GPIO_DATA2 bit 0) at the end of fft_accel_transform() —
+ * NOT through the interrupt path (see ACCEL_ARCH.md §2.3).  This function
+ * returns the value sampled during the most recent fft_accel_transform() call.
  * The flag is cleared at the start of every fft_accel_transform().
  *
  * @param dev  FFT accelerator device

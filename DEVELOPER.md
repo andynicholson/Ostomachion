@@ -45,8 +45,9 @@ Fabric hierarchy (**`xem7310_top.vhd`** vs **`ostomachion_bd_wrapper`**) matches
 ├── sw/test_gpio_uart/                # Bare-metal smoke-test firmware (C)
 └── zephyr_app/
     ├── CMakeLists.txt
+    ├── testcase.yaml                 # West Twister test matrix (app root → buildable project)
     ├── zephyr/module.yml             # Registers this tree as a Zephyr module (drivers/bindings)
-    ├── prj.conf                      # Base Kconfig — ZTEST, SPI, I2C, GPIO, C++20 (sim / CI default)
+    ├── prj.conf                      # Base Kconfig — SPI, I2C, GPIO, C++20 (clean production base; ZTEST opt-in)
     ├── prj_fpga.conf                 # Overlay — FPGA (IRQ drivers, larger stacks)
     ├── prj_accel.conf                # Overlay — FFT accelerator
     ├── prj_shell.conf                # Overlay — interactive shell (no ZTEST)
@@ -68,8 +69,7 @@ Fabric hierarchy (**`xem7310_top.vhd`** vs **`ostomachion_bd_wrapper`**) matches
     │   ├── main.cpp                  # LED heartbeat thread (K_THREAD_DEFINE)
     │   ├── fft_shell.c               # "fft" shell commands
     │   └── test_runner.c             # "test run" shell command
-    ├── tests/
-    │   ├── testcase.yaml             # West Twister test matrix
+    ├── tests/                       # ZTEST suites (compiled in when CONFIG_ZTEST=y)
     │   ├── test_spi.cpp
     │   ├── test_i2c.cpp
     │   ├── test_gpio.cpp

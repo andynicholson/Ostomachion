@@ -19,9 +19,13 @@
  * It has no AXI4-Lite slave; it is driven purely via AXI4-Stream by the
  * AXI DMA and configured at synthesis time (forward, scale all stages).
  *
- * The DMA mm2s_introut and s2mm_introut are aggregated via xlconcat into
- * a single mext_irq_i line to NEORV32.  Zephyr maps this to IRQ 0 in the
- * NEORV32 external-interrupt domain.
+ * Interrupts (v1.1 — AXI INTC): three sources are aggregated by the AXI INTC
+ * (Xilinx PG099) and OR-reduced onto the single NEORV32 MEI line (IRQ 11):
+ *   INTC ch0 = AXI DMA mm2s_introut (MM2S complete / error)
+ *   INTC ch1 = AXI DMA s2mm_introut (S2MM complete / error)
+ *   INTC ch2 = xfft m_axis_status_tvalid (frame-done pulse; not overflow-only)
+ * The driver ISR reads INTC ISR for definitive channel identification.  See
+ * ACCEL_ARCH.md §2.2 and the `interrupts = <11>` property below.
  */
 
 / {
@@ -36,11 +40,13 @@
 			      <0x40020000 0x80>;
 			reg-names = "dma", "tx_bram", "rx_bram", "intc", "gpio";
 			/* dma-max-bytes is the runtime guard on RX (S2MM)
-			 * transfer length.  A 4096-point transform uses
-			 * N × 4 = 16384 bytes (ACCEL_ARCH.md §4.4); the
-			 * value below is a small upper-bound ceiling.  Both
-			 * BRAMs are 8192 words (32 KB) deep; the upper
-			 * words are unused. */
+			 * transfer length.  A 4096-point transform uses exactly
+			 * N × 4 = 16384 bytes (ACCEL_ARCH.md §4.4).  The value
+			 * is 16384 + 4: one word of deliberate slack so the
+			 * defense-in-depth `byte_len > dma-max-bytes` check
+			 * (fft_accel.c) never trips on the only legal length,
+			 * while still bounding a future variable-N path well
+			 * below the 8192-word (32 KB) BRAM depth. */
 			dma-max-bytes = <16388>;
 			/* AXI INTC IRQ output → NEORV32 MEI line (INTC IRQ 11) */
 			interrupts = <11>;
