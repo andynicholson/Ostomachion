@@ -287,15 +287,41 @@ jobs:
         run: |
           set -o pipefail
           cd build_analysis
+          # Tidy only files actually compiled by this build (per
+          # compile_commands.json), restricted to zephyr_app/{src,drivers,tests}.
+          # find-walking the source tree would tidy files the build skipped
+          # (CONFIG_FFT_ACCEL=n etc.) with no compile flags, producing cascading
+          # false positives against DTS-generated symbols.
+          python3 - <<'PY' > /tmp/clang_tidy_files.txt
+          import json
+          cc=json.load(open('compile_commands.json'))
+          roots=('/zephyr_app/src/','/zephyr_app/drivers/','/zephyr_app/tests/')
+          for e in cc:
+              if any(r in e['file'] for r in roots):
+                  print(e['file'])
+          PY
+          echo "clang-tidy will check $(wc -l < /tmp/clang_tidy_files.txt) files"
+          # Strip gcc-only flags from compile_commands.json that clang-tidy
+          # rejects as "unknown argument" / "argument unused during compilation".
+          # These appear because Zephyr builds with riscv64-zephyr-elf-gcc.
+          # Stripping them is the standard workaround for the clang-tidy /
+          # gcc-compile-commands.json toolchain mismatch.
+          sed -i \
+            -e 's|-fno-printf-return-value||g' \
+            -e 's|-fno-reorder-functions||g' \
+            -e 's|-fno-defer-pop||g' \
+            -e 's|-Wno-volatile||g' \
+            -e 's|--param=min-pagesize=0||g' \
+            -e 's|-specs=picolibc.specs||g' \
+            compile_commands.json
           # --warnings-as-errors='*' makes clang-tidy exit non-zero on any
           # finding so this is a real gate; pipefail propagates that exit code
           # through tee.  Triage findings rather than re-muting the gate.
-          clang-tidy \
+          xargs -a /tmp/clang_tidy_files.txt clang-tidy \
             --config-file=../zephyr_app/.clang-tidy \
             --warnings-as-errors='*' \
             --quiet \
             -p compile_commands.json \
-            $(find ../zephyr_app/src ../zephyr_app/drivers -name '*.c' -o -name '*.cpp') \
             2>&1 | tee ../clang_tidy.log
 
       - name: Generate memory map (nm --size-sort)

@@ -16,9 +16,13 @@ Checks: >
   -readability-magic-numbers,
   -readability-function-cognitive-complexity,
   -readability-else-after-return,
+  -readability-named-parameter,
   misc-*,
   -misc-no-recursion,
   -misc-include-cleaner,
+  -misc-misplaced-const,
+  -misc-use-internal-linkage,
+  -misc-use-anonymous-namespace,
 
 WarningsAsErrors: ''
 

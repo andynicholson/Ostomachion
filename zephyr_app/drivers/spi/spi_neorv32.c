@@ -281,7 +281,7 @@ static void neorv32_spi_isr(const struct device *dev)
 	uint8_t rxd = (uint8_t)(neorv32_spi_reg_read(dev, NEORV32_SPI_DATA) & 0xFFU);
 
 	if (spi_context_rx_buf_on(ctx)) {
-		*(uint8_t *)ctx->rx_buf = rxd;
+		*ctx->rx_buf = rxd;
 	}
 	spi_context_update_rx(ctx, 1, 1);
 
@@ -309,7 +309,7 @@ static void neorv32_spi_isr(const struct device *dev)
 		}
 
 		if (spi_context_tx_buf_on(ctx)) {
-			txd = *(const uint8_t *)ctx->tx_buf;
+			txd = *ctx->tx_buf;
 		}
 		spi_context_update_tx(ctx, 1, 1);
 		neorv32_spi_reg_write(dev, NEORV32_SPI_DATA, txd);
@@ -356,7 +356,7 @@ static int neorv32_spi_xfer_irq(const struct device *dev, const struct spi_confi
 	uint8_t txd = 0U;
 
 	if (spi_context_tx_buf_on(ctx)) {
-		txd = *(const uint8_t *)ctx->tx_buf;
+		txd = *ctx->tx_buf;
 	}
 	spi_context_update_tx(ctx, 1, 1);
 	neorv32_spi_reg_write(dev, NEORV32_SPI_DATA, txd);
@@ -388,7 +388,7 @@ static int neorv32_spi_xfer_poll(const struct device *dev, const struct spi_conf
 		uint8_t rxd;
 
 		if (spi_context_tx_buf_on(ctx)) {
-			txd = *(const uint8_t *)ctx->tx_buf;
+			txd = *ctx->tx_buf;
 		}
 
 		err = neorv32_spi_transfer_byte(dev, txd, &rxd);
@@ -397,7 +397,7 @@ static int neorv32_spi_xfer_poll(const struct device *dev, const struct spi_conf
 		}
 
 		if (spi_context_rx_buf_on(ctx)) {
-			*(uint8_t *)ctx->rx_buf = rxd;
+			*ctx->rx_buf = rxd;
 		}
 
 		spi_context_update_tx(ctx, 1, 1);
