@@ -9,7 +9,7 @@
  * the accelerator firmware (prj_accel.conf or prj_shell.conf).
  *
  * Address map (XBUS region 0x40000000–0x4FFFFFFF):
- *   0x40000000  AXI DMA control registers    64 B   (AXI4-Lite)
+ *   0x40000000  AXI DMA control registers   128 B   (AXI4-Lite)
  *   0x40010000  AXI INTC                    128 B   (AXI4-Lite)
  *   0x40020000  AXI GPIO (xfft reset)       128 B   (AXI4-Lite)
  *   0x41000000  TX BRAM                      32 KB  (AXI4-Full)
@@ -29,7 +29,7 @@
 		fft_accel: fft-accel@40000000 {
 			compatible = "ostomachion,fft-accel";
 			/* reg-names:  dma         tx_bram     rx_bram     intc        gpio        */
-			reg = <0x40000000 0x40>,
+			reg = <0x40000000 0x80>,
 			      <0x41000000 0x8000>,
 			      <0x41008000 0x8000>,
 			      <0x40010000 0x80>,

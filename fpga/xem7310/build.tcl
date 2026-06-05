@@ -250,13 +250,16 @@ report_utilization \
 report_drc \
     -file "$build_dir/drc.rpt"
 
-set drc_str [report_drc -return_string -quiet]
-if {[regexp {ERROR} $drc_str]} {
-    puts "ERROR: DRC violations detected — see $build_dir/drc.rpt"
+# Severity-aware DRC gate: count Error/Critical violations via the API rather
+# than grepping the report text for the substring "ERROR" (which false-
+# matches rule names and benign lines).
+set drc_errs [get_drc_violations -quiet -filter {SEVERITY == "Error" || SEVERITY =~ "*Critical*"}]
+if {[llength $drc_errs] > 0} {
+    puts "ERROR: [llength $drc_errs] DRC error-severity violation(s) — see $build_dir/drc.rpt"
     puts "ERROR: Resolve all DRC errors before deploying bitstream."
     exit 1
 }
-puts "INFO: DRC clean — no errors found."
+puts "INFO: DRC clean — no error-severity violations found."
 
 # ---------------------------------------------------------------------------
 # Build ID

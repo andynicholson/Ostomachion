@@ -96,9 +96,9 @@ without registered staging — `fft_beat_counter` outputs are registered on
 
 | Target | Base address | Size | Purpose |
 |--------|-------------|------|---------|
-| AXI DMA | `0x4000_0000` | 64 KiB | MM2S/S2MM channel registers |
-| AXI INTC | `0x4001_0000` | 64 KiB | IRQ enable/status/vector |
-| AXI GPIO | `0x4002_0000` | 64 KiB | xfft `aresetn` gate (bit 0) |
+| AXI DMA | `0x4000_0000` | 128 B | MM2S/S2MM channel registers |
+| AXI INTC | `0x4001_0000` | 128 B | IRQ enable/status/vector |
+| AXI GPIO | `0x4002_0000` | 128 B | xfft `aresetn` gate (ch1 bit 0) + overflow readback (ch2 0x08 bit 0) |
 | TX BRAM | `0x4100_0000` | 32 KiB | Input frame staging (8192×32) |
 | RX BRAM | `0x4100_8000` | 32 KiB | Output frame staging (8192×32) |
 

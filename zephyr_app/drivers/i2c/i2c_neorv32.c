@@ -75,6 +75,12 @@ LOG_MODULE_REGISTER(i2c_neorv32);
 
 #define TWI_POLL_RETRIES NEORV32_POLL_RETRIES
 
+/* Backstop timeout for the interrupt-driven completion wait.  The ISR drives
+ * every byte and signals completion or error; this bound only fires if a FIRQ
+ * is genuinely lost, turning an unrecoverable thread hang into -ETIMEDOUT.
+ * A full multi-message I2C transaction at 100 kHz is well under 1 s. */
+#define TWI_XFER_TIMEOUT K_SECONDS(1)
+
 /* NEORV32 clock prescaler LUT: index -> divisor */
 static const uint16_t twi_prsc_lut[8] = {2, 4, 8, 64, 128, 1024, 2048, 4096};
 
@@ -275,6 +281,7 @@ static void neorv32_i2c_isr(const struct device *dev)
 	const struct neorv32_i2c_config *cfg = dev->config;
 	struct neorv32_i2c_data *data = dev->data;
 	uint32_t rx_val;
+	int err = 0;
 
 	/* Harvest the RX FIFO entry that triggered this interrupt. */
 	if (!(neorv32_i2c_reg_read(dev, NEORV32_TWI_CTRL) & TWI_CTRL_RX_AVAIL)) {
@@ -292,16 +299,23 @@ static void neorv32_i2c_isr(const struct device *dev)
 			data->result = -ENXIO;
 			goto done;
 		}
-		/* Address ACK'd — start data phase */
+		/* Address ACK'd — start data phase.  Every twi_*_nb() push can
+		 * fail if the TX FIFO is full; a dropped push produces no further
+		 * FIRQ, so on error we must abort to done rather than return and
+		 * hang the waiting thread forever (see neorv32_i2c_transfer_irq). */
 		data->byte_idx = 0U;
 		if (data->msgs[data->msg_idx].flags & I2C_MSG_READ) {
 			data->state = STATE_RD_DATA;
 			bool mack = (data->msgs[data->msg_idx].len > 1U);
 
-			twi_rtx_nb(dev, 0xFFU, mack);
+			err = twi_rtx_nb(dev, 0xFFU, mack);
 		} else {
 			data->state = STATE_WR_DATA;
-			twi_rtx_nb(dev, data->msgs[data->msg_idx].buf[0], false);
+			err = twi_rtx_nb(dev, data->msgs[data->msg_idx].buf[0], false);
+		}
+		if (err < 0) {
+			data->result = err;
+			goto done;
 		}
 		return;
 
@@ -313,7 +327,11 @@ static void neorv32_i2c_isr(const struct device *dev)
 		}
 		data->byte_idx++;
 		if (data->byte_idx < data->msgs[data->msg_idx].len) {
-			twi_rtx_nb(dev, data->msgs[data->msg_idx].buf[data->byte_idx], false);
+			err = twi_rtx_nb(dev, data->msgs[data->msg_idx].buf[data->byte_idx], false);
+			if (err < 0) {
+				data->result = err;
+				goto done;
+			}
 			return;
 		}
 		goto next_msg;
@@ -324,7 +342,11 @@ static void neorv32_i2c_isr(const struct device *dev)
 		if (data->byte_idx < data->msgs[data->msg_idx].len) {
 			bool mack = (data->byte_idx < data->msgs[data->msg_idx].len - 1U);
 
-			twi_rtx_nb(dev, 0xFFU, mack);
+			err = twi_rtx_nb(dev, 0xFFU, mack);
+			if (err < 0) {
+				data->result = err;
+				goto done;
+			}
 			return;
 		}
 		goto next_msg;
@@ -336,29 +358,54 @@ static void neorv32_i2c_isr(const struct device *dev)
 	}
 
 next_msg:
-	/* Emit STOP if this message requests it */
+	/* The message at msg_idx just completed.  Decide STOP based on its flag
+	 * BEFORE advancing msg_idx (reading msgs[msg_idx] after the increment
+	 * would index one past the array on the final message).  Each path below
+	 * issues at most one STOP, fixing the prior double-STOP where next_msg
+	 * emitted a STOP and the unconditional done: emitted a second. */
 	if (data->msgs[data->msg_idx].flags & I2C_MSG_STOP) {
-		twi_stop_nb(dev);
+		err = twi_stop_nb(dev);
+		if (err < 0) {
+			data->result = err;
+			goto done_no_stop;   /* STOP already attempted */
+		}
+		data->msg_idx++;
+		if (data->msg_idx >= data->num_msgs) {
+			goto done_no_stop;   /* all messages done, STOP issued */
+		}
+	} else {
+		data->msg_idx++;
+		if (data->msg_idx >= data->num_msgs) {
+			/* Final message had no STOP flag: release the bus. */
+			(void)twi_stop_nb(dev);
+			goto done_no_stop;
+		}
 	}
 
-	data->msg_idx++;
-
-	if (data->msg_idx < data->num_msgs) {
-		/* More messages: issue REPEATED START + new address */
+	/* More messages remain: issue REPEATED START + new address. */
+	{
 		uint8_t addr_byte = (uint8_t)((data->addr << 1U) |
 			((data->msgs[data->msg_idx].flags & I2C_MSG_READ) ? 1U : 0U));
 
 		data->byte_idx = 0U;
 		data->state = STATE_ADDR;
 
-		twi_start_nb(dev);
-		twi_rtx_nb(dev, addr_byte, false);
+		err = twi_start_nb(dev);
+		if (err == 0) {
+			err = twi_rtx_nb(dev, addr_byte, false);
+		}
+		if (err < 0) {
+			data->result = err;
+			goto done;
+		}
 		return;
 	}
 
 done:
-	/* All messages processed (or error).  Issue STOP and wake the thread. */
-	twi_stop_nb(dev);
+	/* Error path: release the bus with a STOP, then wake the thread. */
+	(void)twi_stop_nb(dev);
+
+done_no_stop:
 	data->state = STATE_IDLE;
 	irq_disable(cfg->irqn);
 	k_sem_give(&data->completion);
@@ -416,8 +463,17 @@ static int neorv32_i2c_transfer_irq(const struct device *dev, struct i2c_msg *ms
 		return err;
 	}
 
-	/* Yield this thread until ISR signals completion */
-	k_sem_take(&data->completion, K_FOREVER);
+	/* Yield this thread until the ISR signals completion.  A bounded wait is
+	 * the backstop for a lost FIRQ: without it a single dropped interrupt
+	 * hangs the caller forever. */
+	if (k_sem_take(&data->completion, TWI_XFER_TIMEOUT) != 0) {
+		LOG_ERR("I2C transfer timed out (lost FIRQ?) addr=0x%02x", addr);
+		irq_disable(cfg->irqn);
+		/* Best-effort bus release; the engine may be mid-byte. */
+		(void)twi_stop_nb(dev);
+		data->state = STATE_IDLE;
+		return -ETIMEDOUT;
+	}
 
 	return data->result;
 }

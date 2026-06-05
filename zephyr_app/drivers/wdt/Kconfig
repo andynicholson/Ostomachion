@@ -16,6 +16,26 @@ config WDT_NEORV32
 	  callbacks are not available because the NEORV32 WDT triggers a
 	  hardware reset with no pre-reset IRQ.
 
-	  STRICT mode is always enabled: an incorrect feed password or write
-	  to a locked CTRL register causes an immediate hardware reset, ensuring
-	  the watchdog cannot be silently disabled by a runaway task.
+	  STRICT mode is always enabled: an incorrect feed password or a write
+	  to a locked CTRL register causes an immediate hardware reset.  Note
+	  that STRICT alone does NOT prevent an ordinary wdt_disable() (a plain
+	  CTRL write of 0) — see WDT_NEORV32_LOCK for tamper resistance.
+
+if WDT_NEORV32
+
+config WDT_NEORV32_LOCK
+	bool "Lock the WDT configuration in wdt_setup()"
+	default n
+	help
+	  Set the NEORV32 WDT CTRL LOCK bit in wdt_setup().  Once locked, the
+	  CTRL register (including the EN bit) cannot be changed until the next
+	  hardware reset, and wdt_disable() returns -EPERM.  Combined with the
+	  always-on STRICT mode, this guarantees the watchdog cannot be silently
+	  disabled by a runaway task — at the cost of making wdt_disable()
+	  permanently unavailable for this boot.
+
+	  Leave disabled (default) for development and for test suites that
+	  exercise wdt_disable(); enable for production firmware that must not
+	  allow the watchdog to be turned off.
+
+endif # WDT_NEORV32

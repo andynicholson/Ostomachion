@@ -20,11 +20,15 @@
 ## Interrupt topology:
 ##   axi_intc channel 0 ← AXI DMA mm2s_introut
 ##   axi_intc channel 1 ← AXI DMA s2mm_introut
-##   axi_intc channel 2 ← xfft_0 overflow (m_axis_status_tvalid)
+##   axi_intc channel 2 ← xfft_0 frame-done pulse (m_axis_status_tvalid)
 ##   axi_intc IRQ output  → NEORV32 mext_irq_i
 ##
+## Overflow path (not via INTC): xfft m_axis_status_tdata[0] is sliced out,
+## latched in xem7310_top.vhd (cleared by the per-transform xfft aresetn pulse),
+## and read back by the CPU through the AXI GPIO input channel (GPIO2_DATA 0x08).
+##
 ## AXI INTC address: 0x40010000
-## AXI GPIO  address: 0x40020000  (xfft per-transform pipeline reset)
+## AXI GPIO  address: 0x40020000  (xfft per-transform pipeline reset + overflow in)
 ##
 ## Resulting block design name: ostomachion_bd
 ## BD wrapper: ostomachion_bd_wrapper (VHDL, auto-generated)
@@ -206,8 +210,41 @@ connect_bd_net [get_bd_pins axi_dma_0/mm2s_introut] \
                [get_bd_pins irq_concat_intc/In0]
 connect_bd_net [get_bd_pins axi_dma_0/s2mm_introut] \
                [get_bd_pins irq_concat_intc/In1]
+
+## Tap the xfft status stream out of the BD so xem7310_top.vhd can latch the
+## overflow bit (m_axis_status_tdata[0], qualified by tvalid).  The same tvalid
+## still drives INTC In2 (the frame-done edge).  Per-signal connects are used
+## (not connect_bd_intf_net) so tvalid can fan out to both INTC and the port.
+create_bd_port -dir O fft_status_tvalid
+create_bd_port -dir O fft_status_overflow
 connect_bd_net [get_bd_pins xfft_0/m_axis_status_tvalid] \
-               [get_bd_pins irq_concat_intc/In2]
+               [get_bd_pins irq_concat_intc/In2]          \
+               [get_bd_ports fft_status_tvalid]
+
+## m_axis_status_tdata carries the overflow flag in bit 0.  Its total width
+## depends on the xfft configuration (ovflo-only typically rounds up to 8 bits),
+## so query the actual pin width rather than hard-coding it: a DIN_WIDTH mismatch
+## makes xlslice a synthesis error.  If the bus is already 1 bit wide, connect
+## it straight through; otherwise slice bit 0 out via xlslice.
+set fft_status_tdata_pin [get_bd_pins xfft_0/m_axis_status_tdata]
+set fft_status_width [expr {
+    [get_property LEFT $fft_status_tdata_pin] -
+    [get_property RIGHT $fft_status_tdata_pin] + 1
+}]
+if {$fft_status_width <= 1} {
+    connect_bd_net $fft_status_tdata_pin [get_bd_ports fft_status_overflow]
+} else {
+    create_bd_cell -type ip -vlnv xilinx.com:ip:xlslice:1.0 fft_ovflo_slice
+    set_property -dict {
+        CONFIG.DIN_FROM   {0}
+        CONFIG.DIN_TO     {0}
+        CONFIG.DOUT_WIDTH {1}
+    } [get_bd_cells fft_ovflo_slice]
+    set_property CONFIG.DIN_WIDTH $fft_status_width [get_bd_cells fft_ovflo_slice]
+    connect_bd_net $fft_status_tdata_pin [get_bd_pins fft_ovflo_slice/Din]
+    connect_bd_net [get_bd_pins fft_ovflo_slice/Dout] \
+                   [get_bd_ports fft_status_overflow]
+}
 
 create_bd_cell -type ip -vlnv xilinx.com:ip:axi_intc:4.1 axi_intc_0
 set_property -dict {
@@ -237,13 +274,23 @@ if {$fft_status_tready ne ""} {
 ## latency (xfft C_ARCH=3 keeps m_axis_data_tvalid=1 across frames; resetting
 ## the pipeline forces tvalid=0 so DMA S2MM waits for the first real output).
 ##
-## AXI address: 0x40020000  range 0x80
+## Channel 2 (dual) is an INPUT that exposes the latched xfft overflow flag to
+## the CPU at GPIO2_DATA (offset 0x08), bit 0.  The overflow event lives in
+## xfft m_axis_status_tdata[0] (qualified by m_axis_status_tvalid); it is sliced
+## out below, latched in xem7310_top.vhd (cleared by the per-transform xfft
+## aresetn pulse), and fed back into gpio2_io_i.  See ACCEL_ARCH.md §2.3.
+##
+## AXI address: 0x40020000  range 0x80  (covers GPIO_DATA 0x00 and GPIO2_DATA 0x08)
 create_bd_cell -type ip -vlnv xilinx.com:ip:axi_gpio:2.0 axi_gpio_0
 set_property -dict {
-    CONFIG.C_GPIO_WIDTH   {1}
-    CONFIG.C_ALL_INPUTS   {0}
-    CONFIG.C_ALL_OUTPUTS  {1}
-    CONFIG.C_DOUT_DEFAULT {0x00000001}
+    CONFIG.C_GPIO_WIDTH    {1}
+    CONFIG.C_ALL_INPUTS    {0}
+    CONFIG.C_ALL_OUTPUTS   {1}
+    CONFIG.C_DOUT_DEFAULT  {0x00000001}
+    CONFIG.C_IS_DUAL       {1}
+    CONFIG.C_GPIO2_WIDTH   {1}
+    CONFIG.C_ALL_INPUTS_2  {1}
+    CONFIG.C_ALL_OUTPUTS_2 {0}
 } [get_bd_cells axi_gpio_0]
 
 ## 1-bit AND gate: xfft_aresetn = gpio_io_o[0] AND peripheral_aresetn.
@@ -253,6 +300,12 @@ set_property -dict {
     CONFIG.C_SIZE      {1}
     CONFIG.C_OPERATION {and}
 } [get_bd_cells xfft_rst_and]
+
+## gpio2_io_i (input channel) carries the latched xfft overflow flag from
+## xem7310_top.vhd back to the CPU at GPIO2_DATA (offset 0x08), bit 0.
+create_bd_port -dir I fft_overflow_latched
+connect_bd_net [get_bd_ports fft_overflow_latched] \
+               [get_bd_pins axi_gpio_0/gpio2_io_i]
 
 ## ── 9. AXI interconnect wiring ──────────────────────────────────────────────
 connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXI_MM2S]  \
@@ -386,6 +439,11 @@ foreach pin {
 connect_bd_net [get_bd_pins axi_gpio_0/gpio_io_o] [get_bd_pins xfft_rst_and/Op1]
 connect_bd_net $peripheral_rstn                   [get_bd_pins xfft_rst_and/Op2]
 connect_bd_net [get_bd_pins xfft_rst_and/Res]     [get_bd_pins xfft_0/aresetn]
+
+## Expose the xfft aresetn so xem7310_top.vhd can clear the overflow latch on
+## the per-transform reset pulse (firmware drives GPIO bit 0 low → aresetn low).
+create_bd_port -dir O xfft_aresetn_o
+connect_bd_net [get_bd_pins xfft_rst_and/Res] [get_bd_ports xfft_aresetn_o]
 
 ## ── 13. External ports (BD boundary to xem7310_top RTL) ─────────────────────
 create_bd_port -dir I -type clk -freq_hz 200000000 sys_clk

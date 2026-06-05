@@ -384,6 +384,116 @@ static int cmd_fft_diag(const struct shell *sh, size_t argc, char **argv)
 	return pass ? 0 : -EIO;
 }
 
+/* ── "fft overflow" — exercise the xfft overflow flag (M1 end-to-end) ─────────
+ *
+ * Walks the full M1 path on real hardware: xfft m_axis_status_tdata[0] →
+ * fabric sticky latch (cleared by the per-transform aresetn pulse) → AXI GPIO
+ * input channel (GPIO_DATA2 0x08) → driver last_overflow.
+ *
+ * Input choice: the ÷4096 scaling schedule (0x1555, ÷4 per radix-4 stage) is
+ * the unity-gain schedule, so a single-tone or DC input — even at full scale —
+ * sits at or below range and does NOT overflow; a real cosine with re=im also
+ * cancels in the radix-4 real-part sums.  To actually exceed an intermediate
+ * stage we need full-scale *broadband* complex data with random signs on both
+ * axes (|x| up to √2·full, no cancellation), which is the standard FFT stress
+ * input.  We sweep amplitude from quiet → full-scale random:
+ *   - low amplitude  → expect overflow=false
+ *   - full-scale rand → expect overflow=TRUE (if the path and config overflow)
+ * and also print the raw GPIO2 register so a stuck-at-0 readback path is
+ * distinguishable from "this input simply didn't overflow".
+ */
+
+/* Deterministic xorshift32 so the test is reproducible across runs. */
+static uint32_t ovf_rng_state;
+static inline int16_t ovf_rand_q15(int shift)
+{
+	ovf_rng_state ^= ovf_rng_state << 13;
+	ovf_rng_state ^= ovf_rng_state >> 17;
+	ovf_rng_state ^= ovf_rng_state << 5;
+	/* Map to a signed value scaled down by `shift` (amplitude control). */
+	return (int16_t)((int32_t)(ovf_rng_state & 0xFFFF) - 32768) >> shift;
+}
+
+static int cmd_fft_overflow(const struct shell *sh, size_t argc, char **argv)
+{
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(fft_accel));
+	if (!device_is_ready(dev)) {
+		shell_error(sh, "fft_accel not ready");
+		return -ENODEV;
+	}
+
+	/* Raw GPIO2 overflow-readback register, for direct fabric visibility. */
+	static const uintptr_t gpio_base =
+		DT_REG_ADDR_BY_NAME(DT_NODELABEL(fft_accel), gpio);
+
+	/* Amplitude shift: 5 = quiet (±1024), 0 = full-scale random (±32767). */
+	static const int shifts[] = { 5, 2, 0 };
+
+	bool saw_false = false;
+	bool saw_true  = false;
+
+	shell_print(sh, "[FFT-OVF] Full-scale random complex sweep through the xfft "
+			"overflow flag (M1 path):");
+
+	for (size_t a = 0; a < ARRAY_SIZE(shifts); a++) {
+		int sh_amt = shifts[a];
+
+		ovf_rng_state = 0xC0FFEE01u;  /* fixed seed → reproducible frame */
+		int16_t peak = 0;
+		for (int k = 0; k < FFT_N; k++) {
+			int16_t re = ovf_rand_q15(sh_amt);
+			int16_t im = ovf_rand_q15(sh_amt);
+			g_fft_in[k].re = re;
+			g_fft_in[k].im = im;
+			int16_t a_re = (re < 0) ? (int16_t)-re : re;
+			if (a_re > peak) {
+				peak = a_re;
+			}
+		}
+
+		int rc = fft_accel_transform(dev, g_fft_in, g_fft_out, FFT_N);
+		if (rc != 0) {
+			shell_error(sh, "[FFT-OVF] shift=%d transform failed: %d",
+				    sh_amt, rc);
+			return rc;
+		}
+
+		bool ovf = fft_accel_get_last_overflow(dev);
+		uint32_t raw = sys_read32(gpio_base + 0x08);  /* GPIO2_DATA */
+		saw_false |= !ovf;
+		saw_true  |= ovf;
+
+		shell_print(sh,
+			    "  rand peak~%5d (Q1.15)  overflow=%s  GPIO2=0x%08x",
+			    peak, ovf ? "TRUE" : "false", raw);
+	}
+
+	/* Clear-check: a quiet frame after a full-scale one must read false,
+	 * proving the per-transform aresetn pulse clears the sticky latch. */
+	ovf_rng_state = 0xC0FFEE01u;
+	for (int k = 0; k < FFT_N; k++) {
+		g_fft_in[k].re = ovf_rand_q15(5);
+		g_fft_in[k].im = ovf_rand_q15(5);
+	}
+	int rc = fft_accel_transform(dev, g_fft_in, g_fft_out, FFT_N);
+	if (rc != 0) {
+		shell_error(sh, "[FFT-OVF] clear-check transform failed: %d", rc);
+		return rc;
+	}
+	bool ovf_after = fft_accel_get_last_overflow(dev);
+	shell_print(sh, "  clear-check quiet frame after full-scale  overflow=%s",
+		    ovf_after ? "TRUE" : "false");
+
+	bool pass = saw_false && saw_true && !ovf_after;
+	shell_print(sh,
+		    "[FFT-OVF] saw_false=%d saw_true=%d clears_after_high=%d  %s",
+		    saw_false, saw_true, !ovf_after, pass ? "PASS" : "FAIL");
+	return pass ? 0 : -EIO;
+}
+
 /* ── Shell command registration ──────────────────────────────────────────── */
 
 SHELL_STATIC_SUBCMD_SET_CREATE(fft_sub,
@@ -399,6 +509,9 @@ SHELL_STATIC_SUBCMD_SET_CREATE(fft_sub,
 	SHELL_CMD_ARG(diag, NULL,
 		      "fft diag                — DC input, find pipeline latency shift",
 		      cmd_fft_diag, 1, 0),
+	SHELL_CMD_ARG(overflow, NULL,
+		      "fft overflow            — amplitude sweep, verify xfft overflow flag",
+		      cmd_fft_overflow, 1, 0),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(fft, &fft_sub, "FFT hardware accelerator", NULL);

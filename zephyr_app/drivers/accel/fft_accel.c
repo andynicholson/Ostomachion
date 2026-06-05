@@ -53,6 +53,7 @@
 #include <zephyr/drivers/misc/fft_accel.h>
 #include <zephyr/irq.h>
 #include <zephyr/sys/sys_io.h>
+#include <zephyr/sys/barrier.h>
 #include <zephyr/logging/log.h>
 
 LOG_MODULE_REGISTER(fft_accel, CONFIG_FFT_ACCEL_LOG_LEVEL);
@@ -60,7 +61,13 @@ LOG_MODULE_REGISTER(fft_accel, CONFIG_FFT_ACCEL_LOG_LEVEL);
 #define DT_DRV_COMPAT ostomachion_fft_accel
 
 /* ── AXI GPIO register offsets (Xilinx PG144) ───────────────────────────── */
-#define GPIO_DATA  0x00  /* GPIO data output register (bit 0 = xfft_aresetn) */
+#define GPIO_DATA   0x00  /* Ch1 data (output): bit 0 = xfft_aresetn gate     */
+#define GPIO_DATA2  0x08  /* Ch2 data (input):  bit 0 = latched xfft overflow */
+
+/* xfft overflow flag, read from the AXI GPIO input channel.  Set in fabric
+ * when m_axis_status_tdata[0] is high during a frame; cleared by the xfft
+ * aresetn pulse this driver issues at the start of every transform. */
+#define GPIO_OVERFLOW BIT(0)
 
 /* ── AXI DMA register offsets (simple/register-direct mode) ─────────────── */
 #define DMA_MM2S_DMACR  0x00  /* MM2S DMA Control Register   */
@@ -99,10 +106,10 @@ LOG_MODULE_REGISTER(fft_accel, CONFIG_FFT_ACCEL_LOG_LEVEL);
 /* INTC channel bit masks (must match ostomachion_bd.tcl channel wiring).
  *
  * Note: ch2 is wired to xfft m_axis_status_tvalid, which fires once per
- * completed FFT frame.  It is NOT a clean overflow-only signal: the actual
- * overflow flag is in m_axis_status_tdata[0] and is not currently routed
- * to a readable register in the BD.  See ACCEL_ARCH.md §2.2 (AXI INTC
- * channel wiring). */
+ * completed FFT frame.  It is NOT a clean overflow-only signal.  The actual
+ * overflow flag (m_axis_status_tdata[0]) is captured separately in fabric and
+ * read back via the AXI GPIO input channel (GPIO_DATA2) — see the overflow
+ * read in fft_accel_transform() and ACCEL_ARCH.md §2.2 / §2.3. */
 #define INTC_CH_MM2S       BIT(0)  /* AXI DMA MM2S complete/error      */
 #define INTC_CH_S2MM       BIT(1)  /* AXI DMA S2MM complete/error      */
 #define INTC_CH_FRAME_DONE BIT(2)  /* xfft frame complete (not overflow) */
@@ -126,7 +133,7 @@ struct fft_accel_data {
 	struct k_sem   irq_sem;
 	struct k_mutex xfer_lock;
 	int            last_error;    /* set by ISR on DMA error; read by transform */
-	bool           last_overflow; /* set by ISR when xfft ovflo fires; cleared at transform start */
+	bool           last_overflow; /* read from GPIO overflow latch after IOC; cleared at transform start */
 };
 
 /* ── Register accessors ─────────────────────────────────────────────────── */
@@ -240,11 +247,11 @@ static void fft_accel_isr(const struct device *dev)
 	}
 
 	/* ── Channel 2: xfft m_axis_status_tvalid (frame-done pulse) ─────
-	 * Fires once per completed FFT frame, NOT exclusively on overflow.
-	 * The actual overflow flag is m_axis_status_tdata[0], which is not
-	 * currently wired to a readable register in the BD.  No action is
-	 * required here; the channel is left enabled so the IAR W1C clears
-	 * any pending edge before the next transform. */
+	 * Fires once per completed FFT frame.  The overflow bit it carries
+	 * (m_axis_status_tdata[0]) is captured by a fabric latch and read via
+	 * GPIO_DATA2 in fft_accel_transform(), so no action is required here.
+	 * The channel stays enabled so the IAR W1C clears the pending edge
+	 * before the next transform. */
 	if (isr & INTC_CH_FRAME_DONE) {
 		(void)0;  /* frame-complete notification — driver does not act on it */
 	}
@@ -306,6 +313,11 @@ int fft_accel_transform(const struct device *dev,
 	 */
 	uint32_t byte_len = (uint32_t)(n * sizeof(struct fft_sample_t));
 
+	/* Defense-in-depth backstop, not the primary length check: n is already
+	 * pinned to 4096 above, so byte_len is a constant 16384 and this only
+	 * trips if the DTS dma-max-bytes prop is mis-set below the transform
+	 * size.  Kept so a future variable-n path cannot silently overrun the
+	 * DMA bound; it is intentionally redundant while n is fixed. */
 	if (byte_len > cfg->dma_max_bytes) {
 		return -EINVAL;
 	}
@@ -315,19 +327,22 @@ int fft_accel_transform(const struct device *dev,
 	data->last_error    = 0;
 	data->last_overflow = false;
 
-	/* Discard any stale completion left by a previous timed-out transfer.
-	 * After k_sem_take returns -EAGAIN the DMA channels are reset, but a
-	 * late ISR may still call k_sem_give before the reset completes.
-	 * Resetting here (while holding xfer_lock) is safe and avoids the
-	 * next transfer reading a bogus immediate-complete. */
-	k_sem_reset(&data->irq_sem);
-
 	/* 1. Write input samples to TX BRAM */
 	for (size_t i = 0; i < n; i++) {
 		uint32_t word = ((uint32_t)(uint16_t)in[i].im << 16) |
 				(uint32_t)(uint16_t)in[i].re;
 		sys_write32(word, cfg->tx_bram_base + i * 4);
 	}
+
+	/* Ordering barrier: the TX-BRAM stores above and the DMA register
+	 * writes below target *different* AXI slaves through the SmartConnect,
+	 * which provides no global write-ordering guarantee.  sys_write32 is a
+	 * volatile store (compiler ordering only), so without an explicit fence
+	 * the MM2S LENGTH write that *triggers* the transfer (step 4) could
+	 * overtake the final BRAM store and the DMA would read stale input for
+	 * the last beat(s).  NEORV32 has no D-cache, so this is a store-ordering
+	 * issue, not a coherency one; a full data-memory fence is sufficient. */
+	barrier_dmem_fence_full();
 
 	/* 2. Reset xfft pipeline then DMA channels.
 	 *
@@ -349,16 +364,35 @@ int fft_accel_transform(const struct device *dev,
 	gpio_wr(cfg, GPIO_DATA, 0x0);  /* assert xfft reset (aresetn=0) */
 	k_busy_wait(1);                /* hold aresetn=0 for >=2 aclk cycles */
 
+	/* Check each reset explicitly.  dma_reset_channel() returns 0 or a
+	 * negative errno; bit-ORing two negative errnos (|=) only stays
+	 * non-zero by twos-complement coincidence and discards the actual
+	 * error code, so test them individually and propagate the real one. */
 	int reset_err = dma_reset_channel(cfg, DMA_MM2S_DMACR);
-	reset_err    |= dma_reset_channel(cfg, DMA_S2MM_DMACR);
-	if (reset_err) {
+	if (reset_err == 0) {
+		reset_err = dma_reset_channel(cfg, DMA_S2MM_DMACR);
+	}
+	if (reset_err != 0) {
 		gpio_wr(cfg, GPIO_DATA, 0x1);  /* release xfft reset before exit */
 		k_mutex_unlock(&data->xfer_lock);
-		return -EIO;
+		return reset_err;              /* -ETIMEDOUT, not a blanket -EIO */
 	}
 
 	gpio_wr(cfg, GPIO_DATA, 0x1);  /* release xfft reset (aresetn=1) */
 	k_busy_wait(1);                /* let xfft pipeline come out of reset */
+
+	/* Discard any stale completion left by a previously timed-out transfer.
+	 *
+	 * This MUST come after the DMA software reset above and before the
+	 * channels are re-armed below.  A late ISR from a prior transfer can
+	 * call k_sem_give right up until dma_reset_channel() halts the channel
+	 * and de-asserts its introut line; resetting the semaphore here — once
+	 * both channels are quiesced but before either is armed — guarantees the
+	 * count is zero going into the wait, so a stale give cannot make the
+	 * next k_sem_take return immediately on bogus data.  (Resetting before
+	 * the DMA reset, as an earlier version did, left the ~4096-write fill
+	 * window open for a stale give to slip through.) */
+	k_sem_reset(&data->irq_sem);
 
 	/* 3. Arm S2MM first (xfft output stream → RX BRAM, IOC + ERR IRQs).
 	 * PG021 sequence: RS=1 first (channel Halted→Idle), then DA, then LENGTH.
@@ -426,7 +460,22 @@ int fft_accel_transform(const struct device *dev,
 		return -ETIMEDOUT;
 	}
 
+	/* Ordering barrier: the S2MM IOC signals that the DMA has posted the
+	 * output frame to RX BRAM, but the CPU's load path has no guaranteed
+	 * ordering against those fabric-side writes.  Fence before the RX-BRAM
+	 * read loop (step 7) so we observe the committed output rather than
+	 * stale BRAM contents from a previous frame. */
+	barrier_dmem_fence_full();
+
 	int err = data->last_error;
+
+	/* Sample the latched xfft overflow flag for this frame.  The fabric latch
+	 * was cleared by the aresetn pulse in step 2 and set if any beat overflowed
+	 * the scaled fixed-point accumulator; it is stable by the time S2MM IOC has
+	 * fired (the status stream precedes the final data beat).  Read it via the
+	 * AXI GPIO input channel rather than the ISR, where the ch2 edge vs. latch
+	 * timing would be racy. */
+	data->last_overflow = (gpio_rd(cfg, GPIO_DATA2) & GPIO_OVERFLOW) != 0;
 
 	if (data->last_overflow) {
 		LOG_WRN("FFT overflow occurred — results may be corrupted; "

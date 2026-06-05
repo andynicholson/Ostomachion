@@ -121,8 +121,18 @@ class FrontPanelFftTransport:
         self._dev = dev
 
     def close(self) -> None:
-        # `ok.FrontPanel` releases the USB handle in its destructor.
+        # Release the USB handle explicitly rather than waiting for GC to run
+        # the destructor: okCFrontPanel exposes Close(), and an Opal Kelly
+        # device allows only one open client at a time, so a lingering handle
+        # blocks the next open() (e.g. the uart_bridge or a re-launch).
+        dev = self._dev
         self._dev = None
+        if dev is not None:
+            try:
+                if dev.IsOpen():
+                    dev.Close()
+            except Exception:  # noqa: BLE001 — best-effort release on shutdown
+                pass
 
     # ── Status queries ────────────────────────────────────────────────────
 

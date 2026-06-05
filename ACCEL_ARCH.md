@@ -65,9 +65,9 @@ NEORV32 RISC-V
 
 | Base | Size | Peripheral | DTS `reg-names` entry |
 |------|------|------------|------------------------|
-| `0x4000_0000` | 64 B  | AXI DMA AXI4-Lite control | `dma` |
+| `0x4000_0000` | 128 B | AXI DMA AXI4-Lite control | `dma` |
 | `0x4001_0000` | 128 B | AXI INTC AXI4-Lite | `intc` |
-| `0x4002_0000` | 128 B | AXI GPIO (xfft reset gate) | `gpio` |
+| `0x4002_0000` | 128 B | AXI GPIO (xfft reset gate + overflow readback) | `gpio` |
 | `0x4100_0000` | 32 KB | TX BRAM (CPU writes input samples) | `tx_bram` |
 | `0x4100_8000` | 32 KB | RX BRAM (CPU reads output samples) | `rx_bram` |
 
@@ -90,10 +90,29 @@ The AXI INTC aggregates three sources into the single NEORV32 MEI line
 The `C_KIND_OF_INTR` register reflects this: bits 0 and 1 are 0
 (level-sensitive), bit 2 is 1 (edge-sensitive).
 
-Channel 2 is **not** a clean overflow indicator.  The actual overflow bit
-lives in `m_axis_status_tdata[0]`, which is not routed to a readable
-register in the current block design; the driver therefore treats Ch2 as a
-frame-done notification only and does not act on it.
+Channel 2 is **not** a clean overflow indicator — it is just the frame-done
+pulse.  The actual overflow bit lives in `m_axis_status_tdata[0]`, which is
+captured separately (see §2.3); the driver treats Ch2 as a frame-done
+notification only and does not act on it in the ISR.
+
+### 2.3. Overflow capture and readback
+
+The xfft fixed-point overflow flag (`m_axis_status_tdata[0]`, qualified by
+`m_axis_status_tvalid`) is not delivered through the interrupt path.  Instead:
+
+1. The block design slices bit 0 out of `m_axis_status_tdata` and routes it,
+   with its `tvalid` strobe, to BD output ports.
+2. `xem7310_top.vhd` holds a **sticky latch** in the `aclk` domain: it sets on
+   `tvalid && overflow` and clears on the xfft `aresetn` (also exposed as a BD
+   port).  Because firmware pulses `aresetn` low at the start of every
+   transform (§3 step 3), the latch always reflects exactly the frame just
+   computed.
+3. The latch feeds the AXI GPIO **input channel** (`gpio2_io_i`), so the CPU
+   reads it at `GPIO_DATA2` (offset `0x08`), bit 0.
+
+`fft_accel_transform()` samples this after S2MM IOC and exposes it through
+`fft_accel_get_last_overflow(dev)`.  Reading it in the transform (not the ISR)
+avoids any race between the Ch2 edge and the latch update.
 
 ---
 
@@ -102,21 +121,27 @@ frame-done notification only and does not act on it.
 `fft_accel_transform(dev, in, out, 4096)` performs the following sequence
 under an internal `k_mutex` that serialises concurrent callers:
 
-1. **Acquire `xfer_lock` and reset semaphore state.**  Any stale IRQ count
-   left by a previously timed-out transfer is discarded with
-   `k_sem_reset()`.
+1. **Acquire `xfer_lock`** and clear `last_error` / `last_overflow`.
 2. **Write 4096 complex samples to TX BRAM** as packed 32-bit words
-   (`{im[15:0], re[15:0]}`) via `sys_write32()`.
-3. **Pulse the xfft pipeline reset.**  Assert `aresetn=0` (GPIO=0),
-   hold ≥ 2 `aclk` cycles via `k_busy_wait(1)`, software-reset both DMA
-   channels, then release `aresetn=1` (GPIO=1) and wait ≥ 2 `aclk` cycles
-   for the pipeline to come out of reset.
+   (`{im[15:0], re[15:0]}`) via `sys_write32()`, then issue a data-memory
+   fence so the fill is globally visible before any DMA register write
+   (the BRAM and DMA are different AXI slaves with no implicit ordering).
+3. **Pulse the xfft pipeline reset and quiesce the DMA.**  Assert `aresetn=0`
+   (GPIO=0), hold ≥ 2 `aclk` cycles via `k_busy_wait(1)`, software-reset both
+   DMA channels, then release `aresetn=1` (GPIO=1).  **`k_sem_reset()` is then
+   called here** — once both channels are halted but before either is armed —
+   so a late `k_sem_give()` from a previously timed-out transfer cannot survive
+   into this one.  (Resetting the semaphore before the DMA reset would leave
+   the ~4096-write fill window open for a stale give to slip through.)
 4. **Arm S2MM first, then MM2S.**  S2MM is configured with IOC + ERR IRQs
    enabled, MM2S with ERR IRQ only.  Writing each channel's `LENGTH`
    register triggers the transfer.
 5. **Block on `irq_sem`** until the ISR fires for an S2MM IOC or any DMA
-   error, with a `CONFIG_FFT_ACCEL_TIMEOUT_MS` timeout.
-6. **Validate S2MM IDLE** in the post-IOC `DMASR` snapshot.
+   error, with a `CONFIG_FFT_ACCEL_TIMEOUT_MS` timeout.  On success, issue a
+   data-memory fence before reading RX BRAM so the DMA's posted writes are
+   observed.
+6. **Sample the overflow latch** (`GPIO_DATA2` bit 0, §2.3) and **validate
+   S2MM IDLE** in the post-IOC `DMASR` snapshot.
 7. **Read 4096 output samples** from RX BRAM with `sys_read32()` and
    release `xfer_lock`.
 

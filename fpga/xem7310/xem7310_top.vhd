@@ -33,6 +33,9 @@ use ieee.std_logic_1164.all;
 library unisim;
 use unisim.vcomponents.all;
 
+library xpm;
+use xpm.vcomponents.all;
+
 library neorv32;
 use neorv32.neorv32_package.all;
 
@@ -85,6 +88,22 @@ architecture rtl of xem7310_top is
   signal clk         : std_logic;
   signal periph_rstn : std_logic_vector(0 downto 0);
   signal mext_irq    : std_logic;
+
+  -- ── xfft overflow capture (m_axis_status_tdata[0], qualified by tvalid) ──
+  -- The BD slices the overflow bit out (fft_status_overflow) alongside its
+  -- valid strobe (fft_status_tvalid).  We latch it sticky here and feed it
+  -- back into the BD's AXI GPIO input channel so the CPU can read it at
+  -- GPIO2_DATA (0x08).  The latch is cleared by the same xfft aresetn that
+  -- firmware pulses at the start of every transform, so the flag always
+  -- reflects exactly the frame just computed.  See ACCEL_ARCH.md §2.3.
+  -- BD single-bit ports that originate from a vector source (xlslice output /
+  -- util_vector_logic Res) are emitted as STD_LOGIC_VECTOR(0 to 0), matching
+  -- the periph_resetn_o convention.  Declare the actuals as vector(0 downto 0)
+  -- and index (0) at use sites so the whole-array port association type-checks.
+  signal fft_status_tvalid    : std_logic;
+  signal fft_status_overflow  : std_logic_vector(0 downto 0);
+  signal fft_overflow_latched : std_logic := '0';
+  signal xfft_aresetn         : std_logic_vector(0 downto 0);
 
   -- ── NEORV32 scalar outputs (std_ulogic → converted to std_logic) ─────────
   signal uart0_txd_u : std_ulogic;
@@ -196,6 +215,7 @@ architecture rtl of xem7310_top is
   -- WireOut 0x20: RX FIFO entry count
   signal wo20_data    : std_logic_vector(31 downto 0);
   signal rx_count     : std_logic_vector(10 downto 0);
+  signal uart_rx_overflow : std_logic;  -- sticky: a UART RX byte was dropped (FIFO full)
 
   -- WireOut 0x21: FFT/DMA diagnostic probes
   --   [0] = fft_dbg_mm2s_tvalid   (DMA M_AXIS_MM2S TVALID, 1 = DMA sending)
@@ -217,6 +237,16 @@ architecture rtl of xem7310_top is
   signal fft_pre_first_beats    : std_logic_vector(15 downto 0);
   signal fft_last_frame_beats   : std_logic_vector(15 downto 0);
   signal fft_tlast_count        : std_logic_vector(7 downto 0);
+  -- okClk-domain synchronised copies of the beat-counter outputs (M3).
+  -- The counters live in the aclk (sys) domain and only change on rare aclk
+  -- events (tlast / aresetn); okWireOut samples them in okClk.  Stage each
+  -- multi-bit value through xpm_cdc_array_single so the host never latches a
+  -- value mid-transition.  (Quasi-static ⇒ array_single is sufficient here,
+  -- unlike the arbitrary cycles value in fp_fft_pipe_bridge which uses a full
+  -- handshake.)
+  signal fft_pre_first_beats_fp : std_logic_vector(15 downto 0);
+  signal fft_last_frame_beats_fp: std_logic_vector(15 downto 0);
+  signal fft_tlast_count_fp     : std_logic_vector(7 downto 0);
 
   -- BTPipeIn 0x80: host → NEORV32 UART data (block-throttled)
   signal pi80_data    : std_logic_vector(31 downto 0);
@@ -363,8 +393,28 @@ begin
       fft_dbg_s_data_tready    => fft_dbg_s_data_tready,
       fft_dbg_m_data_tvalid    => fft_dbg_m_data_tvalid,
       fft_dbg_m_data_tready    => fft_dbg_m_data_tready,
-      fft_dbg_m_data_tlast     => fft_dbg_m_data_tlast
+      fft_dbg_m_data_tlast     => fft_dbg_m_data_tlast,
+      fft_status_tvalid        => fft_status_tvalid,
+      fft_status_overflow      => fft_status_overflow,
+      xfft_aresetn_o           => xfft_aresetn,
+      fft_overflow_latched     => fft_overflow_latched
     );
+
+  -- ── xfft overflow sticky latch ───────────────────────────────────────────
+  -- Set when the xfft asserts m_axis_status_tvalid with the overflow bit high;
+  -- held until the xfft pipeline is reset (aresetn low), which firmware pulses
+  -- at the start of every transform.  Result is fed back into the BD's AXI
+  -- GPIO input channel (gpio2_io_i) for the CPU to read at GPIO2_DATA 0x08.
+  process (clk)
+  begin
+    if rising_edge(clk) then
+      if xfft_aresetn(0) = '0' then
+        fft_overflow_latched <= '0';
+      elsif fft_status_tvalid = '1' and fft_status_overflow(0) = '1' then
+        fft_overflow_latched <= '1';
+      end if;
+    end if;
+  end process;
 
   -- ── FFT m_axis_data beat counter ─────────────────────────────────────────
   -- Passive observer that counts xfft output beats (tvalid && tready) and
@@ -384,13 +434,45 @@ begin
       tlast_count           => fft_tlast_count
     );
 
+  -- ── Beat-counter CDC into okClk (M3) ─────────────────────────────────────
+  -- Stage the aclk-domain beat counts into the okClk domain before okWireOut
+  -- samples them.  Each is a quasi-static multi-bit value, so a per-bit
+  -- synchroniser is acceptable provided we treat the three as independent
+  -- status words (the host reads them only between frames).
+  cdc_pre_first_i : xpm_cdc_array_single
+    generic map (DEST_SYNC_FF => 2, INIT_SYNC_FF => 0, SIM_ASSERT_CHK => 0,
+                 SRC_INPUT_REG => 1, WIDTH => 16)
+    port map (src_clk => clk, src_in => fft_pre_first_beats,
+              dest_clk => fp_clk, dest_out => fft_pre_first_beats_fp);
+
+  cdc_last_frame_i : xpm_cdc_array_single
+    generic map (DEST_SYNC_FF => 2, INIT_SYNC_FF => 0, SIM_ASSERT_CHK => 0,
+                 SRC_INPUT_REG => 1, WIDTH => 16)
+    port map (src_clk => clk, src_in => fft_last_frame_beats,
+              dest_clk => fp_clk, dest_out => fft_last_frame_beats_fp);
+
+  cdc_tlast_cnt_i : xpm_cdc_array_single
+    generic map (DEST_SYNC_FF => 2, INIT_SYNC_FF => 0, SIM_ASSERT_CHK => 0,
+                 SRC_INPUT_REG => 1, WIDTH => 8)
+    port map (src_clk => clk, src_in => fft_tlast_count,
+              dest_clk => fp_clk, dest_out => fft_tlast_count_fp);
+
   -- ── XBUS demux ──────────────────────────────────────────────────────────
   -- NEORV32 XBUS is split between two slaves by upper-nibble address decode:
   --   adr[31:28] = 0x9  →  fp_fft_pipe_bridge (host pipe FIFOs + status regs)
   --   anything else    →  xbus2axi4_bridge   (BD: AXI DMA, BRAM, INTC, …)
   -- Wishbone-classic holds adr/stb stable until ack, so a combinational
   -- response mux on the current address bit is safe.
-  sel_fifo_region <= '1' when xbus_adr_u(31 downto 28) = "1001" else '0';
+  -- Decode the full in-region offset adr[27:4], not just adr[3:0]: the bridge
+  -- has only four 32-bit registers (a 16-byte window), so matching on the
+  -- nibble alone would alias every 16-byte-aligned address across the whole
+  -- 256 MB 0x9xxx_xxxx region onto those registers and let a stray access
+  -- silently pop/push a FIFO sample.  Requiring adr[27:4]=0 means only
+  -- 0x9000_000{0,4,8,C} hit the bridge; any other in-region address falls
+  -- through to the BD bridge path, which is unmapped there and raises xbus_err.
+  sel_fifo_region <= '1' when (xbus_adr_u(31 downto 28) = "1001"
+                              and xbus_adr_u(27 downto 4) = (27 downto 4 => '0'))
+                          else '0';
   xbus_stb_bridge <= xbus_stb_u and not sel_fifo_region;
   xbus_stb_fifo   <= xbus_stb_u and sel_fifo_region;
 
@@ -527,7 +609,8 @@ begin
     );
 
   -- WireOut 0x20: [10:0] RX FIFO byte count
-  wo20_data <= (31 downto 11 => '0') & rx_count;
+  -- WireOut 0x20: [10:0] RX FIFO byte count, [11] sticky RX-overflow flag.
+  wo20_data <= (31 downto 12 => '0') & uart_rx_overflow & rx_count;
 
   wo20_i : okWireOut
     port map (
@@ -556,7 +639,7 @@ begin
   -- WireOut 0x22: xfft m_axis_data beat counts (instrumentation for Q1)
   --   [15:0]  = pre_first_tlast_beats   (first frame after aresetn)
   --   [31:16] = beats_in_last_frame     (most recent frame)
-  wo22_data <= fft_last_frame_beats & fft_pre_first_beats;
+  wo22_data <= fft_last_frame_beats_fp & fft_pre_first_beats_fp;
 
   wo22_i : okWireOut
     port map (
@@ -568,7 +651,7 @@ begin
 
   -- WireOut 0x23: TLAST event count (wraps at 256)
   --   [7:0] = tlast_count
-  wo23_data <= (31 downto 8 => '0') & fft_tlast_count;
+  wo23_data <= (31 downto 8 => '0') & fft_tlast_count_fp;
 
   wo23_i : okWireOut
     port map (
@@ -625,6 +708,7 @@ begin
       rx_count  => rx_count,
       tx_ready  => pi80_ready,
       rx_ready  => poA0_ready,
+      rx_overflow => uart_rx_overflow,
       baud_div  => fp_baud_div
     );
 

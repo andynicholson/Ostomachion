@@ -1,0 +1,49 @@
+# Normalize line endings across all contributors regardless of their local
+# core.autocrlf setting.  Without this, a checkout on a machine with
+# autocrlf=true can commit CRLF into source that the rest of the tree keeps as
+# LF (as happened to fpga/xem7310/xem7310_top.vhd).  The repository stores LF;
+# tools that need CRLF on Windows can convert on checkout via eol settings.
+
+# Default: let git detect text vs binary and normalize text to LF in the repo.
+* text=auto eol=lf
+
+# ── Source and config: always LF ───────────────────────────────────────────
+*.vhd    text eol=lf
+*.xdc    text eol=lf
+*.tcl    text eol=lf
+*.c      text eol=lf
+*.h      text eol=lf
+*.cpp    text eol=lf
+*.hpp    text eol=lf
+*.py     text eol=lf
+*.sh     text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.conf   text eol=lf
+*.overlay text eol=lf
+*.cfg    text eol=lf
+*.md     text eol=lf
+*.txt    text eol=lf
+
+# ── Extensionless text files ───────────────────────────────────────────────
+Makefile      text eol=lf
+makefile      text eol=lf
+Kconfig       text eol=lf
+.clang-tidy   text eol=lf
+.gitattributes text eol=lf
+.gitignore    text eol=lf
+.gitmodules   text eol=lf
+
+# C++ standard-header shims under zephyr_app/include (no extension)
+zephyr_app/include/array   text eol=lf
+zephyr_app/include/span    text eol=lf
+zephyr_app/include/cstddef text eol=lf
+
+# ── Binary: never normalize ────────────────────────────────────────────────
+*.bit  binary
+*.mcs  binary
+*.dcp  binary
+*.png  binary
+*.jpg  binary
+*.pdf  binary
+# .svg is XML text; leave it under the text=auto default.

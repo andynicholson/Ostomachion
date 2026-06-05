@@ -25,7 +25,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: recursive
 
@@ -84,25 +84,25 @@ jobs:
 
       - name: Upload simulation log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: ghdl-sim-log
           path: ghdl_sim.log
 
   # ── Zephyr Twister (all configs) ─────────────────────────────────────────
   #
-  # Runs `west twister` using the testcase.yaml in zephyr_app/tests/.
-  # Does NOT require hardware; the neorv32 sim board is used where possible.
+  # Runs `west twister` using the testcase.yaml at the zephyr_app root.
+  # HW-only cases are excluded via --exclude-tag hw; the neorv32 sim board is
+  # used where possible.
   #
   twister:
     name: Twister test suite
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: sim   # only run if the basic sim passes
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: recursive
 
@@ -125,7 +125,16 @@ jobs:
           echo "WEST_TOPDIR=$PARENT" >> "$GITHUB_ENV"
 
       - name: Install Zephyr Python requirements
-        run: pip3 install -r "$WEST_TOPDIR/zephyr/scripts/requirements-base.txt"
+        # Twister transitively imports twisterlib.hardwaremap (even with no
+        # hardware targets), which needs natsort + friends.  natsort lives in
+        # requirements-run-test.txt; pyelftools/ply etc. live in
+        # requirements-build-test.txt.  Without these, Twister fails to load
+        # before it can run a single testcase.
+        run: |
+          pip3 install \
+            -r "$WEST_TOPDIR/zephyr/scripts/requirements-base.txt" \
+            -r "$WEST_TOPDIR/zephyr/scripts/requirements-build-test.txt" \
+            -r "$WEST_TOPDIR/zephyr/scripts/requirements-run-test.txt"
 
       - name: Download Zephyr SDK (minimal)
         working-directory: ${{ env.WEST_TOPDIR }}
@@ -141,16 +150,22 @@ jobs:
 
       - name: Run Twister
         run: |
+          set -o pipefail
+          # -T points at the application root (where testcase.yaml lives next
+          # to CMakeLists.txt / prj.conf); --exclude-tag hw drops the cases
+          # that require a physical XEM7310 board.  pipefail ensures a Twister
+          # failure fails the step rather than being masked by tee's exit code.
           west twister \
-            -T zephyr_app/tests \
+            -T zephyr_app \
             --integration \
+            --exclude-tag hw \
             --inline-logs \
             -v \
             2>&1 | tee twister.log
 
       - name: Upload Twister results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: twister-results
           path: |
@@ -171,7 +186,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: recursive
 
@@ -203,11 +218,10 @@ jobs:
     name: Firmware static analysis
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    needs: twister   # only run after the build-only Twister check passes
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           submodules: recursive
 
@@ -231,7 +245,16 @@ jobs:
           echo "WEST_TOPDIR=$PARENT" >> "$GITHUB_ENV"
 
       - name: Install Zephyr Python requirements
-        run: pip3 install -r "$WEST_TOPDIR/zephyr/scripts/requirements-base.txt"
+        # Twister transitively imports twisterlib.hardwaremap (even with no
+        # hardware targets), which needs natsort + friends.  natsort lives in
+        # requirements-run-test.txt; pyelftools/ply etc. live in
+        # requirements-build-test.txt.  Without these, Twister fails to load
+        # before it can run a single testcase.
+        run: |
+          pip3 install \
+            -r "$WEST_TOPDIR/zephyr/scripts/requirements-base.txt" \
+            -r "$WEST_TOPDIR/zephyr/scripts/requirements-build-test.txt" \
+            -r "$WEST_TOPDIR/zephyr/scripts/requirements-run-test.txt"
 
       - name: Download Zephyr SDK (minimal)
         working-directory: ${{ env.WEST_TOPDIR }}
@@ -248,8 +271,9 @@ jobs:
       - name: Build firmware (FPGA sim config + thread analyzer + stack sentinel)
         working-directory: zephyr_app
         run: |
+          set -o pipefail
           west build \
-            -b neorv32 \
+            -b neorv32/neorv32/minimalboot \
             -d ../build_analysis \
             -- \
             -DCONF_FILE=prj.conf \
@@ -261,28 +285,67 @@ jobs:
 
       - name: Run clang-tidy on application sources
         run: |
+          set -o pipefail
           cd build_analysis
-          clang-tidy \
+          # Tidy only files actually compiled by this build (per
+          # compile_commands.json), restricted to zephyr_app/{src,drivers,tests}.
+          # find-walking the source tree would tidy files the build skipped
+          # (CONFIG_FFT_ACCEL=n etc.) with no compile flags, producing cascading
+          # false positives against DTS-generated symbols.
+          python3 - <<'PY' > /tmp/clang_tidy_files.txt
+          import json
+          cc=json.load(open('compile_commands.json'))
+          roots=('/zephyr_app/src/','/zephyr_app/drivers/','/zephyr_app/tests/')
+          for e in cc:
+              if any(r in e['file'] for r in roots):
+                  print(e['file'])
+          PY
+          echo "clang-tidy will check $(wc -l < /tmp/clang_tidy_files.txt) files"
+          # Strip gcc-only flags from compile_commands.json that clang-tidy
+          # rejects as "unknown argument" / "argument unused during compilation".
+          # These appear because Zephyr builds with riscv64-zephyr-elf-gcc.
+          # Stripping them is the standard workaround for the clang-tidy /
+          # gcc-compile-commands.json toolchain mismatch.
+          sed -i \
+            -e 's|-fno-printf-return-value||g' \
+            -e 's|-fno-reorder-functions||g' \
+            -e 's|-fno-defer-pop||g' \
+            -e 's|-Wno-volatile||g' \
+            -e 's|--param=min-pagesize=0||g' \
+            -e 's|-specs=picolibc.specs||g' \
+            compile_commands.json
+          # --warnings-as-errors='*' makes clang-tidy exit non-zero on any
+          # finding so this is a real gate; pipefail propagates that exit code
+          # through tee.  Triage findings rather than re-muting the gate.
+          xargs -a /tmp/clang_tidy_files.txt clang-tidy \
             --config-file=../zephyr_app/.clang-tidy \
+            --warnings-as-errors='*' \
             --quiet \
             -p compile_commands.json \
-            $(find ../zephyr_app/src ../zephyr_app/drivers -name '*.c' -o -name '*.cpp') \
-            2>&1 | tee ../clang_tidy.log || true
-          echo "clang-tidy done (non-zero exit is non-blocking)"
+            2>&1 | tee ../clang_tidy.log
 
       - name: Generate memory map (nm --size-sort)
         run: |
-          riscv64-unknown-elf-nm --size-sort --print-size \
-            build_analysis/zephyr/zephyr.elf \
-            > memory_map.txt 2>&1 || \
-          riscv64-linux-gnu-nm --size-sort --print-size \
-            build_analysis/zephyr/zephyr.elf \
-            > memory_map.txt 2>&1 || true
-          echo "=== Top 20 symbols by size ===" && head -20 memory_map.txt || true
+          set -euo pipefail
+          # Pick whichever RISC-V nm is actually installed (the workflow
+          # installs binutils-riscv64-linux-gnu).  Fail loudly if neither
+          # exists or the ELF is missing, instead of uploading an error log
+          # disguised as a memory map.
+          NM=""
+          for cand in riscv64-unknown-elf-nm riscv64-linux-gnu-nm; do
+            if command -v "$cand" >/dev/null 2>&1; then NM="$cand"; break; fi
+          done
+          if [ -z "$NM" ]; then
+            echo "::error::no RISC-V nm found (expected riscv64-linux-gnu-nm)"
+            exit 1
+          fi
+          test -f build_analysis/zephyr/zephyr.elf
+          "$NM" --size-sort --print-size build_analysis/zephyr/zephyr.elf > memory_map.txt
+          echo "=== Top 20 symbols by size ===" && tail -20 memory_map.txt
 
       - name: Upload analysis artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: firmware-analysis
           path: |

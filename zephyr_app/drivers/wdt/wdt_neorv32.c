@@ -146,6 +146,11 @@ static int wdt_neorv32_install_timeout(const struct device *dev,
  * The STRICT bit is always set so that an incorrect feed password or write
  * to a locked CTRL register triggers an immediate hardware reset.
  *
+ * When CONFIG_WDT_NEORV32_LOCK=y the LOCK bit is also set, making the CTRL
+ * register immutable until the next hardware reset; wdt_disable() then returns
+ * -EPERM.  This is what actually delivers tamper resistance — STRICT alone does
+ * not prevent a plain CTRL write of 0 (see wdt_neorv32_disable()).
+ *
  * @param dev      WDT device
  * @param options  Pause options (WDT_OPT_PAUSE_* are not supported — ignored)
  * @return 0 on success, -EINVAL if no timeout has been installed
@@ -161,10 +166,14 @@ static int wdt_neorv32_setup(const struct device *dev, uint8_t options)
 	}
 
 	/* Build and write the CTRL register:
-	 * EN=1, STRICT=1 (reject wrong password), LOCK=0 (allow wdt_disable),
-	 * TIMEOUT=data->timeout_ticks */
+	 *   EN=1, STRICT=1 (reject wrong password / locked writes),
+	 *   LOCK per CONFIG_WDT_NEORV32_LOCK (1 = tamper-proof, disable() blocked),
+	 *   TIMEOUT=data->timeout_ticks. */
 	uint32_t ctrl = WDT_CTRL_EN | WDT_CTRL_STRICT |
 			(data->timeout_ticks << WDT_CTRL_TIMEOUT_LSB);
+#ifdef CONFIG_WDT_NEORV32_LOCK
+	ctrl |= WDT_CTRL_LOCK;
+#endif
 	wdt_wr(config, WDT_CTRL, ctrl);
 
 	/* Feed immediately to start the counter from the fresh timeout value */
