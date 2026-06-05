@@ -33,6 +33,9 @@ use ieee.std_logic_1164.all;
 library unisim;
 use unisim.vcomponents.all;
 
+library xpm;
+use xpm.vcomponents.all;
+
 library neorv32;
 use neorv32.neorv32_package.all;
 
@@ -233,6 +236,16 @@ architecture rtl of xem7310_top is
   signal fft_pre_first_beats    : std_logic_vector(15 downto 0);
   signal fft_last_frame_beats   : std_logic_vector(15 downto 0);
   signal fft_tlast_count        : std_logic_vector(7 downto 0);
+  -- okClk-domain synchronised copies of the beat-counter outputs (M3).
+  -- The counters live in the aclk (sys) domain and only change on rare aclk
+  -- events (tlast / aresetn); okWireOut samples them in okClk.  Stage each
+  -- multi-bit value through xpm_cdc_array_single so the host never latches a
+  -- value mid-transition.  (Quasi-static ⇒ array_single is sufficient here,
+  -- unlike the arbitrary cycles value in fp_fft_pipe_bridge which uses a full
+  -- handshake.)
+  signal fft_pre_first_beats_fp : std_logic_vector(15 downto 0);
+  signal fft_last_frame_beats_fp: std_logic_vector(15 downto 0);
+  signal fft_tlast_count_fp     : std_logic_vector(7 downto 0);
 
   -- BTPipeIn 0x80: host → NEORV32 UART data (block-throttled)
   signal pi80_data    : std_logic_vector(31 downto 0);
@@ -420,6 +433,29 @@ begin
       tlast_count           => fft_tlast_count
     );
 
+  -- ── Beat-counter CDC into okClk (M3) ─────────────────────────────────────
+  -- Stage the aclk-domain beat counts into the okClk domain before okWireOut
+  -- samples them.  Each is a quasi-static multi-bit value, so a per-bit
+  -- synchroniser is acceptable provided we treat the three as independent
+  -- status words (the host reads them only between frames).
+  cdc_pre_first_i : xpm_cdc_array_single
+    generic map (DEST_SYNC_FF => 2, INIT_SYNC_FF => 0, SIM_ASSERT_CHK => 0,
+                 SRC_INPUT_REG => 1, WIDTH => 16)
+    port map (src_clk => clk, src_in => fft_pre_first_beats,
+              dest_clk => fp_clk, dest_out => fft_pre_first_beats_fp);
+
+  cdc_last_frame_i : xpm_cdc_array_single
+    generic map (DEST_SYNC_FF => 2, INIT_SYNC_FF => 0, SIM_ASSERT_CHK => 0,
+                 SRC_INPUT_REG => 1, WIDTH => 16)
+    port map (src_clk => clk, src_in => fft_last_frame_beats,
+              dest_clk => fp_clk, dest_out => fft_last_frame_beats_fp);
+
+  cdc_tlast_cnt_i : xpm_cdc_array_single
+    generic map (DEST_SYNC_FF => 2, INIT_SYNC_FF => 0, SIM_ASSERT_CHK => 0,
+                 SRC_INPUT_REG => 1, WIDTH => 8)
+    port map (src_clk => clk, src_in => fft_tlast_count,
+              dest_clk => fp_clk, dest_out => fft_tlast_count_fp);
+
   -- ── XBUS demux ──────────────────────────────────────────────────────────
   -- NEORV32 XBUS is split between two slaves by upper-nibble address decode:
   --   adr[31:28] = 0x9  →  fp_fft_pipe_bridge (host pipe FIFOs + status regs)
@@ -592,7 +628,7 @@ begin
   -- WireOut 0x22: xfft m_axis_data beat counts (instrumentation for Q1)
   --   [15:0]  = pre_first_tlast_beats   (first frame after aresetn)
   --   [31:16] = beats_in_last_frame     (most recent frame)
-  wo22_data <= fft_last_frame_beats & fft_pre_first_beats;
+  wo22_data <= fft_last_frame_beats_fp & fft_pre_first_beats_fp;
 
   wo22_i : okWireOut
     port map (
@@ -604,7 +640,7 @@ begin
 
   -- WireOut 0x23: TLAST event count (wraps at 256)
   --   [7:0] = tlast_count
-  wo23_data <= (31 downto 8 => '0') & fft_tlast_count;
+  wo23_data <= (31 downto 8 => '0') & fft_tlast_count_fp;
 
   wo23_i : okWireOut
     port map (

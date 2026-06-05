@@ -291,16 +291,153 @@ class _PlotPanel(QtWidgets.QWidget):
 # Main window
 # ──────────────────────────────────────────────────────────────────────────
 
+class _AcquisitionWorker(QtCore.QObject):
+    """Owns the FrontPanel transport and runs the blocking FFT round-trip.
+
+    Lives in its own QThread so the up-to-2 s send/recv USB round-trip never
+    blocks the GUI thread.  The transport handle is created, opened, used, and
+    closed entirely on this thread — the Opal Kelly handle is not thread-safe,
+    so the GUI thread must never touch it directly.  Communication is via
+    queued signals only.
+    """
+
+    # Emitted after open(): (info_text, ok, initial_frame_n)
+    opened = QtCore.pyqtSignal(str, bool, int)
+    # Emitted once per completed frame with everything the GUI needs to render.
+    frameReady = QtCore.pyqtSignal(object)
+    # Emitted on any transport/processing error: (message,)
+    failed = QtCore.pyqtSignal(str)
+    # Emitted when the worker has stopped its run loop (clean stop / error).
+    stopped = QtCore.pyqtSignal()
+
+    def __init__(self, serial: str | None) -> None:
+        super().__init__()
+        self._serial = serial
+        self._transport = FrontPanelFftTransport(serial=serial)
+        self._open = False
+        self._running = False
+        self._last_frame_n = 0
+        # make_frame() reads Qt widgets and must run on the GUI thread, so the
+        # window pushes the next input frame in here under this lock.
+        self._pending_lock = QtCore.QMutex()
+        self._pending_frame = None  # np.ndarray (Q1.15) set by the GUI thread
+
+    # ── slots (run on the worker thread) ──────────────────────────────────
+
+    @QtCore.pyqtSlot()
+    def open(self) -> None:
+        try:
+            self._transport.open()
+            self._open = True
+            self._last_frame_n = self._transport.frame_counter()
+            self.opened.emit(self._transport.device_info(), True,
+                             self._last_frame_n)
+        except TransportError as exc:
+            self.opened.emit(str(exc), False, 0)
+
+    @QtCore.pyqtSlot(object)
+    def set_input(self, frame_q15) -> None:
+        """Called from the GUI thread to hand over the next input frame."""
+        self._pending_lock.lock()
+        self._pending_frame = frame_q15
+        self._pending_lock.unlock()
+
+    @QtCore.pyqtSlot()
+    def start(self) -> None:
+        if not self._open:
+            self.failed.emit("Open FrontPanel first.")
+            return
+        self._running = True
+        self._run_loop()
+
+    @QtCore.pyqtSlot()
+    def stop(self) -> None:
+        self._running = False
+
+    @QtCore.pyqtSlot()
+    def close(self) -> None:
+        self._running = False
+        try:
+            self._transport.close()
+        except Exception:  # noqa: BLE001 — best-effort on shutdown
+            pass
+
+    # ── internal ──────────────────────────────────────────────────────────
+
+    def _run_loop(self) -> None:
+        # Drives frames back-to-back; yields to this threads event loop
+        # between frames so stop()/close() slots can be delivered.
+        while self._running:
+            self._pending_lock.lock()
+            frame = self._pending_frame
+            self._pending_lock.unlock()
+            if frame is None:
+                # No input staged yet — let the event loop run and retry.
+                QtCore.QThread.msleep(2)
+                QtCore.QCoreApplication.processEvents()
+                continue
+            try:
+                result = self._process_one_frame(frame)
+            except TransportError as exc:
+                self._running = False
+                self.failed.emit(f"transport: {exc}")
+                break
+            except Exception:  # noqa: BLE001
+                self._running = False
+                traceback.print_exc()
+                self.failed.emit("unhandled error (see stderr)")
+                break
+            self.frameReady.emit(result)
+            # Deliver any queued stop()/set_input()/close() calls.
+            QtCore.QCoreApplication.processEvents()
+        self.stopped.emit()
+
+    def _process_one_frame(self, input_q15) -> dict:
+        input_complex = q15_to_complex(input_q15)
+
+        t_sw0 = time.perf_counter()
+        sw_spectrum = np.fft.fft(input_complex) / float(FFT_N)
+        t_sw_us = (time.perf_counter() - t_sw0) * 1e6
+
+        self._transport.send_frame(pack_q15_frame(input_q15))
+        result = self._transport.recv_frame(prev_frame_n=self._last_frame_n,
+                                            timeout_s=2.0)
+        self._last_frame_n = result.frame_n
+
+        hw_q15 = unpack_q15_frame(result.samples, FFT_N)
+        hw_spectrum = q15_to_complex(hw_q15)
+        hw_db = db_magnitude(hw_spectrum)
+        sw_db = db_magnitude(sw_spectrum)
+        peak_err_db, sfdr_db = spectrum_quality(hw_db, sw_db)
+
+        return {
+            "input_re": input_q15[:, 0].astype(np.float32) / float(Q15_UNIT),
+            "hw_db": hw_db,
+            "sw_db": sw_db,
+            "frame_n": result.frame_n,
+            "hw_cycles": result.hw_cycles,
+            "sw_us": t_sw_us,
+            "round_s": result.elapsed_s,
+            "peak_err_db": peak_err_db,
+            "sfdr_db": sfdr_db,
+        }
+
+
 class FftDemoWindow(QtWidgets.QMainWindow):
+
+    # Signals into the worker (queued across the thread boundary).
+    _request_open = QtCore.pyqtSignal()
+    _request_start = QtCore.pyqtSignal()
+    _request_stop = QtCore.pyqtSignal()
+    _request_close = QtCore.pyqtSignal()
+    _push_input = QtCore.pyqtSignal(object)
 
     def __init__(self, serial: str | None) -> None:
         super().__init__()
         self.setWindowTitle("Ostomachion FFT accelerator demo")
         self.resize(1200, 800)
 
-        self.transport = FrontPanelFftTransport(serial=serial)
         self.transport_open = False
-        self.last_frame_n = 0
         self.running = False
         self._fps_t0 = time.monotonic()
         self._fps_frames = 0
@@ -332,7 +469,25 @@ class FftDemoWindow(QtWidgets.QMainWindow):
         main_lo.addWidget(self.plots, 1)
         self.setCentralWidget(central)
 
-        # Signals
+        # ── Acquisition worker on its own thread ──────────────────────────
+        self._thread = QtCore.QThread(self)
+        self._worker = _AcquisitionWorker(serial)
+        self._worker.moveToThread(self._thread)
+        self._thread.start()
+
+        # GUI → worker (queued)
+        self._request_open.connect(self._worker.open)
+        self._request_start.connect(self._worker.start)
+        self._request_stop.connect(self._worker.stop)
+        self._request_close.connect(self._worker.close)
+        self._push_input.connect(self._worker.set_input)
+
+        # worker → GUI (queued)
+        self._worker.opened.connect(self._on_opened)
+        self._worker.frameReady.connect(self._on_frame_ready)
+        self._worker.failed.connect(self._on_failed)
+
+        # Button signals
         self.btn_open.clicked.connect(self.on_open)
         self.btn_start.clicked.connect(self.on_start)
         self.btn_stop.clicked.connect(self.on_stop)
@@ -340,16 +495,19 @@ class FftDemoWindow(QtWidgets.QMainWindow):
     # ── FrontPanel lifecycle ──────────────────────────────────────────────
 
     def on_open(self) -> None:
-        try:
-            self.transport.open()
+        self.btn_open.setEnabled(False)
+        self.stats.set_status("opening…", ok=True)
+        self._request_open.emit()
+
+    @QtCore.pyqtSlot(str, bool, int)
+    def _on_opened(self, info: str, ok: bool, frame_n: int) -> None:
+        if ok:
             self.transport_open = True
-            self.last_frame_n = self.transport.frame_counter()
-            self.stats.set_status(
-                f"open: {self.transport.device_info()}", ok=True)
-            self.btn_open.setEnabled(False)
+            self.stats.set_status(f"open: {info}", ok=True)
             self.btn_start.setEnabled(True)
-        except TransportError as exc:
-            self.stats.set_status(str(exc), ok=False)
+        else:
+            self.stats.set_status(info, ok=False)
+            self.btn_open.setEnabled(True)
 
     # ── Realtime loop control ─────────────────────────────────────────────
 
@@ -363,66 +521,24 @@ class FftDemoWindow(QtWidgets.QMainWindow):
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         self.stats.set_status("running", ok=True)
-        QtCore.QTimer.singleShot(0, self._tick)
+        # Stage the first input frame, then start the worker loop.
+        self._push_input.emit(self.source_panel.make_frame())
+        self._request_start.emit()
 
     def on_stop(self) -> None:
         self.running = False
+        self._request_stop.emit()
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.stats.set_status("stopped", ok=True)
 
-    # ── One frame ─────────────────────────────────────────────────────────
+    # ── worker results (run on the GUI thread) ────────────────────────────
 
-    def _tick(self) -> None:
+    @QtCore.pyqtSlot(object)
+    def _on_frame_ready(self, r: dict) -> None:
         if not self.running:
             return
-        try:
-            self._process_one_frame()
-        except TransportError as exc:
-            self.running = False
-            self.btn_start.setEnabled(True)
-            self.btn_stop.setEnabled(False)
-            self.stats.set_status(f"transport: {exc}", ok=False)
-            return
-        except Exception:  # noqa: BLE001 — surface any unexpected error
-            self.running = False
-            self.btn_start.setEnabled(True)
-            self.btn_stop.setEnabled(False)
-            traceback.print_exc()
-            self.stats.set_status("unhandled error (see stderr)", ok=False)
-            return
-        # Schedule next tick on the event loop (yields to GUI for paint).
-        QtCore.QTimer.singleShot(0, self._tick)
-
-    def _process_one_frame(self) -> None:
-        # 1. Build input frame on the host.
-        input_q15 = self.source_panel.make_frame()
-        input_complex = q15_to_complex(input_q15)
-
-        # 2. Software FFT, scaled by 1/N to match xfft's all-stages-scaled
-        #    output convention (ACCEL_ARCH.md §1).
-        t_sw0 = time.perf_counter()
-        sw_spectrum = np.fft.fft(input_complex) / float(FFT_N)
-        t_sw_us = (time.perf_counter() - t_sw0) * 1e6
-
-        # 3. Push frame to FPGA and wait for the round trip.
-        self.transport.send_frame(pack_q15_frame(input_q15))
-        result = self.transport.recv_frame(prev_frame_n=self.last_frame_n,
-                                           timeout_s=2.0)
-        self.last_frame_n = result.frame_n
-
-        # 4. Decode HW result.
-        hw_q15 = unpack_q15_frame(result.samples, FFT_N)
-        hw_spectrum = q15_to_complex(hw_q15)
-
-        # 5. Two correctness metrics — see spectrum_quality() for why.
-        hw_db = db_magnitude(hw_spectrum)
-        sw_db = db_magnitude(sw_spectrum)
-        peak_err_db, sfdr_db = spectrum_quality(hw_db, sw_db)
-
-        # 6. Update plots & stats.
-        self.plots.update(input_q15[:, 0].astype(np.float32) / float(Q15_UNIT),
-                          hw_db, sw_db)
+        self.plots.update(r["input_re"], r["hw_db"], r["sw_db"])
 
         self._fps_frames += 1
         elapsed = time.monotonic() - self._fps_t0
@@ -430,13 +546,33 @@ class FftDemoWindow(QtWidgets.QMainWindow):
             self._fps_value = self._fps_frames / elapsed
             self._fps_t0 = time.monotonic()
             self._fps_frames = 0
-        self.stats.update_frame(frame_n=result.frame_n,
-                                hw_cycles=result.hw_cycles,
-                                sw_us=t_sw_us,
-                                round_s=result.elapsed_s,
+        self.stats.update_frame(frame_n=r["frame_n"],
+                                hw_cycles=r["hw_cycles"],
+                                sw_us=r["sw_us"],
+                                round_s=r["round_s"],
                                 fps=self._fps_value,
-                                peak_err_db=peak_err_db,
-                                sfdr_db=sfdr_db)
+                                peak_err_db=r["peak_err_db"],
+                                sfdr_db=r["sfdr_db"])
+        # Stage the next input frame (read GUI widgets here, on the GUI thread).
+        self._push_input.emit(self.source_panel.make_frame())
+
+    @QtCore.pyqtSlot(str)
+    def _on_failed(self, msg: str) -> None:
+        self.running = False
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        self.stats.set_status(msg, ok=False)
+
+    # ── Clean shutdown ─────────────────────────────────────────────────────
+
+    def closeEvent(self, event) -> None:
+        # Stop the loop, close the transport on the worker thread, then join.
+        self.running = False
+        self._request_stop.emit()
+        self._request_close.emit()
+        self._thread.quit()
+        self._thread.wait(3000)
+        super().closeEvent(event)
 
 
 # ──────────────────────────────────────────────────────────────────────────

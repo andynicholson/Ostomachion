@@ -166,6 +166,31 @@ set_output_delay -add_delay -max -clock [get_clocks {okUH0}]  2.000 [get_ports {
 set_output_delay -add_delay -min -clock [get_clocks {okUH0}] -0.500 [get_ports {okUHU[*]}]
 
 ## ==========================================================================
+## Primary CDC exception: asynchronous clock groups (M4)
+##
+## sys_clk (200 MHz pad → BD clk_wiz MMCM → 100 MHz AXI/sys clock) and okUH0
+## (FrontPanel ~100.8 MHz → okHost MMCM) originate from independent, unrelated
+## oscillators.  Declaring the two clock trees asynchronous is the correct
+## primary constraint for every sys_clk↔okClk crossing — it covers ALL such
+## paths structurally, so coverage no longer depends on the per-instance
+## name-matched set_false_path globs below (which silently match nothing if an
+## instance is ever renamed).  -include_generated_clocks pulls in each trees
+## MMCM-derived children (clk_out1_*, mmcm0_clk0, etc.) automatically.
+##
+## jtag_tck is likewise asynchronous to both functional clock trees (the OCD
+## TAP is driven by an external debugger), so it gets its own group.
+##
+## The set_false_path constraints in the sections that follow are retained as
+## explicit, self-documenting belt-and-suspenders for specific CDC structures;
+## they are subsumed by these groups but harmless (a path cut by a clock group
+## is simply also cut by a false_path).
+## ==========================================================================
+set_clock_groups -asynchronous \
+    -group [get_clocks -include_generated_clocks sys_clk] \
+    -group [get_clocks -include_generated_clocks okUH0] \
+    -group [get_clocks -include_generated_clocks jtag_tck]
+
+## ==========================================================================
 ## FrontPanel UART bridge — clock domain crossing
 ## XPM async FIFOs set ASYNC_REG automatically; Vivado applies the correct
 ## timing exceptions for their gray-code synchronizers.
