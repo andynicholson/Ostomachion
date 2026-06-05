@@ -101,7 +101,8 @@ zephyr:
 	@echo "=== Building Zephyr app ==="
 	west build -b $(ZEPHYR_BOARD) $(ZEPHYR_APP_DIR) \
 		-d $(ZEPHYR_BUILD_DIR) --pristine=auto \
-		-- -DCMAKE_PROGRAM_PATH=$(IMAGE_GEN_DIR)
+		-- -DCMAKE_PROGRAM_PATH=$(IMAGE_GEN_DIR) \
+		   -DCONFIG_ZTEST=y
 	cp $(ZEPHYR_BUILD_DIR)/zephyr/zephyr.vhd zephyr_imem_image.vhd
 	$(call update-compile-commands,$(ZEPHYR_BUILD_DIR))
 
@@ -109,13 +110,20 @@ ZEPHYR_SIM_TIME ?= 800ms
 
 test-zephyr: zephyr clean-ghdl
 	$(MAKE) IMEM_IMAGE=zephyr_imem_image.vhd SIM_TIME=$(ZEPHYR_SIM_TIME) all
-	@if grep -q 'PROJECT EXECUTION SUCCESSFUL' neorv32_tb.UART0_rx.out 2>/dev/null; then \
-		echo "=== PASS: All Zephyr ZTEST suites passed ==="; \
-	else \
-		echo "=== FAIL: 'PROJECT EXECUTION SUCCESSFUL' not found in simulation output ===" >&2; \
-		cat neorv32_tb.UART0_rx.out 2>/dev/null || echo "(no UART output file found)" >&2; \
+	@out=neorv32_tb.UART0_rx.out; \
+	if [ ! -s "$$out" ]; then \
+		echo "=== FAIL: no simulation UART output ($$out missing/empty) ===" >&2; exit 1; \
+	fi; \
+	if ! grep -q 'PROJECT EXECUTION SUCCESSFUL' "$$out"; then \
+		echo "=== FAIL: sim did not reach 'PROJECT EXECUTION SUCCESSFUL' ===" >&2; \
+		cat "$$out" >&2; exit 1; \
+	fi; \
+	if grep -qiE 'FAIL - |TESTSUITE.*[Ff]ailed|[0-9]+ Tests? failed|Assertion failed|FATAL' "$$out"; then \
+		echo "=== FAIL: ZTEST reported a failing suite/assertion (PROJECT EXECUTION SUCCESSFUL alone is not sufficient) ===" >&2; \
+		grep -niE 'FAIL - |TESTSUITE.*[Ff]ailed|[0-9]+ Tests? failed|Assertion failed|FATAL' "$$out" >&2; \
 		exit 1; \
-	fi
+	fi; \
+	echo "=== PASS: sim completed and no ZTEST failures detected ==="
 
 clean-ghdl:
 	@echo "=== Cleaning GHDL artifacts ==="

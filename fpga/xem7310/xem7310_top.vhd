@@ -215,6 +215,7 @@ architecture rtl of xem7310_top is
   -- WireOut 0x20: RX FIFO entry count
   signal wo20_data    : std_logic_vector(31 downto 0);
   signal rx_count     : std_logic_vector(10 downto 0);
+  signal uart_rx_overflow : std_logic;  -- sticky: a UART RX byte was dropped (FIFO full)
 
   -- WireOut 0x21: FFT/DMA diagnostic probes
   --   [0] = fft_dbg_mm2s_tvalid   (DMA M_AXIS_MM2S TVALID, 1 = DMA sending)
@@ -462,7 +463,16 @@ begin
   --   anything else    →  xbus2axi4_bridge   (BD: AXI DMA, BRAM, INTC, …)
   -- Wishbone-classic holds adr/stb stable until ack, so a combinational
   -- response mux on the current address bit is safe.
-  sel_fifo_region <= '1' when xbus_adr_u(31 downto 28) = "1001" else '0';
+  -- Decode the full in-region offset adr[27:4], not just adr[3:0]: the bridge
+  -- has only four 32-bit registers (a 16-byte window), so matching on the
+  -- nibble alone would alias every 16-byte-aligned address across the whole
+  -- 256 MB 0x9xxx_xxxx region onto those registers and let a stray access
+  -- silently pop/push a FIFO sample.  Requiring adr[27:4]=0 means only
+  -- 0x9000_000{0,4,8,C} hit the bridge; any other in-region address falls
+  -- through to the BD bridge path, which is unmapped there and raises xbus_err.
+  sel_fifo_region <= '1' when (xbus_adr_u(31 downto 28) = "1001"
+                              and xbus_adr_u(27 downto 4) = (27 downto 4 => '0'))
+                          else '0';
   xbus_stb_bridge <= xbus_stb_u and not sel_fifo_region;
   xbus_stb_fifo   <= xbus_stb_u and sel_fifo_region;
 
@@ -599,7 +609,8 @@ begin
     );
 
   -- WireOut 0x20: [10:0] RX FIFO byte count
-  wo20_data <= (31 downto 11 => '0') & rx_count;
+  -- WireOut 0x20: [10:0] RX FIFO byte count, [11] sticky RX-overflow flag.
+  wo20_data <= (31 downto 12 => '0') & uart_rx_overflow & rx_count;
 
   wo20_i : okWireOut
     port map (
@@ -697,6 +708,7 @@ begin
       rx_count  => rx_count,
       tx_ready  => pi80_ready,
       rx_ready  => poA0_ready,
+      rx_overflow => uart_rx_overflow,
       baud_div  => fp_baud_div
     );
 

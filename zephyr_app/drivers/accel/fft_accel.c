@@ -313,6 +313,11 @@ int fft_accel_transform(const struct device *dev,
 	 */
 	uint32_t byte_len = (uint32_t)(n * sizeof(struct fft_sample_t));
 
+	/* Defense-in-depth backstop, not the primary length check: n is already
+	 * pinned to 4096 above, so byte_len is a constant 16384 and this only
+	 * trips if the DTS dma-max-bytes prop is mis-set below the transform
+	 * size.  Kept so a future variable-n path cannot silently overrun the
+	 * DMA bound; it is intentionally redundant while n is fixed. */
 	if (byte_len > cfg->dma_max_bytes) {
 		return -EINVAL;
 	}
@@ -359,12 +364,18 @@ int fft_accel_transform(const struct device *dev,
 	gpio_wr(cfg, GPIO_DATA, 0x0);  /* assert xfft reset (aresetn=0) */
 	k_busy_wait(1);                /* hold aresetn=0 for >=2 aclk cycles */
 
+	/* Check each reset explicitly.  dma_reset_channel() returns 0 or a
+	 * negative errno; bit-ORing two negative errnos (|=) only stays
+	 * non-zero by twos-complement coincidence and discards the actual
+	 * error code, so test them individually and propagate the real one. */
 	int reset_err = dma_reset_channel(cfg, DMA_MM2S_DMACR);
-	reset_err    |= dma_reset_channel(cfg, DMA_S2MM_DMACR);
-	if (reset_err) {
+	if (reset_err == 0) {
+		reset_err = dma_reset_channel(cfg, DMA_S2MM_DMACR);
+	}
+	if (reset_err != 0) {
 		gpio_wr(cfg, GPIO_DATA, 0x1);  /* release xfft reset before exit */
 		k_mutex_unlock(&data->xfer_lock);
-		return -EIO;
+		return reset_err;              /* -ETIMEDOUT, not a blanket -EIO */
 	}
 
 	gpio_wr(cfg, GPIO_DATA, 0x1);  /* release xfft reset (aresetn=1) */

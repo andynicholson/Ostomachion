@@ -56,6 +56,12 @@ entity fp_uart_bridge is
     tx_ready   : out std_logic;   -- TX FIFO can accept data (not full)
     rx_ready   : out std_logic;   -- RX FIFO has data available (not empty)
 
+    -- Sticky RX-overflow flag (sys_clk domain): set if a received UART byte
+    -- was dropped because the RX FIFO was full.  There is no back-pressure to
+    -- the NEORV32 UART line, so a drop is otherwise silent; this makes it
+    -- observable.  Cleared only by sys_rstn.
+    rx_overflow: out std_logic;
+
     -- Baud rate divisor (fp_clk domain, from WireIn)
     baud_div   : in  std_logic_vector(15 downto 0)
   );
@@ -90,6 +96,8 @@ architecture rtl of fp_uart_bridge is
   signal rxf_empty       : std_logic;
   signal rxf_rdcnt       : std_logic_vector(10 downto 0);
   signal rxf_valid_r     : std_logic := '0';  -- registered valid flag, aligned with rxf_dout
+  signal rxf_overflow    : std_logic;            -- FIFO overflow strobe (1 cycle)
+  signal rx_overflow_q   : std_logic := '0';     -- sticky overflow latch (sys_clk)
   signal rxf_wr_rst_busy : std_logic;  -- sys_clk domain: gates wr_en
   signal rxf_rd_rst_busy : std_logic;  -- fp_clk  domain: gates rd_en / rx_ready
 
@@ -224,7 +232,7 @@ begin
       wr_data_count => open,
       wr_rst_busy   => rxf_wr_rst_busy,
       rd_rst_busy   => rxf_rd_rst_busy,
-      overflow      => open,
+      overflow      => rxf_overflow,
       underflow     => open,
       prog_full     => open,
       prog_empty    => open,
@@ -251,6 +259,19 @@ begin
       rxf_valid_r <= po_rd and not rxf_empty;
     end if;
   end process;
+
+  -- Sticky RX-overflow latch (sys_clk domain, where the FIFO write side lives).
+  process (sys_clk)
+  begin
+    if rising_edge(sys_clk) then
+      if sys_rstn = '0' then
+        rx_overflow_q <= '0';
+      elsif rxf_overflow = '1' then
+        rx_overflow_q <= '1';
+      end if;
+    end if;
+  end process;
+  rx_overflow <= rx_overflow_q;
 
   po_data(31 downto 9)   <= (others => '0');
   po_data(8)             <= rxf_valid_r;

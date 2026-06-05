@@ -229,29 +229,46 @@ recommended robustness improvement, but it does **not** gate this branch.
 
 ---
 
-## 4. Minor findings (⏳ TODO)
+## 4. Minor findings (✅ ALL FIXED)
 
-- **Address-map docs are wrong by orders of magnitude.** `CLAUDE.md` says
-  DMA/INTC/GPIO are **64 KiB** each; the Tcl assigns `0x80` (128 B) and the DTS
-  agrees with the Tcl. The DTS `dma` reg size is `0x40` but the driver touches
-  S2MM registers up to `0x58`. Reconcile `CLAUDE.md`, `ACCEL_ARCH.md`, the Tcl,
-  and the overlay.
-- **Dead runtime guards:** `byte_len > dma_max_bytes` can never trip (`n==4096`
-  is already forced); `reset_err |= …` works only by two's-complement luck.
-- **FFT-region address aliasing:** the host-pipe bridge decodes only
-  `xbus_addr(3:0)`, so any 16-byte-aligned address in the 256 MB `0x9xxx_xxxx`
-  region aliases onto the FIFO-pop register; stray accesses pop samples.
-- **UART RX FIFO silently drops bytes** on `rxf_full` with `overflow` tied open.
-- **`prj.conf` forces `CONFIG_ZTEST=y`** unconditionally, so the "production"
-  firmware analyzed by CI is a test build pulling in all `tests/*.cpp`.
-- **DRC/timing gates are text-matched, not severity-parsed** (`regexp {ERROR}`
-  on `report_drc` strings); the timing gate ignores the unconstrained-path count.
-- **`test-zephyr` PASS grep is too loose:** greps for `PROJECT EXECUTION
-  SUCCESSFUL`, which prints even when individual ZTEST assertions FAIL.
-- **`transport.close()` doesn't release the USB device** (relies on GC); no
-  `closeEvent`, so the demo holds the FrontPanel handle until process exit.
-- **`openocd.cfg` declares `pld device virtex2`** for a 7-series Artix (wrong
-  family, vestigial).
+- ✅ **Address-map docs reconciled.** `CLAUDE.md` and `ACCEL_ARCH.md` now show
+  DMA/INTC/GPIO as **128 B** each (matching the Tcl `0x80` assignment); the GPIO
+  row notes the dual-channel overflow readback. The DTS `dma` reg size was bumped
+  `0x40 -> 0x80` so it actually covers the S2MM registers the driver touches
+  (up to `0x5C`).
+- ✅ **Dead runtime guards.** `reset_err |= ...` replaced with explicit
+  per-channel checks that propagate the real errno (`-ETIMEDOUT`) instead of an
+  OR of two negative values; the `byte_len > dma_max_bytes` check is kept but
+  documented as an intentional defense-in-depth backstop (redundant only while
+  `n` is pinned to 4096).
+- ✅ **FFT-region address aliasing.** The XBUS demux now requires `adr[27:4]=0`
+  within the `0x9xxx_xxxx` region, so only `0x9000_000{0,4,8,C}` select the pipe
+  bridge; any other in-region address falls through to the BD bridge path (which
+  is unmapped there and raises `xbus_err`) instead of aliasing onto a FIFO
+  register. **Verified:** elaborates with 0 errors.
+- ✅ **UART RX FIFO drops are now observable.** Added a sticky `rx_overflow`
+  latch (set when a byte is dropped on `rxf_full`, cleared on reset) surfaced on
+  WireOut 0x20 bit 11. There is no back-pressure to the UART line by design, but
+  a drop is no longer silent.
+- ✅ **`prj.conf` is a clean base config.** `CONFIG_ZTEST=y` removed; ZTEST is now
+  opt-in — added by the `zephyr` Makefile target for the GHDL sim run and by
+  `testcase.yaml` for Twister/HW. The CI firmware-analysis build is now a real
+  production image. Sim firmware re-verified to build.
+- ✅ **DRC/timing gates are severity-aware.** Both `build.tcl` and
+  `check_build.tcl` now use `get_drc_violations` filtered on Error/Critical
+  severity instead of `regexp {ERROR}` on report text; `check_build.tcl` also
+  flags unconstrained timing endpoints (WNS/WHS only cover constrained paths).
+- ✅ **`test-zephyr` PASS check tightened.** It now requires non-empty output AND
+  the `PROJECT EXECUTION SUCCESSFUL` marker AND the *absence* of ZTEST failure
+  markers (`FAIL - `, `TESTSUITE ... failed`, `Assertion failed`, `FATAL`), so a
+  failing assertion can no longer pass silently.
+- ✅ **`transport.close()` releases the device explicitly** (`dev.Close()` guarded
+  by `IsOpen()`), and M9's `closeEvent` invokes it on the worker thread — the
+  FrontPanel handle is freed on exit rather than at GC.
+- ✅ **`openocd.cfg`** duplicate `pld device` removed (the sourced
+  `cpld/xilinx-xc7.cfg` already declares it). Note added that OpenOCD's series-7
+  PLD driver is *named* `virtex2` for all xc7 parts, so the name was actually
+  correct — the real issue was the redundant declaration in a debug-only cfg.
 
 ---
 

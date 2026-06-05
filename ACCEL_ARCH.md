@@ -65,7 +65,7 @@ NEORV32 RISC-V
 
 | Base | Size | Peripheral | DTS `reg-names` entry |
 |------|------|------------|------------------------|
-| `0x4000_0000` | 64 B  | AXI DMA AXI4-Lite control | `dma` |
+| `0x4000_0000` | 128 B | AXI DMA AXI4-Lite control | `dma` |
 | `0x4001_0000` | 128 B | AXI INTC AXI4-Lite | `intc` |
 | `0x4002_0000` | 128 B | AXI GPIO (xfft reset gate + overflow readback) | `gpio` |
 | `0x4100_0000` | 32 KB | TX BRAM (CPU writes input samples) | `tx_bram` |
