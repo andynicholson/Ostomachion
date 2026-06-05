@@ -199,6 +199,10 @@ class _StatsPanel(QtWidgets.QGroupBox):
         self.lbl_sfdr       = _mk_label()
         self.lbl_frame      = _mk_label()
         self.lbl_status     = _mk_label()
+        self.lbl_status.setWordWrap(True)            # diagnostics can be long
+        self.lbl_status.setMinimumWidth(220)
+        self.lbl_status.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addRow("Frame #",            self.lbl_frame)
         layout.addRow("HW FFT cycles",      self.lbl_hw)
         layout.addRow("SW FFT (numpy)",     self.lbl_sw)
@@ -606,6 +610,9 @@ class FftDemoWindow(QtWidgets.QMainWindow):
 
     @QtCore.pyqtSlot(str)
     def _on_failed(self, msg: str) -> None:
+        # Mirror to stderr so the full message lands in the launching terminal
+        # (the GUI status label can clip long diagnostics).
+        print(f"[fft_demo] FAIL: {msg}", file=sys.stderr, flush=True)
         self.running = False
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
