@@ -12,6 +12,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ── Host (off-target) unit tests ─────────────────────────────────────────
+  #
+  # Builds and runs the hardware-independent firmware math (filter-mask
+  # synthesis) with the host compiler — no Zephyr, no GHDL, no Vivado.  This is
+  # the fast gate that fails in seconds before any simulation or synthesis is
+  # attempted.  Mirrors the `remote-build.sh math` stage.
+  #
+  host-tests:
+    name: Host unit tests (filter math)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends cmake ninja-build g++
+
+      - name: Configure, build and run host tests
+        run: |
+          set -o pipefail
+          cmake -S host_tests -B build/host_tests
+          cmake --build build/host_tests
+          ctest --test-dir build/host_tests --output-on-failure
+
   # ── GHDL + Zephyr simulation ─────────────────────────────────────────────
   #
   # Builds the Zephyr application (no-FFT sim config), generates the VHDL

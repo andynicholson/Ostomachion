@@ -41,6 +41,7 @@ struct AccelOpDesc {
     enum class Type : unsigned {
         Unknown = 0,
         Fft     = 1,
+        Filter  = 2,  /* FFT → per-bin complex filter → IFFT (FilterOpDesc) */
         /* Add new accelerator types here */
     };
 
