@@ -152,13 +152,43 @@ and it is small and low-risk:
 - **No new clock-domain crossing was introduced.** The M1 overflow path is
   entirely `aclk → aclk` (status latch) → AXI GPIO → CPU; it never touches
   `okClk`/`okUH0`. C3's added logic (FIFO reset-busy AND-gates) is same-domain.
-- A full `make fpga-synth` on this branch HEAD is **in progress** to confirm
-  WNS/WHS ≥ 0 and quantify the margin cost; results to be appended here.
+- A full `make fpga-synth` on this branch HEAD **completed and PASSED**:
+  **WNS +0.042 ns, WHS +0.011 ns, 0 failing endpoints** (61,069 setup /
+  60,893 hold), DRC clean, bitstream + MCS written. Utilisation 11% LUT /
+  26% BRAM. So this branch *does* close timing — but the +42 ps setup margin is
+  thin, and the ten worst paths all sit in the async FIFOs touched by C3
+  (`fft_pipe_bridge_i/fifo_in_i`, `uart_bridge_i/tx_fifo_i`) in the
+  ~100.8 MHz `okClk`/`mmcm0_clk0` domain. A `master` build is running to confirm
+  whether +0.042 is the pre-existing margin or a C3 regression; result appended
+  in §3c.
 
 > **Note (PR hygiene, not timing):** `xem7310_top.vhd` was rewritten with CRLF
 > line endings on this branch (master is LF), so git reports ~1470 changed lines
 > where the real content delta is only +37/−1. Normalize to LF (`dos2unix`) and
 > recommit before the PR. No synthesis impact.
+
+### 3c. Timing regression check vs master — NO REGRESSION
+
+Both builds run, same Vivado 2025.1 / `xc7a200tfbg484-1`:
+
+| Build | WNS | WHS | Failing | LUT | BRAM |
+|-------|-----|-----|---------|-----|------|
+| `master` (`2d44acc`)        | **+0.042 ns** | +0.020 ns | 0 / 60,481 | 10.79% | 26.44% |
+| branch (`8c68125`, C1/C3/M1) | **+0.042 ns** | +0.011 ns | 0 / 61,069 | 10.99% | 26.44% |
+
+**Conclusion: the +0.042 ns setup margin is master's pre-existing
+characteristic, not a regression from this branch.** The worst setup path has
+identical slack (+0.042 ns) and structure (4 logic levels, RAMB18→RAMD32,
+`mmcm0_clk0`) in both — it is the same path, untouched by C1/C3/M1. The branch
+adds 588 setup endpoints (+0.97% LUT) for the C3 reset-busy gates and M1 latch,
+and the worst path is unchanged. WHS dropped 9 ps (+0.020 → +0.011) but stays
+comfortably positive with 0 failing hold endpoints.
+
+The thin +42 ps margin is therefore an existing property of the design (the
+~100.8 MHz `okClk` FIFO/CDC paths), and is exactly what **M4** addresses: a
+`set_clock_groups -asynchronous` between `aclk` and `okUH0` would remove these
+cross-domain paths from analysis entirely and recover margin. That remains the
+recommended robustness improvement, but it does **not** gate this branch.
 
 > **M3/M4 remain open and are the real timing-robustness work:** the current
 > closure relies on name-matched `set_false_path` globs (M4) rather than a
