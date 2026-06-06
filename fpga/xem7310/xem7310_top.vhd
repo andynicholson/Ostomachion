@@ -256,8 +256,10 @@ architecture rtl of xem7310_top is
   --   FFT pipe  : WireOut 0x24, WireOut 0x25, WireOut 0x26,
   --               BTPipeIn 0x81, BTPipeOut 0xA1                   (5 EPs)
   --   FFT out  : WireOut 0x27  (xfft_1 output beat counter)         (1 EP)
-  -- WireIns don't produce okEH outputs and are not counted in FP_EP_COUNT.
-  constant FP_EP_COUNT : natural := 12;
+  --   Filter   : WireOut 0x28  (filter status echo)                (1 EP)
+  -- WireIns (0x00 UART cfg, 0x01 filter cfg) don't produce okEH outputs and
+  -- are not counted in FP_EP_COUNT.
+  constant FP_EP_COUNT : natural := 13;
 
   signal fp_clk       : std_logic;
   signal okHE         : std_logic_vector(112 downto 0);
@@ -270,6 +272,13 @@ architecture rtl of xem7310_top is
   signal uart_src_sel_fp : std_logic;
   signal uart_src_sync1 : std_logic := '0';
   signal uart_src_sync2 : std_logic := '0';
+
+  -- WireIn 0x01: host filter control word (mode/lo/hi).  fp_clk → CDC in the
+  -- pipe bridge → CPU reads it at 0x9000_0010.  WireOut 0x28 echoes the
+  -- firmware-applied status (mode/avail/overflow) back to the host.
+  signal wi01_data        : std_logic_vector(31 downto 0);
+  signal filter_status_fp : std_logic_vector(31 downto 0);
+  signal wo28_data        : std_logic_vector(31 downto 0);
 
   -- WireOut 0x20: RX FIFO entry count
   signal wo20_data    : std_logic_vector(31 downto 0);
@@ -660,15 +669,17 @@ begin
   --   anything else    →  xbus2axi4_bridge   (BD: AXI DMA, BRAM, INTC, …)
   -- Wishbone-classic holds adr/stb stable until ack, so a combinational
   -- response mux on the current address bit is safe.
-  -- Decode the full in-region offset adr[27:4], not just adr[3:0]: the bridge
-  -- has only four 32-bit registers (a 16-byte window), so matching on the
-  -- nibble alone would alias every 16-byte-aligned address across the whole
-  -- 256 MB 0x9xxx_xxxx region onto those registers and let a stray access
-  -- silently pop/push a FIFO sample.  Requiring adr[27:4]=0 means only
-  -- 0x9000_000{0,4,8,C} hit the bridge; any other in-region address falls
-  -- through to the BD bridge path, which is unmapped there and raises xbus_err.
+  -- Decode the full in-region offset adr[27:5], not just adr[4:0]: the bridge
+  -- now has six 32-bit registers (a 32-byte window: POP/PUSH/STATUS/PUBLISH +
+  -- FILTER_CFG 0x10 + APPLIED 0x14), so matching on the low bits alone would
+  -- alias every 32-byte-aligned address across the whole 256 MB 0x9xxx_xxxx
+  -- region onto those registers and let a stray access silently pop/push a
+  -- FIFO sample.  Requiring adr[27:5]=0 means only 0x9000_00{00..1F} hit the
+  -- bridge; any other in-region address falls through to the BD bridge path,
+  -- which is unmapped there and raises xbus_err.  (Gap offsets inside the
+  -- window — 0x18/0x1C — decode to the bridge's "others" arm and read 0.)
   sel_fifo_region <= '1' when (xbus_adr_u(31 downto 28) = "1001"
-                              and xbus_adr_u(27 downto 4) = (27 downto 4 => '0'))
+                              and xbus_adr_u(27 downto 5) = (27 downto 5 => '0'))
                           else '0';
   xbus_stb_bridge <= xbus_stb_u and not sel_fifo_region;
   xbus_stb_fifo   <= xbus_stb_u and sel_fifo_region;
@@ -803,6 +814,16 @@ begin
       okHE       => okHE,
       ep_addr    => x"00",
       ep_dataout => wi00_data
+    );
+
+  -- WireIn 0x01: host filter control word (mode/lo/hi), consumed by the demo
+  -- firmware via the pipe bridge.  WireIns produce no okEH output, so this is
+  -- not part of FP_EP_COUNT / okEHx.
+  wi01_i : okWireIn
+    port map (
+      okHE       => okHE,
+      ep_addr    => x"01",
+      ep_dataout => wi01_data
     );
 
   -- WireOut 0x20: [10:0] RX FIFO byte count
@@ -982,12 +1003,28 @@ begin
       ep_datain => wo27_data
     );
 
+  -- WireOut 0x28: filter status echo from the demo firmware (sys→fp CDC in the
+  -- pipe bridge).  Lets the host know the applied filter mode (so it knows
+  -- whether the output frame is frequency bins or filtered time samples),
+  -- whether the filter datapath is present in this bitstream, and whether the
+  -- last filtered transform overflowed.
+  --   [2:0] applied_mode  [3] filter_avail  [4] last_overflow  [5] last_failed
+  wo28_data <= filter_status_fp;
+
+  wo28_i : okWireOut
+    port map (
+      okHE      => okHE,
+      okEH      => okEHx(12*65+64 downto 12*65),
+      ep_addr   => x"28",
+      ep_datain => wo28_data
+    );
+
   fft_pipe_bridge_i : entity work.fp_fft_pipe_bridge
     port map (
       sys_clk          => clk,
       sys_rstn         => periph_rstn(0),
 
-      xbus_addr        => xbus_adr_u(3 downto 0),
+      xbus_addr        => xbus_adr_u(4 downto 0),
       xbus_stb         => xbus_stb_fifo,
       xbus_we          => xbus_we_u,
       xbus_wdat        => xbus_wdat_u,
@@ -995,6 +1032,9 @@ begin
       xbus_ack         => xbus_ack_fifo,
 
       fp_clk           => fp_clk,
+
+      filter_cfg_i     => wi01_data,
+      applied_status_o => filter_status_fp,
 
       pi_data          => pi81_data,
       pi_wr            => pi81_write,
