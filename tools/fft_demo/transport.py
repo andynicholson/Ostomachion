@@ -59,6 +59,7 @@ BT_BLOCK_SIZE = 1024          # Block-throttled pipe block size (must be 2^n)
 
 # ── WireIn / WireOut / Pipe endpoint addresses ────────────────────────────
 EP_WIREIN_CFG       = 0x00
+EP_WIREIN_FILTER    = 0x01    # host filter control word (mode/lo/hi)
 EP_WIREOUT_UART_CNT = 0x20
 EP_WIREOUT_FFT_DBG  = 0x21
 EP_WIREOUT_BEATS    = 0x22
@@ -66,6 +67,7 @@ EP_WIREOUT_TLAST    = 0x23
 EP_WIREOUT_PIPECNTS = 0x24    # { fifo_out_count[15:0], fifo_in_count[15:0] }
 EP_WIREOUT_HW_CYC   = 0x25    # HW FFT cycle count published by firmware
 EP_WIREOUT_FRAME_N  = 0x26    # Free-running frame counter
+EP_WIREOUT_APPLIED  = 0x28    # filter status echo: mode/avail/overflow/failed
 EP_PIPEIN_FFT       = 0x81    # host → fifo_in
 EP_PIPEOUT_FFT      = 0xA1    # fifo_out → host
 
@@ -149,6 +151,31 @@ class FrontPanelFftTransport:
     def frame_counter(self) -> int:
         self._dev.UpdateWireOuts()
         return self._dev.GetWireOutValue(EP_WIREOUT_FRAME_N) & 0xFFFFFFFF
+
+    def applied_status(self) -> int:
+        """Read the firmware filter status echo (WireOut 0x28).
+
+        Bit fields: [2:0] applied_mode, [3] filter_avail, [4] last_overflow,
+        [5] last_failed.  Use filter_mask.unpack_status() to decode.  On an old
+        bitstream without this WireOut the value reads as 0 (mode=bypass,
+        filter unavailable) — which is the safe interpretation.
+        """
+        self._dev.UpdateWireOuts()
+        return self._dev.GetWireOutValue(EP_WIREOUT_APPLIED) & 0xFFFFFFFF
+
+    # ── Filter control ────────────────────────────────────────────────────
+
+    def set_filter(self, cfg_word: int) -> None:
+        """Write the 32-bit filter control word to WireIn 0x01.
+
+        cfg_word packs mode/lo/hi — build it with
+        filter_mask.pack_filter_cfg().  The full 0xFFFFFFFF update mask
+        replaces every bit (no stale fields).  A write to an absent WireIn on a
+        pre-filter bitstream is a harmless no-op (the firmware simply never
+        leaves bypass).  MUST be called on the transport-owning thread.
+        """
+        self._dev.SetWireInValue(EP_WIREIN_FILTER, cfg_word & 0xFFFFFFFF, 0xFFFFFFFF)
+        self._dev.UpdateWireIns()
 
     def device_info(self) -> str:
         d = self._dev
