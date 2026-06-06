@@ -326,3 +326,117 @@ make test-accel-hw
 The Makefile target builds the firmware against `prj_accel.conf`, uploads
 it via the UART bootloader, switches the bridge to 115 200 baud, and waits
 for `PROJECT EXECUTION SUCCESSFUL`.
+
+---
+
+## 7. Programmable frequency-domain filter (FFT → filter → IFFT)
+
+The accelerator extends the forward FFT into a full **programmable
+frequency-spectrum transform**: time → forward FFT → per-bin complex multiply
+by a user-programmable mask `H[k]` → inverse FFT → time.  The SAME bitstream
+still serves the plain forward FFT; a bypass bit selects which result reaches
+RX BRAM.
+
+```text
+                          ┌── bypass=1 ──────────────────────────┐
+                          │                                      ▼
+TX BRAM → MM2S → xfft_0 ──┤                                  S2MM mux → RX BRAM
+        (forward, X[k])    └─→ spectral_filter ─→ xfft_1 ───────▲
+                              (H[k]·X[k], Q2.30      (inverse,   │
+                               → Q1.15)               y[n])  bypass=0
+                                   ▲
+                          coeff BRAM Port B (H[k], 0x4200_0000)
+```
+
+- **`spectral_filter` + `cmpy_normalizer`** ([`fpga/xem7310/`](fpga/xem7310/))
+  live in `xem7310_top.vhd` (application glue, not the BD canvas).  Per bin:
+  `Y[k] = H[k]·X[k]` (Q1.15×Q1.15 → Q2.30), reduced back to Q1.15 by
+  round-half-up `>>15` + saturate — bit-identical to the firmware reference
+  `ostomachion::filter::sat_round_q15()` so on-CPU mask composition predicts the
+  fabric result.
+- **Coefficient BRAM** (`0x4200_0000`, 16 KiB, true-dual-port): CPU writes the
+  4096-entry mask on Port A under the driver mutex (`fft_accel_load_coeffs`);
+  the filter reads Port B during a transform.  This is the ONLY sanctioned
+  exception to §4.2 — the ports never touch the same address concurrently.
+
+### 7.1. Inverse-FFT scaling — the factor-of-N trap
+
+The forward word `0x1555` already applies `1/N` (six ÷4 radix-4 stages).  A true
+inverse needs a TOTAL `1/N`, so stacking a second ÷N inverse would give `1/N²`.
+Two inverse config words exist:
+
+| `xfft_1` word | Inverse scaling | Net round-trip gain | Use |
+|---------------|-----------------|---------------------|-----|
+| **`0x1554`** (production) | ÷N (six ÷4) | `1/N` (attenuated) | Overflow-safe default — internal magnitudes never grow |
+| `0x0000` (demo only) | unscaled | `1` (exact identity ×filter) | Low-amplitude all-pass round-trip demonstration only; can overflow at scale |
+
+The production transform is therefore an **attenuated** round trip
+`y[n] = (1/N)·inverse(filtered_spectrum)`.  Tests check RELATIVE behaviour
+(pass-band ≫ stop-band energy), not absolute amplitude.  Masks should be
+Hermitian-symmetric (`H[N−k] = conj(H[k])`) so a real input yields a real
+output.
+
+### 7.2. Filter design rules (extend §4)
+
+#### 7.3. Latency-match through the filter (exactly N beats)
+
+The `cmpy → normalizer` chain is a RIGID fixed-latency pipeline
+(`L = 3 + NORM_LATENCY`), and TVALID/TLAST are pipelined through the SAME
+stages as the data.  So the beat the inverse xfft sees as TLAST still marks bin
+`N−1`, and `xfft_1` emits exactly `N` output beats — the §4.4 invariant, now
+through the whole chain.
+
+> **Failure mode — unmatched latency:** if a stage is added to the multiply
+> without delaying TVALID/TLAST equally, the inverse xfft's TLAST lands on the
+> wrong beat: S2MM under/over-transfers and the transform times out or shifts.
+> **Observability:** a second `fft_beat_counter` on the `xfft_1` output drives
+> **WireOut 0x27** (`{beats_in_last_frame[31:16], pre_first_tlast_beats[15:0]}`)
+> — the filtered-path analogue of 0x22.  Both must read `N`.
+
+#### 7.4. Coefficient read latency
+
+`spectral_filter` presents the bin address combinationally and samples Port B
+one cycle later, where the registered `X[k]` meets it — `READ_LATENCY=1`,
+latency-compensated, never stalled (the §4.1 contract applied to Port B).
+
+> **Failure mode — extra coeff register:** an added Port-B output register
+> shifts `H[k]` one bin relative to `X[k]`; every bin is multiplied by its
+> neighbour's coefficient.
+
+#### 7.5. Shared reset flushes the whole chain
+
+`xfft_0`, `xfft_1`, and `spectral_filter` share the one GPIO-gated `aresetn`,
+so the per-transform reset pulse (§4.5) flushes both transforms and the filter
+together — no stale `tvalid`/`tlast` can leak between transforms.
+
+### 7.6. INTC, overflow, and bypass
+
+- **INTC Ch2 frame-done** is sourced from `xfft_1` (IFFT done = whole result
+  ready).  The channel map (Ch0/1/2) and `C_KIND_OF_INTR` are UNCHANGED — the
+  driver still waits on S2MM IOC (Ch1) and treats Ch2 as a no-op edge.
+- **Overflow** (GPIO2 `0x08`): bit0 = `xfft_0` (forward) overflow, unchanged;
+  bit1 = aggregated (`xfft_0` OR `xfft_1` OR normalizer saturation).  Both
+  cleared by the per-transform `aresetn`; the driver ORs both into
+  `last_overflow`.
+- **Bypass** (GPIO ch1 bit1): selects the S2MM SOURCE — `xfft_0` forward bins
+  (so `fft_accel_transform()` is bit-identical to the pre-filter design) or
+  `xfft_1` filtered IFFT (`fft_accel_transform_filtered()`).  Default bypass=1
+  so a fresh filter bitstream matches the forward-only design until a filtered
+  transform is requested.
+
+### 7.7. Filter verification surface
+
+The `ostomachion_fft` suite adds (HIL; skipped via `-ENOTSUP` on a forward-only
+bitstream):
+
+| Test | Guards |
+|------|--------|
+| `test_filter_allpass_roundtrip` | All-pass mask round trip: non-zero output, no overflow |
+| `test_filter_lowpass` / `highpass` / `notch` | Two-tone in → filter → IFFT → analysis FFT; pass-band ≫ stop-band (≥8×) |
+| `test_filter_beat_count_invariant` | Filtered output frame fully written (firmware-side guard for WireOut 0x27) |
+| `test_filter_bypass_equals_plain` | With the filter bitstream, `transform()` (bypass) still peaks at the forward-FFT bin |
+
+The pure mask-synthesis math (`ostomachion::filter`) is additionally covered
+GHDL-/Vivado-independently by the host test
+[`host_tests/test_filter_mask.cpp`](host_tests/test_filter_mask.cpp) and the
+on-sim ZTEST `ostomachion_filter_mask`.

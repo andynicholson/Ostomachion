@@ -228,6 +228,68 @@ verified-correct; the inline derivation comments are load-bearing — keep them.
 
 ---
 
+## 5a. Programmable filter pipeline contract (FFT → filter → IFFT)
+
+Source: [`ostomachion_bd.tcl`](fpga/xem7310/ostomachion_bd.tcl),
+[`spectral_filter.vhd`](fpga/xem7310/spectral_filter.vhd),
+[`cmpy_normalizer.vhd`](fpga/xem7310/cmpy_normalizer.vhd),
+[`xem7310_top.vhd`](fpga/xem7310/xem7310_top.vhd),
+[`fft_accel.c`](zephyr_app/drivers/accel/fft_accel.c),
+[`filter_mask.hpp`](zephyr_app/include/ostomachion/filter_mask.hpp).
+Full architecture: [ACCEL_ARCH.md §7](ACCEL_ARCH.md).
+
+The forward FFT is extended into a programmable frequency-domain transform:
+time → `xfft_0` → per-bin complex multiply `H[k]·X[k]` (`spectral_filter`) →
+Q2.30→Q1.15 round/saturate (`cmpy_normalizer`) → `xfft_1` (inverse) → time. A
+GPIO bypass bit selects the S2MM source so one bitstream serves both the plain
+forward FFT and the filtered round trip.
+
+- **Single multiply stage was a timing trap — now pipelined.** The first
+  `fpga-synth` of the datapath FAILED at **WNS −4.376 ns**: the worst path ran
+  coeff-BRAM(RAMB36) → 2× DSP48E1 → 8× CARRY4 → normalizer in ONE cycle (13
+  logic levels, 14.255 ns logic). The complex multiply is now split into
+  registered product (stage 2) and sum (stage 3) stages that map onto the
+  DSP48E1 pipeline; TVALID/TLAST are pipelined identically so the N-beat /
+  TLAST-on-`N−1` invariant holds (filter latency `L = 3 + NORM_LATENCY`).
+- **`cmpy_normalizer` reduction == firmware `sat_round_q15`.** Round-half-up
+  `>>15` + saturate, verified bit-for-bit against the C++ reference (host test
+  `test_filter_mask` + a local GHDL TB). This is why on-CPU mask composition
+  (`compose_mul`/`compose_max`) predicts the fabric result.
+- **coeff BRAM is the one true-dual-port exception (vs §4.2 single-port).** CPU
+  writes Port A under the driver mutex while no transform runs; the filter reads
+  Port B during a transform; the two never touch the same address. Port B keeps
+  `READ_LATENCY=1` (no output register) and is latency-compensated against `X`,
+  so `H[k]` aligns with `X[k]` — an added register shifts the mask one bin.
+- **Inverse scaling word `0x1554` (÷N) is the production default.** Forward +
+  inverse both ÷N gives a `1/N` round-trip (attenuated, overflow-safe). The
+  unscaled `0x0000` (exact-identity ×filter, but can overflow) is for the
+  low-amplitude all-pass demo ONLY. See ACCEL_ARCH §7.1 for the gain budget.
+- **Channel map preserved.** INTC Ch2 frame-done is re-sourced from `xfft_1`
+  (IFFT done); `NUM_PORTS`, `C_KIND_OF_INTR`, IER, and the ISR are UNCHANGED.
+  GPIO widened to 2 bits each way (ch1 bit1 = bypass, ch2 bit1 = aggregated
+  overflow). Address map adds only coeff BRAM at `0x4200_0000`/16 KiB,
+  CPU-only, excluded from both DMA spaces.
+
+> **🔍 HW-verification status.** Vivado 2025.1 (`xc7a200tfbg484-1`):
+> - **PR3 (coeff BRAM only):** `fpga-synth` PASSED — WNS **+0.042 ns**, WHS
+>   +0.012, DRC clean, LUT 11.64 %, BRAM 27.53 %.
+> - **PR4 (full filter datapath):** `fpga-synth` PASSED — WNS **+0.042 ns**
+>   (identical to master's pre-existing worst path — zero timing regression),
+>   WHS +0.022, DRC clean, LUT 14.13 %, BRAM 30.14 %, bitstream written. The
+>   −4.376 ns single-stage path was fixed by the multiply pipelining above.
+> - **On-DUT HIL** (`fft filter` shell + the `test_filter_*` ZTESTs, incl. the
+>   WireOut 0x27 N-beat check and LP/HP/notch response) — **TODO: run on the
+>   XEM7310 board** and append the results here, mirroring the M1 §3a evidence
+>   format. Encrypted Xilinx IP (xfft/DMA/SmartConnect) is not GHDL-simulatable,
+>   so HIL is the only place the full datapath runs end-to-end.
+
+**Enforcing tests:** host `test_filter_mask` (mask math); on-sim
+`ostomachion_filter_mask` (links/runs on NEORV32); HIL `test_filter_allpass_roundtrip`,
+`test_filter_lowpass`/`highpass`/`notch`, `test_filter_beat_count_invariant`,
+`test_filter_bypass_equals_plain`.
+
+---
+
 ## 6. Peripheral-driver contract
 
 Source: [`i2c_neorv32.c`](zephyr_app/drivers/i2c/i2c_neorv32.c),

@@ -78,16 +78,19 @@ xem7310_top.vhd
 ├── ostomachion_bd_wrapper (Vivado-generated from ostomachion_bd.tcl)
 │   ├── clk_wiz_0 (MMCM → 100 MHz aclk)
 │   ├── proc_sys_reset_0
-│   ├── axi_smc (SmartConnect: 3 masters × 5 slaves)
-│   ├── axi_dma_0 (MM2S + S2MM)
-│   ├── xfft_0 (4096-pt, 16-bit streaming)
-│   ├── tx_bram / rx_bram + BRAM controllers
+│   ├── axi_smc (SmartConnect: 3 masters × 6 slaves)
+│   ├── axi_dma_0 (MM2S + S2MM; S2MM source mux'd in top RTL)
+│   ├── xfft_0 (4096-pt forward) → [filter, in top RTL] → xfft_1 (inverse)
+│   ├── tx_bram / rx_bram / coeff_bram (true-dual-port) + BRAM controllers
 │   ├── axi_intc → mext_irq_o
-│   └── axi_gpio (xfft aresetn gate)
+│   └── axi_gpio (ch1: xfft aresetn gate + filter bypass; ch2: overflow in)
+├── spectral_filter + cmpy_normalizer (per-bin H[k]·X[k], Q2.30→Q1.15) [top RTL]
+├── bypass mux (selects S2MM source: xfft_0 bins vs xfft_1 filtered IFFT) [top RTL]
 ├── okHost / okWire* / okPipe* (FrontPanel)
 ├── fp_uart_bridge (NEORV32 UART ↔ FrontPanel pipes)
 ├── fp_fft_pipe_bridge (host FFT pipe I/O)
-└── fft_beat_counter (AXIS observability → WireOut 0x22)
+├── fft_beat_counter ×2 (xfft_0 → WireOut 0x22, xfft_1 → WireOut 0x27)
+└── overflow sticky latch ×2 (xfft_0 → GPIO2 bit0, aggregated → bit1)
 ```
 
 **Boundary discipline:** CPU sees the accelerator only through the AXI map
@@ -122,12 +125,24 @@ without registered staging — `fft_beat_counter` outputs are registered on
 |--------|-------------|------|---------|
 | AXI DMA | `0x4000_0000` | 128 B | MM2S/S2MM channel registers |
 | AXI INTC | `0x4001_0000` | 128 B | IRQ enable/status/vector |
-| AXI GPIO | `0x4002_0000` | 128 B | xfft `aresetn` gate (ch1 bit 0) + overflow readback (ch2 0x08 bit 0) |
+| AXI GPIO | `0x4002_0000` | 128 B | ch1 bit0 = xfft `aresetn` gate, bit1 = filter bypass; ch2 (0x08) bit0 = xfft_0 overflow, bit1 = aggregated overflow |
+| coeff BRAM | `0x4200_0000` | 16 KiB | Per-bin complex Q1.15 filter mask (4096×32) |
 | TX BRAM | `0x4100_0000` | 32 KiB | Input frame staging (8192×32) |
 | RX BRAM | `0x4100_8000` | 32 KiB | Output frame staging (8192×32) |
 
-**INTC channel map:** Ch0 = MM2S complete, Ch1 = S2MM complete, Ch2 = xfft
-frame-done (edge).  All aggregate onto NEORV32 `mext_irq_i`.
+**INTC channel map:** Ch0 = MM2S complete, Ch1 = S2MM complete, Ch2 =
+frame-done (edge; sourced from the **last** transform stage — the inverse xfft
+when the filter pipeline is built).  All aggregate onto NEORV32 `mext_irq_i`.
+
+**Filter pipeline:** the accelerator is a programmable frequency-domain
+transform — time → FFT (`xfft_0`) → per-bin complex multiply by the coeff-BRAM
+mask `H[k]` (`spectral_filter` + `cmpy_normalizer`, in `xem7310_top.vhd`) →
+IFFT (`xfft_1`) → time.  A GPIO bypass bit selects the S2MM source so the SAME
+bitstream serves both the plain forward FFT (`fft_accel_transform`) and the
+filtered round trip (`fft_accel_transform_filtered`).  The coeff BRAM is the
+only sanctioned **true-dual-port** exception to the single-port BRAM rule (CPU
+writes Port A under the driver mutex; the filter reads Port B during a
+transform; the two never collide).
 
 Full ordering invariants and failure modes: [ACCEL_ARCH.md](ACCEL_ARCH.md).
 
@@ -181,6 +196,9 @@ GitHub-hosted GHDL).  CI sets `ZEPHYR_SIM_TIME=800ms`.
 - **SmartConnect address map** in `ostomachion_bd.tcl` — driver and DTS assume fixed bases
 - **INTC channel assignment** — Zephyr driver demuxes by channel index
 - **Pin constraints** in [`fpga/xem7310/xem7310.xdc`](fpga/xem7310/xem7310.xdc) — board-specific, timing-critical
+- **Filter datapath latency / pipelining** in [`fpga/xem7310/spectral_filter.vhd`](fpga/xem7310/spectral_filter.vhd) — the complex multiply is pipelined to close timing AND latency-matched so TLAST still marks beat N-1; changing stage count without re-matching TVALID/TLAST breaks the exactly-N-beats invariant (verify WireOut 0x27)
+- **xfft_1 scaling word** (`const_ifft_cfg` in `ostomachion_bd.tcl`) — `0x1554` (÷N, overflow-safe) is the production default; see ACCEL_ARCH §3 for the factor-of-N gain budget
+- **coeff BRAM read latency** — `spectral_filter` assumes Port B `READ_LATENCY=1`; an extra register would mis-align H[k] vs X[k] (a 1-bin coefficient shift)
 
 ---
 
