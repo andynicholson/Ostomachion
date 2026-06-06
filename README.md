@@ -2,22 +2,7 @@
   <a href="https://github.com/andynicholson/Ostomachion/actions/workflows/ci.yml?query=branch%3Amaster+event%3Apush">
     <img src="https://github.com/andynicholson/Ostomachion/actions/workflows/ci.yml/badge.svg?branch=master&event=push" alt="CI">
   </a>
-  <a href="https://github.com/andynicholson/Ostomachion/actions/workflows/ci.yml?query=branch%3Amaster+event%3Apush">
-    <img src="https://img.shields.io/github/actions/workflow/status/andynicholson/Ostomachion/ci.yml?branch=master&label=VHDL%20lint" alt="VHDL lint">
-  </a>
-  <a href="https://github.com/andynicholson/Ostomachion/actions/workflows/ci.yml?query=branch%3Amaster+event%3Apush">
-    <img src="https://img.shields.io/github/actions/workflow/status/andynicholson/Ostomachion/ci.yml?branch=master&label=GHDL%20sim" alt="GHDL + Zephyr simulation">
-  </a>
-  <a href="https://github.com/andynicholson/Ostomachion/actions/workflows/ci.yml?query=branch%3Amaster+event%3Apush">
-    <img src="https://img.shields.io/github/actions/workflow/status/andynicholson/Ostomachion/ci.yml?branch=master&label=Twister" alt="Twister test suite">
-  </a>
-  <a href="https://github.com/andynicholson/Ostomachion/actions/workflows/ci.yml?query=branch%3Amaster+event%3Apush">
-    <img src="https://img.shields.io/github/actions/workflow/status/andynicholson/Ostomachion/ci.yml?branch=master&label=Firmware%20analysis" alt="Firmware static analysis">
-  </a>
-  <a href="https://github.com/andynicholson/Ostomachion/actions/workflows/vivado-synth.yml">
-    <img src="https://img.shields.io/badge/Vivado-manual-blueviolet" alt="Vivado synthesis (manual workflow)">
-  </a>
-  <a href="LICENSE">
+   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-GPL--3.0--or--later-green.svg" alt="License: GPL-3.0-or-later">
   </a>
   <a href="LICENSES/Ostomachion-Commercial-1.0.txt">
@@ -35,7 +20,7 @@ philosophy: a small set of composable, interlocking parts that assemble into a c
 
 ## What is Ostomachion?
 
-[NEORV32 RISC-V](https://github.com/stnolting/neorv32) SoC running [Zephyr RTOS](https://www.zephyrproject.org/) on FPGA bare metal - with an extensible accelerator pipeline architecture, including an DMA xFFT RTL pipeline - wrapped in C++20 HAL from fabric to std::span.
+[NEORV32 RISC-V](https://github.com/stnolting/neorv32) SoC running [Zephyr RTOS](https://www.zephyrproject.org/) on FPGA bare metal - with an extensible accelerator pipeline architecture, including an DMA-enabled programmable spectral filter pipeline - wrapped in C++20 HAL from fabric to std::span.
 
 The entire FPGA build is programmatic — a single Tcl script regenerates the full Vivado block design (IP configuration, clock tree, AXI address map, interconnect, and optional ILA debug probes) under headless `vivado -mode batch`, so every bitstream is reproducible from version-controlled text alone with no hand-edited checkpoints or saved GUI state anywhere in the tree.
 
