@@ -32,13 +32,18 @@
 	soc {
 		fft_accel: fft-accel@40000000 {
 			compatible = "ostomachion,fft-accel";
-			/* reg-names:  dma         tx_bram     rx_bram     intc        gpio        */
+			/* reg-names:  dma         tx_bram     rx_bram     intc        gpio        coeff_bram  */
 			reg = <0x40000000 0x80>,
 			      <0x41000000 0x8000>,
 			      <0x41008000 0x8000>,
 			      <0x40010000 0x80>,
-			      <0x40020000 0x80>;
-			reg-names = "dma", "tx_bram", "rx_bram", "intc", "gpio";
+			      <0x40020000 0x80>,
+			      <0x42000000 0x4000>;
+			/* coeff_bram (0x42000000, 16 KB): per-bin complex Q1.15 filter
+			 * mask written by fft_accel_load_coeffs().  Present on the
+			 * filter-pipeline bitstream (this overlay); the driver tolerates
+			 * its absence on a forward-FFT-only build via DT_INST_REG_HAS_NAME. */
+			reg-names = "dma", "tx_bram", "rx_bram", "intc", "gpio", "coeff_bram";
 			/* dma-max-bytes is the runtime guard on RX (S2MM)
 			 * transfer length.  A 4096-point transform uses exactly
 			 * N × 4 = 16384 bytes (ACCEL_ARCH.md §4.4).  The value

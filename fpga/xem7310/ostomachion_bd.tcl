@@ -101,8 +101,10 @@ connect_bd_net [get_bd_pins clk_wiz_0/locked] \
 create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 axi_smc
 set_property -dict {
     CONFIG.NUM_SI {3}
-    CONFIG.NUM_MI {5}
+    CONFIG.NUM_MI {6}
 } [get_bd_cells axi_smc]
+## NUM_MI 5 → 6: M05 fans out to the new filter coefficient BRAM controller
+## (CPU-only slave; excluded from both DMA address spaces below).
 
 ## ── 5. AXI DMA ──────────────────────────────────────────────────────────────
 create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma:7.1 axi_dma_0
@@ -201,6 +203,40 @@ connect_bd_intf_net [get_bd_intf_pins tx_bram_ctrl/BRAM_PORTA] \
                     [get_bd_intf_pins tx_bram/BRAM_PORTA]
 connect_bd_intf_net [get_bd_intf_pins rx_bram_ctrl/BRAM_PORTA] \
                     [get_bd_intf_pins rx_bram/BRAM_PORTA]
+
+## ── 7b. Filter coefficient BRAM (per-bin complex Q1.15) ─────────────────────
+## Holds the 4096-entry filter mask H[k] = {im[31:16], re[15:0]} the fabric
+## complex-multiplier will apply to each FFT bin before the inverse transform.
+## This PR adds ONLY the CPU-writable memory + its AXI slave so the driver's
+## fft_accel_load_coeffs() has a target it can write and read back; the fabric
+## read port and the complex-multiplier datapath land in the next PR, which
+## upgrades this to True_Dual_Port_RAM and wires Port B to the bin-index reader.
+##
+## Single-port for now (matching tx/rx): the AXI BRAM Controller serialises CPU
+## reads/writes on Port A; READ_LATENCY defaults to 1 and
+## Register_PortA_Output_of_Memory_Primitives=false keeps the strict 1-cycle
+## match (same contract as §4.1).  No dangling fabric port, so this PR is
+## self-contained and synthesises with no xem7310_top.vhd change.
+##
+## Depth 4096 × 32 b = 16 KB = 0x4000 (power-of-two), so the AXI SmartConnect
+## alignment constraint (range == depth × 4) is met with no padding — unlike the
+## tx/rx BRAMs, which pad to 8192 for a 32 KB window.
+create_bd_cell -type ip -vlnv xilinx.com:ip:axi_bram_ctrl:4.1 coeff_bram_ctrl
+set_property -dict {
+    CONFIG.SINGLE_PORT_BRAM {1}
+    CONFIG.DATA_WIDTH       {32}
+} [get_bd_cells coeff_bram_ctrl]
+
+create_bd_cell -type ip -vlnv xilinx.com:ip:blk_mem_gen:8.4 coeff_bram
+set_property -dict {
+    CONFIG.Memory_Type        {Single_Port_RAM}
+    CONFIG.Write_Width_A      {32}
+    CONFIG.Write_Depth_A      {4096}
+    CONFIG.Register_PortA_Output_of_Memory_Primitives {false}
+} [get_bd_cells coeff_bram]
+
+connect_bd_intf_net [get_bd_intf_pins coeff_bram_ctrl/BRAM_PORTA] \
+                    [get_bd_intf_pins coeff_bram/BRAM_PORTA]
 
 ## ── 8. AXI Interrupt Controller ─────────────────────────────────────────────
 create_bd_cell -type ip -vlnv xilinx.com:ip:xlconcat:2.1 irq_concat_intc
@@ -323,6 +359,8 @@ connect_bd_intf_net [get_bd_intf_pins axi_smc/M03_AXI] \
                     [get_bd_intf_pins axi_intc_0/s_axi]
 connect_bd_intf_net [get_bd_intf_pins axi_smc/M04_AXI] \
                     [get_bd_intf_pins axi_gpio_0/S_AXI]
+connect_bd_intf_net [get_bd_intf_pins axi_smc/M05_AXI] \
+                    [get_bd_intf_pins coeff_bram_ctrl/S_AXI]
 
 ## ── 10. AXI-Stream: DMA ↔ xfft ─────────────────────────────────────────────
 ## MM2S → xfft: use explicit per-signal connects (not connect_bd_intf_net) so
@@ -410,6 +448,7 @@ foreach pin {
     axi_dma_0/s_axi_lite_aclk
     tx_bram_ctrl/s_axi_aclk
     rx_bram_ctrl/s_axi_aclk
+    coeff_bram_ctrl/s_axi_aclk
     xfft_0/aclk
     axi_intc_0/s_axi_aclk
     axi_gpio_0/s_axi_aclk
@@ -427,6 +466,7 @@ foreach pin {
     axi_dma_0/axi_resetn
     tx_bram_ctrl/s_axi_aresetn
     rx_bram_ctrl/s_axi_aresetn
+    coeff_bram_ctrl/s_axi_aresetn
     axi_intc_0/s_axi_aresetn
     axi_gpio_0/s_axi_aresetn
 } {
@@ -537,6 +577,24 @@ exclude_bd_addr_seg \
 exclude_bd_addr_seg \
     -target_address_space [get_bd_addr_spaces axi_dma_0/Data_S2MM] \
     [get_bd_addr_segs axi_gpio_0/S_AXI/Reg]
+
+## Filter coefficient BRAM: CPU-only slave at 0x42000000, 16 KB (4096 × 32 b).
+## Distinct from the 0x4100_xxxx FFT BRAM window so there is no aliasing.
+## Reachable only from s_axi_cpu (S00_AXI); explicitly excluded from BOTH DMA
+## address spaces so neither MM2S nor S2MM can ever reach the coefficient table
+## (same isolation discipline as the tx/rx/intc/gpio excludes above).
+assign_bd_address \
+    -offset 0x42000000 -range 0x00004000 \
+    -target_address_space [get_bd_addr_spaces s_axi_cpu] \
+    [get_bd_addr_segs coeff_bram_ctrl/S_AXI/Mem0] -force
+
+exclude_bd_addr_seg \
+    -target_address_space [get_bd_addr_spaces axi_dma_0/Data_MM2S] \
+    [get_bd_addr_segs coeff_bram_ctrl/S_AXI/Mem0]
+
+exclude_bd_addr_seg \
+    -target_address_space [get_bd_addr_spaces axi_dma_0/Data_S2MM] \
+    [get_bd_addr_segs coeff_bram_ctrl/S_AXI/Mem0]
 
 ## ── 15. Validate and generate wrapper ───────────────────────────────────────
 validate_bd_design
