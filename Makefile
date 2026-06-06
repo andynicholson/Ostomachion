@@ -276,6 +276,7 @@ test-hw:
 	west build -b $(ZEPHYR_BOARD) $(ZEPHYR_APP_DIR) \
 		-d $(ZEPHYR_BUILD_HW_TEST) --pristine=auto \
 		-- -DCMAKE_PROGRAM_PATH=$(IMAGE_GEN_DIR) \
+		   -DCONFIG_ZTEST=y \
 		   -DDTC_OVERLAY_FILE="$(CURDIR)/$(ZEPHYR_APP_DIR)/app.overlay;$(CURDIR)/$(ZEPHYR_APP_DIR)/app_fpga.overlay" \
 		   -DOVERLAY_CONFIG="$(CURDIR)/$(ZEPHYR_APP_DIR)/prj.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_fpga.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_hw_test.conf"
 	@echo "=== Uploading hardware test firmware via UART bootloader ==="
@@ -296,6 +297,7 @@ test-accel-hw:
 	west build -b $(ZEPHYR_BOARD) $(ZEPHYR_APP_DIR) \
 		-d $(ZEPHYR_BUILD_ACCEL) --pristine=auto \
 		-- -DCMAKE_PROGRAM_PATH=$(IMAGE_GEN_DIR) \
+		   -DCONFIG_ZTEST=y \
 		   -DDTC_OVERLAY_FILE="$(CURDIR)/$(ZEPHYR_APP_DIR)/app.overlay;$(CURDIR)/$(ZEPHYR_APP_DIR)/app_fpga.overlay;$(CURDIR)/$(ZEPHYR_APP_DIR)/app_accel.overlay" \
 		   -DOVERLAY_CONFIG="$(CURDIR)/$(ZEPHYR_APP_DIR)/prj.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_fpga.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_accel.conf;$(CURDIR)/$(ZEPHYR_APP_DIR)/prj_hw_test.conf"
 	@echo "=== Uploading ZTEST accelerator firmware via UART bootloader ==="

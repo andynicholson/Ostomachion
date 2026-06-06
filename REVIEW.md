@@ -228,6 +228,86 @@ verified-correct; the inline derivation comments are load-bearing — keep them.
 
 ---
 
+## 5a. Programmable filter pipeline contract (FFT → filter → IFFT)
+
+Source: [`ostomachion_bd.tcl`](fpga/xem7310/ostomachion_bd.tcl),
+[`spectral_filter.vhd`](fpga/xem7310/spectral_filter.vhd),
+[`cmpy_normalizer.vhd`](fpga/xem7310/cmpy_normalizer.vhd),
+[`xem7310_top.vhd`](fpga/xem7310/xem7310_top.vhd),
+[`fft_accel.c`](zephyr_app/drivers/accel/fft_accel.c),
+[`filter_mask.hpp`](zephyr_app/include/ostomachion/filter_mask.hpp).
+Full architecture: [ACCEL_ARCH.md §7](ACCEL_ARCH.md).
+
+The forward FFT is extended into a programmable frequency-domain transform:
+time → `xfft_0` → per-bin complex multiply `H[k]·X[k]` (`spectral_filter`) →
+Q2.30→Q1.15 round/saturate (`cmpy_normalizer`) → `xfft_1` (inverse) → time. A
+GPIO bypass bit selects the S2MM source so one bitstream serves both the plain
+forward FFT and the filtered round trip.
+
+- **Single multiply stage was a timing trap — now pipelined.** The first
+  `fpga-synth` of the datapath FAILED at **WNS −4.376 ns**: the worst path ran
+  coeff-BRAM(RAMB36) → 2× DSP48E1 → 8× CARRY4 → normalizer in ONE cycle (13
+  logic levels, 14.255 ns logic). The complex multiply is now split into
+  registered product (stage 2) and sum (stage 3) stages that map onto the
+  DSP48E1 pipeline; TVALID/TLAST are pipelined identically so the N-beat /
+  TLAST-on-`N−1` invariant holds (filter latency `L = 3 + NORM_LATENCY`).
+- **`cmpy_normalizer` reduction == firmware `sat_round_q15`.** Round-half-up
+  `>>15` + saturate, verified bit-for-bit against the C++ reference (host test
+  `test_filter_mask` + a local GHDL TB). This is why on-CPU mask composition
+  (`compose_mul`/`compose_max`) predicts the fabric result.
+- **coeff BRAM is the one true-dual-port exception (vs §4.2 single-port).** CPU
+  writes Port A under the driver mutex while no transform runs; the filter reads
+  Port B during a transform; the two never touch the same address. Port B keeps
+  `READ_LATENCY=1` (no output register) and is latency-compensated against `X`,
+  so `H[k]` aligns with `X[k]` — an added register shifts the mask one bin.
+- **Inverse scaling word `0x1554` (÷N) is the production default.** Forward +
+  inverse both ÷N gives a `1/N` round-trip (attenuated, overflow-safe). The
+  unscaled `0x0000` (exact-identity ×filter, but can overflow) is for the
+  low-amplitude all-pass demo ONLY. See ACCEL_ARCH §7.1 for the gain budget.
+- **Channel map preserved.** INTC Ch2 frame-done is re-sourced from `xfft_1`
+  (IFFT done); `NUM_PORTS`, `C_KIND_OF_INTR`, IER, and the ISR are UNCHANGED.
+  GPIO widened to 2 bits each way (ch1 bit1 = bypass, ch2 bit1 = aggregated
+  overflow). Address map adds only coeff BRAM at `0x4200_0000`/16 KiB,
+  CPU-only, excluded from both DMA spaces.
+
+> **🔍 HW-verification status.** Vivado 2025.1 (`xc7a200tfbg484-1`):
+> - **PR3 (coeff BRAM only):** `fpga-synth` PASSED — WNS **+0.042 ns**, WHS
+>   +0.012, DRC clean, LUT 11.64 %, BRAM 27.53 %.
+> - **PR4 (full filter datapath):** `fpga-synth` PASSED — WNS **+0.042 ns**
+>   (identical to master's pre-existing worst path — zero timing regression),
+>   WHS +0.022, DRC clean, LUT 14.13 %, BRAM 30.14 %, bitstream written. The
+>   −4.376 ns single-stage path was fixed by the multiply pipelining above.
+> - **On-DUT HIL — CONFIRMED on the XEM7310 (serial 2537001HTD).** Programmed
+>   the filter bitstream and ran the full `make test-accel-hw` ZTEST image:
+>   - `ostomachion_fft` **14/14 PASS** (the 8 forward-FFT tests + the 6 filter
+>     tests), `ostomachion_filter_mask` **7/7 PASS**.
+>   - **N-beat invariant through the filter chain:** WireOut beat counter read
+>     `last_frame = 4096 = N`, **Outcome A (PG109-correct, no phantom beat)** on
+>     every observed frame — so `cmpy`+normalizer+`xfft_1` preserve exactly N
+>     beats to S2MM.
+>   - **Brick-wall response** (time-domain output energy, pass-tone vs stop-tone
+>     — robust to the ÷N round-trip attenuation): lowpass 34499 vs 2163 (**16×**),
+>     highpass 35640 vs 2598 (**14×**), notch 34821 vs 2731 (**13×**).
+>   - **Bypass == plain:** `transform()` on the filter bitstream peaks at the
+>     forward-FFT bin (bin 8), and all-pass round trip is non-zero with no
+>     overflow. **M-finding verdict: fully verified on hardware.**
+>
+> *(Two pre-existing bugs surfaced during bring-up and were fixed here:*
+> *(1) `make test-accel-hw`/`test-hw` never passed `-DCONFIG_ZTEST=y`, so the*
+> *HIL image had no tests at all — added the flag.  (2) the brick-wall ztests*
+> *re-FFT'd the ÷N-attenuated round-trip output, landing in the quantization*
+> *floor (`pass 7 / stop 15`); rewritten to compare time-domain pass/stop tone*
+> *energy.  The `i2c`/`spi` suites still FAIL on this DUT — they need the MC1*
+> *loopback jumper / I2C-slave hardware that is not fitted, unrelated to the*
+> *accelerator.)*
+
+**Enforcing tests:** host `test_filter_mask` (mask math); on-sim
+`ostomachion_filter_mask` (links/runs on NEORV32); HIL `test_filter_allpass_roundtrip`,
+`test_filter_lowpass`/`highpass`/`notch`, `test_filter_beat_count_invariant`,
+`test_filter_bypass_equals_plain` — **all green on the XEM7310**.
+
+---
+
 ## 6. Peripheral-driver contract
 
 Source: [`i2c_neorv32.c`](zephyr_app/drivers/i2c/i2c_neorv32.c),

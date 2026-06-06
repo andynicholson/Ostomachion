@@ -494,6 +494,109 @@ static int cmd_fft_overflow(const struct shell *sh, size_t argc, char **argv)
 	return pass ? 0 : -EIO;
 }
 
+/* ── "fft filter <lp|hp|bp|notch> <cutoff|lo> [hi]" ─────────────────────────
+ *
+ * Synthesises a brick-wall mask in C (the shell is a C TU and cannot use the
+ * C++ filter_mask.hpp), loads it into the coefficient BRAM, runs one
+ * FFT → filter → IFFT round trip on a two-tone input, then runs a bypass
+ * forward FFT of the result to show the pass/stop band energies.  Requires the
+ * filter bitstream; prints a clear message and returns -ENOTSUP otherwise.
+ *
+ * Cutoffs are folded-frequency bin indices (0..N/2).
+ */
+static int folded_freq_sh(int k, int n)
+{
+	int mirror = n - k;
+	return (k <= mirror) ? k : mirror;
+}
+
+static int cmd_fft_filter(const struct shell *sh, size_t argc, char **argv)
+{
+	if (argc < 3) {
+		shell_print(sh, "Usage: fft filter <lp|hp|bp|notch> <cutoff|lo> [hi]");
+		return -EINVAL;
+	}
+
+	const struct device *dev = DEVICE_DT_GET(DT_NODELABEL(fft_accel));
+	if (!device_is_ready(dev)) {
+		shell_error(sh, "fft_accel not ready");
+		return -ENODEV;
+	}
+
+	const char *kind = argv[1];
+	int lo = atoi(argv[2]);
+	int hi = (argc >= 4) ? atoi(argv[3]) : lo;
+
+	/* Build the brick-wall mask into g_fft_out (reused as coeff scratch — it is
+	 * loaded to fabric BRAM before any transform overwrites it). */
+	struct fft_sample_t *mask = g_fft_out;
+	for (int k = 0; k < FFT_N; k++) {
+		int f = folded_freq_sh(k, FFT_N);
+		bool pass;
+		if (strcmp(kind, "lp") == 0) {
+			pass = (f <= lo);
+		} else if (strcmp(kind, "hp") == 0) {
+			pass = (f >= lo);
+		} else if (strcmp(kind, "bp") == 0) {
+			pass = (f >= lo && f <= hi);
+		} else if (strcmp(kind, "notch") == 0) {
+			pass = (f < lo || f > hi);
+		} else {
+			shell_error(sh, "kind must be lp|hp|bp|notch");
+			return -EINVAL;
+		}
+		mask[k].re = pass ? (int16_t)0x7FFF : 0;
+		mask[k].im = 0;
+	}
+
+	int rc = fft_accel_load_coeffs(dev, mask, FFT_N);
+	if (rc == -ENOTSUP) {
+		shell_error(sh, "[FFT] no filter hardware in this bitstream "
+				"(forward-FFT-only build)");
+		return rc;
+	}
+	if (rc != 0) {
+		shell_error(sh, "[FFT] load_coeffs failed: %d", rc);
+		return rc;
+	}
+
+	/* Two-tone input: a low tone (bin 20) and a high tone (bin 800). */
+	const int LO_TONE = 20, HI_TONE = 800;
+	for (int k = 0; k < FFT_N; k++) {
+		float a = 2.0f * 3.14159265f * LO_TONE * k / (float)FFT_N;
+		float b = 2.0f * 3.14159265f * HI_TONE * k / (float)FFT_N;
+		g_fft_in[k].re = (int16_t)(6000.0f * cosf(a) + 6000.0f * cosf(b));
+		g_fft_in[k].im = 0;
+	}
+
+	uint32_t t0 = k_cycle_get_32();
+	rc = fft_accel_transform_filtered(dev, g_fft_in, g_fft_out, FFT_N);
+	uint32_t t1 = k_cycle_get_32();
+	if (rc != 0) {
+		shell_error(sh, "[FFT] filtered transform failed: %d", rc);
+		return rc;
+	}
+
+	/* Analyse: bypass forward FFT of the filtered time-domain result. */
+	for (int k = 0; k < FFT_N; k++) {
+		g_fft_in[k] = g_fft_out[k];
+	}
+	rc = fft_accel_transform(dev, g_fft_in, g_fft_out, FFT_N);
+	if (rc != 0) {
+		shell_error(sh, "[FFT] analysis FFT failed: %d", rc);
+		return rc;
+	}
+
+	uint32_t lo_mag = fft_magnitude(g_fft_out[LO_TONE].re, g_fft_out[LO_TONE].im);
+	uint32_t hi_mag = fft_magnitude(g_fft_out[HI_TONE].re, g_fft_out[HI_TONE].im);
+	shell_print(sh, "[FFT] filter %s lo=%d hi=%d in %u us: "
+			"tone@%d mag=%u  tone@%d mag=%u%s",
+		    kind, lo, hi, cycles_to_us(t0, t1),
+		    LO_TONE, lo_mag, HI_TONE, hi_mag,
+		    fft_accel_get_last_overflow(dev) ? "  [OVERFLOW]" : "");
+	return 0;
+}
+
 /* ── Shell command registration ──────────────────────────────────────────── */
 
 SHELL_STATIC_SUBCMD_SET_CREATE(fft_sub,
@@ -512,6 +615,10 @@ SHELL_STATIC_SUBCMD_SET_CREATE(fft_sub,
 	SHELL_CMD_ARG(overflow, NULL,
 		      "fft overflow            — amplitude sweep, verify xfft overflow flag",
 		      cmd_fft_overflow, 1, 0),
+	SHELL_CMD_ARG(filter, NULL,
+		      "fft filter <lp|hp|bp|notch> <cutoff|lo> [hi]  — "
+		      "load mask, FFT→filter→IFFT, show pass/stop tone mags",
+		      cmd_fft_filter, 3, 1),
 	SHELL_SUBCMD_SET_END);
 
 SHELL_CMD_REGISTER(fft, &fft_sub, "FFT hardware accelerator", NULL);
