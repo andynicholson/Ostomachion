@@ -132,10 +132,10 @@ architecture rtl of xem7310_top is
   signal coeff_dout     : std_logic_vector(31 downto 0);
 
   -- Native BRAM Port B (from the BD's external coeff_bram_portb interface).
-  -- The Xilinx BMG presents a BYTE address; for a 32-bit-wide, 4096-deep RAM
-  -- that is 14 bits ([13:2] select the word).  spectral_filter drives a 12-bit
-  -- WORD address (the bin index), so shift left by 2 to form the byte address.
-  signal coeff_bram_portb_addr : std_logic_vector(13 downto 0);
+  -- The generated wrapper presents a 32-bit BYTE address; for a 32-bit-wide RAM
+  -- bits [13:2] select the word.  spectral_filter drives a 12-bit WORD address
+  -- (the bin index), so place it at [13:2] (shift left by 2) and zero the rest.
+  signal coeff_bram_portb_addr : std_logic_vector(31 downto 0);
   signal coeff_bram_portb_dout : std_logic_vector(31 downto 0);
 
   -- xfft_1 inverse input (selected by the bypass mux) and output taps.
@@ -475,13 +475,14 @@ begin
       fft1_status_overflow     => fft1_status_overflow,
       filter_bypass_o          => filter_bypass,
       -- Coefficient BRAM Port B (fabric read for the spectral filter).
+      -- Port-B addr is a 32-bit BYTE address; din/we exist (RAM is RW-capable)
+      -- but we never write from fabric (we tie din=0, we=0).  No en/rst ports:
+      -- the BMG Port B is Always_Enabled with no RSTB (see ostomachion_bd.tcl).
       coeff_bram_portb_addr    => coeff_bram_portb_addr,
       coeff_bram_portb_clk     => clk,
       coeff_bram_portb_din     => (others => '0'),
       coeff_bram_portb_dout    => coeff_bram_portb_dout,
-      coeff_bram_portb_en      => '1',
-      coeff_bram_portb_we      => (others => '0'),
-      coeff_bram_portb_rst     => '0'
+      coeff_bram_portb_we      => (others => '0')
     );
 
   -- xfft_0 forward output is exposed as discrete signals (tvalid/tlast came out
@@ -512,8 +513,9 @@ begin
     );
 
   -- Coeff BRAM Port B address: spectral_filter drives a 12-bit WORD address
-  -- (bin index); the BMG Port B takes a BYTE address, so shift left by 2.
-  coeff_bram_portb_addr <= coeff_addr & "00";
+  -- (bin index); the BMG Port B takes a 32-bit BYTE address, so place the word
+  -- index at bits [13:2] (×4) and zero the upper/lower bits.
+  coeff_bram_portb_addr <= (31 downto 14 => '0') & coeff_addr & "00";
   coeff_dout            <= coeff_bram_portb_dout;
 
   -- ── Inverse-FFT input: always the filtered stream ────────────────────────
