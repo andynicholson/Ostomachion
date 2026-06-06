@@ -86,6 +86,24 @@ create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 const_fft_cfg
 set_property -dict {CONFIG.CONST_WIDTH {16} CONFIG.CONST_VAL {5461}} \
     [get_bd_cells const_fft_cfg]
 
+## Inverse-FFT config word for xfft_1 (the IFFT stage of FFT → filter → IFFT).
+##   bit 0     = FWD_INV = 0  → INVERSE transform
+##   bits[2N:2N-1] = SCALE_SCH[N] = "10" (÷4) per radix-4 super-stage, ×6 = ÷4096
+## Word = 0b 0001 0101 0101 0100 = 0x1554 = 5460.
+##
+## Scaling rationale (the factor-of-N trap):  the forward stage (0x1555) already
+## applies 1/N, computing X[k] = (1/N)·Σ x[n]·e^{-j2πnk/N}.  A true inverse needs
+## a TOTAL 1/N, but stacking another ÷N inverse would give 1/N².  We deliberately
+## ship the ÷N-scaled inverse (0x1554) as the OVERFLOW-SAFE production default:
+## the transform is then an attenuated round trip y[n] = (1/N)·inverse(filtered),
+## matching the conservative forward-stage philosophy.  (An UNSCALED inverse word
+## 0x0000 gives an exact-identity round trip but lets internal magnitudes grow
+## ~N and can overflow; it is used only for the low-amplitude all-pass HW demo.)
+## See REVIEW.md and ACCEL_ARCH.md §3 for the full gain budget.
+create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 const_ifft_cfg
+set_property -dict {CONFIG.CONST_WIDTH {16} CONFIG.CONST_VAL {5460}} \
+    [get_bd_cells const_ifft_cfg]
+
 ## ── 3. Reset: Processor System Reset ───────────────────────────────────────
 create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 proc_sys_reset_0
 set_property -dict {
@@ -142,6 +160,30 @@ set_property -dict {
     CONFIG.aresetn                {true}
     CONFIG.ovflo                  {true}
 } [get_bd_cells xfft_0]
+
+## ── 6b. Inverse FFT (xfft_1) — IFFT stage of FFT → filter → IFFT ────────────
+## Identical configuration to xfft_0 except the transform direction is set per
+## frame by the inverse config word (const_ifft_cfg = 0x1554, FWD_INV=0) driven
+## on s_axis_config below.  natural_order output means xfft_1 emits y[n] in
+## sequential time order so it lands in RX BRAM 1:1 (out[i] = BRAM[i]) exactly
+## like the forward path does today — the driver read loop is unchanged.  Shares
+## the same aresetn net as xfft_0 (built in the reset section), so one firmware
+## GPIO reset pulse flushes BOTH transform pipelines and the filter between them.
+create_bd_cell -type ip -vlnv xilinx.com:ip:xfft:9.1 xfft_1
+set_property -dict {
+    CONFIG.transform_length       {4096}
+    CONFIG.implementation_options {pipelined_streaming_io}
+    CONFIG.input_width            {16}
+    CONFIG.phase_factor_width     {16}
+    CONFIG.data_format            {fixed_point}
+    CONFIG.scaling_options        {scaled}
+    CONFIG.rounding_modes         {truncation}
+    CONFIG.throttle_scheme        {nonrealtime}
+    CONFIG.output_ordering        {natural_order}
+    CONFIG.aclken                 {false}
+    CONFIG.aresetn                {true}
+    CONFIG.ovflo                  {true}
+} [get_bd_cells xfft_1]
 
 ## ── 7. BRAM controllers + Block Memory Generators ───────────────────────────
 ## Single-port mode: AXI BRAM controller serialises all reads and writes
@@ -205,18 +247,20 @@ connect_bd_intf_net [get_bd_intf_pins rx_bram_ctrl/BRAM_PORTA] \
                     [get_bd_intf_pins rx_bram/BRAM_PORTA]
 
 ## ── 7b. Filter coefficient BRAM (per-bin complex Q1.15) ─────────────────────
-## Holds the 4096-entry filter mask H[k] = {im[31:16], re[15:0]} the fabric
-## complex-multiplier will apply to each FFT bin before the inverse transform.
-## This PR adds ONLY the CPU-writable memory + its AXI slave so the driver's
-## fft_accel_load_coeffs() has a target it can write and read back; the fabric
-## read port and the complex-multiplier datapath land in the next PR, which
-## upgrades this to True_Dual_Port_RAM and wires Port B to the bin-index reader.
+## Holds the 4096-entry filter mask H[k] = {im[31:16], re[15:0]} the spectral
+## filter applies to each FFT bin before the inverse transform.  Port A is the
+## CPU write/read-back path (fft_accel_load_coeffs); Port B is the fabric read
+## the spectral_filter uses during a transform.
 ##
-## Single-port for now (matching tx/rx): the AXI BRAM Controller serialises CPU
-## reads/writes on Port A; READ_LATENCY defaults to 1 and
-## Register_PortA_Output_of_Memory_Primitives=false keeps the strict 1-cycle
-## match (same contract as §4.1).  No dangling fabric port, so this PR is
-## self-contained and synthesises with no xem7310_top.vhd change.
+## TRUE dual-port — the SANCTIONED exception to the single-port rule (§4.2).
+## tx/rx BRAM are single-port to avoid the concurrent DMA-write / CPU-read
+## stale-read hazard.  The coeff BRAM is dual-port because the two ports never
+## touch the same address concurrently: the CPU writes coefficients on Port A
+## ONLY under the driver mutex while no transform runs, and the spectral_filter
+## reads on Port B ONLY during a transform.  Both ports keep
+## Register_Port?_Output_of_Memory_Primitives=false so the AXI BRAM Controller's
+## default READ_LATENCY=1 matches on Port A and the Port-B fabric read has the
+## strict 1-cycle latency spectral_filter.vhd is built around (§4.1).
 ##
 ## Depth 4096 × 32 b = 16 KB = 0x4000 (power-of-two), so the AXI SmartConnect
 ## alignment constraint (range == depth × 4) is met with no padding — unlike the
@@ -229,14 +273,26 @@ set_property -dict {
 
 create_bd_cell -type ip -vlnv xilinx.com:ip:blk_mem_gen:8.4 coeff_bram
 set_property -dict {
-    CONFIG.Memory_Type        {Single_Port_RAM}
+    CONFIG.Memory_Type        {True_Dual_Port_RAM}
     CONFIG.Write_Width_A      {32}
     CONFIG.Write_Depth_A      {4096}
+    CONFIG.Write_Width_B      {32}
+    CONFIG.Enable_B           {Always_Enabled}
+    CONFIG.Use_RSTB_Pin       {false}
     CONFIG.Register_PortA_Output_of_Memory_Primitives {false}
+    CONFIG.Register_PortB_Output_of_Memory_Primitives {false}
 } [get_bd_cells coeff_bram]
 
+## Port A: AXI BRAM controller (CPU coefficient writes / read-back).
 connect_bd_intf_net [get_bd_intf_pins coeff_bram_ctrl/BRAM_PORTA] \
                     [get_bd_intf_pins coeff_bram/BRAM_PORTA]
+
+## Port B: expose the native BRAM Port B as an external BD interface port so the
+## bin counter + read address live in top-level RTL (architecture rule: the BD
+## holds only Xilinx IP; the spectral_filter glue is in xem7310_top.vhd).  Port
+## B's clock is tied to aclk in the clock-distribution section below.
+make_bd_intf_pins_external [get_bd_intf_pins coeff_bram/BRAM_PORTB]
+set_property name coeff_bram_portb [get_bd_intf_ports BRAM_PORTB_0]
 
 ## ── 8. AXI Interrupt Controller ─────────────────────────────────────────────
 create_bd_cell -type ip -vlnv xilinx.com:ip:xlconcat:2.1 irq_concat_intc
@@ -247,40 +303,50 @@ connect_bd_net [get_bd_pins axi_dma_0/mm2s_introut] \
 connect_bd_net [get_bd_pins axi_dma_0/s2mm_introut] \
                [get_bd_pins irq_concat_intc/In1]
 
-## Tap the xfft status stream out of the BD so xem7310_top.vhd can latch the
-## overflow bit (m_axis_status_tdata[0], qualified by tvalid).  The same tvalid
-## still drives INTC In2 (the frame-done edge).  Per-signal connects are used
-## (not connect_bd_intf_net) so tvalid can fan out to both INTC and the port.
-create_bd_port -dir O fft_status_tvalid
-create_bd_port -dir O fft_status_overflow
+## Tap each xfft's status stream out of the BD so xem7310_top.vhd can latch the
+## overflow bits (m_axis_status_tdata[0], qualified by tvalid).
+##
+## INTC Ch2 (frame-done) source MOVES to xfft_1: "frame done" now means the
+## INVERSE transform finished, i.e. the whole FFT→filter→IFFT result is ready.
+## The driver still waits on S2MM IOC (Ch1) and treats Ch2 as a no-op edge, so
+## this source change needs NO driver/IER/C_KIND_OF_INTR change — Ch0/1/2 keep
+## their meaning (ACCEL_ARCH invariant) and the channel COUNT is unchanged.
+##
+## Two overflow taps go to RTL: xfft_0 (forward) keeps its existing sticky-latch
+## path to GPIO2 bit0; xfft_1 (inverse) feeds the aggregated-overflow bit1.
+create_bd_port -dir O fft_status_tvalid     ;# xfft_0 frame-done/status strobe
+create_bd_port -dir O fft_status_overflow   ;# xfft_0 overflow bit
+create_bd_port -dir O fft1_status_tvalid    ;# xfft_1 frame-done/status strobe
+create_bd_port -dir O fft1_status_overflow  ;# xfft_1 overflow bit
+
+## xfft_0 status strobe → RTL only (no longer drives INTC In2).
 connect_bd_net [get_bd_pins xfft_0/m_axis_status_tvalid] \
-               [get_bd_pins irq_concat_intc/In2]          \
                [get_bd_ports fft_status_tvalid]
 
-## m_axis_status_tdata carries the overflow flag in bit 0.  Its total width
-## depends on the xfft configuration (ovflo-only typically rounds up to 8 bits),
-## so query the actual pin width rather than hard-coding it: a DIN_WIDTH mismatch
-## makes xlslice a synthesis error.  If the bus is already 1 bit wide, connect
-## it straight through; otherwise slice bit 0 out via xlslice.
-set fft_status_tdata_pin [get_bd_pins xfft_0/m_axis_status_tdata]
-set fft_status_width [expr {
-    [get_property LEFT $fft_status_tdata_pin] -
-    [get_property RIGHT $fft_status_tdata_pin] + 1
-}]
-if {$fft_status_width <= 1} {
-    connect_bd_net $fft_status_tdata_pin [get_bd_ports fft_status_overflow]
-} else {
-    create_bd_cell -type ip -vlnv xilinx.com:ip:xlslice:1.0 fft_ovflo_slice
-    set_property -dict {
-        CONFIG.DIN_FROM   {0}
-        CONFIG.DIN_TO     {0}
-        CONFIG.DOUT_WIDTH {1}
-    } [get_bd_cells fft_ovflo_slice]
-    set_property CONFIG.DIN_WIDTH $fft_status_width [get_bd_cells fft_ovflo_slice]
-    connect_bd_net $fft_status_tdata_pin [get_bd_pins fft_ovflo_slice/Din]
-    connect_bd_net [get_bd_pins fft_ovflo_slice/Dout] \
-                   [get_bd_ports fft_status_overflow]
+## xfft_1 status strobe → INTC In2 (frame-done = IFFT done) AND out to RTL.
+connect_bd_net [get_bd_pins xfft_1/m_axis_status_tvalid] \
+               [get_bd_pins irq_concat_intc/In2]          \
+               [get_bd_ports fft1_status_tvalid]
+
+## Slice bit 0 (OVFLO) out of each status bus, width-querying the pin (a
+## DIN_WIDTH mismatch is a synthesis error).  Helper keeps both taps identical.
+proc connect_status_overflow {cell port slice_name} {
+    set pin [get_bd_pins $cell/m_axis_status_tdata]
+    set w [expr {[get_property LEFT $pin] - [get_property RIGHT $pin] + 1}]
+    if {$w <= 1} {
+        connect_bd_net $pin [get_bd_ports $port]
+    } else {
+        create_bd_cell -type ip -vlnv xilinx.com:ip:xlslice:1.0 $slice_name
+        set_property -dict {
+            CONFIG.DIN_FROM {0} CONFIG.DIN_TO {0} CONFIG.DOUT_WIDTH {1}
+        } [get_bd_cells $slice_name]
+        set_property CONFIG.DIN_WIDTH $w [get_bd_cells $slice_name]
+        connect_bd_net $pin [get_bd_pins $slice_name/Din]
+        connect_bd_net [get_bd_pins $slice_name/Dout] [get_bd_ports $port]
+    }
 }
+connect_status_overflow xfft_0 fft_status_overflow  fft_ovflo_slice
+connect_status_overflow xfft_1 fft1_status_overflow fft1_ovflo_slice
 
 create_bd_cell -type ip -vlnv xilinx.com:ip:axi_intc:4.1 axi_intc_0
 set_property -dict {
@@ -297,9 +363,12 @@ connect_bd_net [get_bd_pins irq_concat_intc/dout] [get_bd_pins axi_intc_0/intr]
 
 ## m_axis_status_tready only exists as a flat pin in nonrealtime throttle mode.
 ## In realtime mode the xfft IP ties tready HIGH internally; skip this connection.
-set fft_status_tready [get_bd_pins -quiet xfft_0/m_axis_status_tready]
-if {$fft_status_tready ne ""} {
-    connect_bd_net [get_bd_pins const_one/dout] $fft_status_tready
+## Tie both xfft instances' status-tready high so the status stream never stalls.
+foreach cell {xfft_0 xfft_1} {
+    set st [get_bd_pins -quiet $cell/m_axis_status_tready]
+    if {$st ne ""} {
+        connect_bd_net [get_bd_pins const_one/dout] $st
+    }
 }
 
 ## ── 8b. AXI GPIO for per-transform xfft pipeline reset ──────────────────────
@@ -310,24 +379,40 @@ if {$fft_status_tready ne ""} {
 ## latency (xfft C_ARCH=3 keeps m_axis_data_tvalid=1 across frames; resetting
 ## the pipeline forces tvalid=0 so DMA S2MM waits for the first real output).
 ##
-## Channel 2 (dual) is an INPUT that exposes the latched xfft overflow flag to
-## the CPU at GPIO2_DATA (offset 0x08), bit 0.  The overflow event lives in
-## xfft m_axis_status_tdata[0] (qualified by m_axis_status_tvalid); it is sliced
-## out below, latched in xem7310_top.vhd (cleared by the per-transform xfft
-## aresetn pulse), and fed back into gpio2_io_i.  See ACCEL_ARCH.md §2.3.
+## Output channel (ch1) is now 2 bits:
+##   bit0 = xfft reset gate (1=run, 0=reset) — drives xfft_rst_and via the
+##          gpio_rst_slice (see reset section); C_DOUT_DEFAULT bit0=1 so xfft
+##          starts un-reset on power-up.
+##   bit1 = filter bypass select (1=forward FFT bins to S2MM, 0=filter+IFFT).
+##          Default 0 is harmless because the DRIVER defaults bypass=true and
+##          writes the bit explicitly every transform; the bitstream powers up
+##          forward-FFT-capable regardless.
+## Input channel (ch2) is now 2 bits at GPIO2_DATA (0x08):
+##   bit0 = latched xfft_0 (forward) overflow — existing path, ACCEL_ARCH §2.3.
+##   bit1 = aggregated overflow (xfft_0 OR xfft_1 OR normalizer saturation),
+##          latched in xem7310_top.vhd and fed back via gpio2_io_i.
 ##
 ## AXI address: 0x40020000  range 0x80  (covers GPIO_DATA 0x00 and GPIO2_DATA 0x08)
 create_bd_cell -type ip -vlnv xilinx.com:ip:axi_gpio:2.0 axi_gpio_0
 set_property -dict {
-    CONFIG.C_GPIO_WIDTH    {1}
+    CONFIG.C_GPIO_WIDTH    {2}
     CONFIG.C_ALL_INPUTS    {0}
     CONFIG.C_ALL_OUTPUTS   {1}
     CONFIG.C_DOUT_DEFAULT  {0x00000001}
     CONFIG.C_IS_DUAL       {1}
-    CONFIG.C_GPIO2_WIDTH   {1}
+    CONFIG.C_GPIO2_WIDTH   {2}
     CONFIG.C_ALL_INPUTS_2  {1}
     CONFIG.C_ALL_OUTPUTS_2 {0}
 } [get_bd_cells axi_gpio_0]
+
+## Expose GPIO ch1 bit1 (filter bypass) to RTL for the 2:1 bypass mux.
+create_bd_cell -type ip -vlnv xilinx.com:ip:xlslice:1.0 gpio_bypass_slice
+set_property -dict {
+    CONFIG.DIN_WIDTH {2} CONFIG.DIN_FROM {1} CONFIG.DIN_TO {1} CONFIG.DOUT_WIDTH {1}
+} [get_bd_cells gpio_bypass_slice]
+connect_bd_net [get_bd_pins axi_gpio_0/gpio_io_o] [get_bd_pins gpio_bypass_slice/Din]
+create_bd_port -dir O filter_bypass_o
+connect_bd_net [get_bd_pins gpio_bypass_slice/Dout] [get_bd_ports filter_bypass_o]
 
 ## 1-bit AND gate: xfft_aresetn = gpio_io_o[0] AND peripheral_aresetn.
 ## Allows firmware reset (via GPIO) AND system reset (via proc_sys_reset).
@@ -337,9 +422,10 @@ set_property -dict {
     CONFIG.C_OPERATION {and}
 } [get_bd_cells xfft_rst_and]
 
-## gpio2_io_i (input channel) carries the latched xfft overflow flag from
-## xem7310_top.vhd back to the CPU at GPIO2_DATA (offset 0x08), bit 0.
-create_bd_port -dir I fft_overflow_latched
+## gpio2_io_i (input channel, 2 bits) carries the latched overflow flags from
+## xem7310_top.vhd back to the CPU at GPIO2_DATA (offset 0x08):
+##   bit0 = xfft_0 (forward) overflow   bit1 = aggregated overflow.
+create_bd_port -dir I -from 1 -to 0 fft_overflow_latched
 connect_bd_net [get_bd_ports fft_overflow_latched] \
                [get_bd_pins axi_gpio_0/gpio2_io_i]
 
@@ -385,58 +471,90 @@ connect_bd_net [get_bd_pins axi_dma_0/M_AXIS_MM2S_TDATA]  \
 connect_bd_net [get_bd_pins axi_dma_0/M_AXIS_MM2S_TLAST]  \
                [get_bd_pins xfft_0/s_axis_data_tlast]
 
-## xfft output → S2MM: use per-signal connects (not connect_bd_intf_net) so
-## that TVALID, TREADY and TLAST can be tapped as additional sinks on the
-## same nets and routed out as fft_dbg_m_data_* ports.  These feed the
-## fft_beat_counter module in xem7310_top.vhd which exposes
-## pre_first_tlast_beats via WireOut 0x22 — the definitive measurement of
-## whether xfft really emits N or N+1 output beats per N-point frame.
+## ── xfft_0 output → [RTL filter / bypass] → xfft_1 input → S2MM ────────────
+## The forward-FFT output no longer goes straight to S2MM.  It is brought OUT to
+## xem7310_top.vhd, where a 2:1 bypass mux either passes it straight through or
+## routes it through the spectral_filter (per-bin complex multiply by H[k] +
+## Q2.30→Q1.15 normalize).  The selected stream comes back IN as the inverse
+## FFT input.  xfft_1's output then drives S2MM.  All in the single aclk domain.
 ##
-## The fft_beat_counter (WireOut 0x22) is the standing observability surface
-## for the "exactly N beats per N-point frame" PG109 contract; the per-signal
-## connects below stay as they are so the counter has a live tap of
-## xfft_0/m_axis_data.  See the BRAM read-latency contract in ACCEL_ARCH.md
-## (§4.1) for the related rule that pins out[i] = BRAM[i] in fabric.
+## The fft_dbg_m_data_* taps stay on xfft_0/m_axis_data so WireOut 0x22
+## (fft_beat_counter on the FORWARD output) is unchanged — the standing
+## observability surface for the forward stage's N-beat PG109 contract.  A
+## second beat counter on xfft_1's output (WireOut 0x27) proves the N-beat
+## invariant survives the filter chain through to S2MM (added in xem7310_top).
 
+## ── All AXIS endpoints between the two xffts and S2MM cross to RTL ─────────
+## The bypass mux MUST select the S2MM SOURCE between xfft_0's output (forward
+## bins — what fft_accel_transform() reads) and xfft_1's output (filtered IFFT
+## — what fft_accel_transform_filtered() reads).  So S2MM is no longer wired to
+## a fixed xfft inside the BD: instead xfft_0 out, xfft_1 in, xfft_1 out, and
+## the S2MM slave port are ALL exposed to xem7310_top.vhd, which contains the
+## spectral_filter and the 2:1 source mux.  This keeps the forward-FFT-only
+## result bit-identical to today when bypass=1.
+
+## xfft_0 m_axis_data (forward FFT output X[k]) → RTL.
+## fft_dbg_m_data_tvalid/tlast still feed the FORWARD beat counter (WireOut
+## 0x22) — unchanged observability of xfft_0.
 create_bd_port -dir O fft_dbg_m_data_tvalid
-create_bd_port -dir O fft_dbg_m_data_tready
 create_bd_port -dir O fft_dbg_m_data_tlast
+create_bd_port -dir O fft0_m_tdata -from 31 -to 0
+create_bd_port -dir I fft0_m_tready
+connect_bd_net [get_bd_pins xfft_0/m_axis_data_tvalid] [get_bd_ports fft_dbg_m_data_tvalid]
+connect_bd_net [get_bd_pins xfft_0/m_axis_data_tlast]  [get_bd_ports fft_dbg_m_data_tlast]
+connect_bd_net [get_bd_pins xfft_0/m_axis_data_tdata]  [get_bd_ports fft0_m_tdata]
+connect_bd_net [get_bd_ports fft0_m_tready]            [get_bd_pins xfft_0/m_axis_data_tready]
 
-connect_bd_net [get_bd_pins xfft_0/m_axis_data_tvalid]   \
-               [get_bd_pins axi_dma_0/S_AXIS_S2MM_TVALID] \
-               [get_bd_ports fft_dbg_m_data_tvalid]
-connect_bd_net [get_bd_pins axi_dma_0/S_AXIS_S2MM_TREADY] \
-               [get_bd_pins xfft_0/m_axis_data_tready]    \
-               [get_bd_ports fft_dbg_m_data_tready]
-connect_bd_net [get_bd_pins xfft_0/m_axis_data_tlast]    \
-               [get_bd_pins axi_dma_0/S_AXIS_S2MM_TLAST]  \
-               [get_bd_ports fft_dbg_m_data_tlast]
-connect_bd_net [get_bd_pins xfft_0/m_axis_data_tdata]    \
-               [get_bd_pins axi_dma_0/S_AXIS_S2MM_TDATA]
+## xfft_1 s_axis_data (inverse FFT input — the filtered stream from RTL).
+create_bd_port -dir I fft1_s_tvalid
+create_bd_port -dir I fft1_s_tlast
+create_bd_port -dir I fft1_s_tdata -from 31 -to 0
+create_bd_port -dir O fft1_s_tready
+connect_bd_net [get_bd_ports fft1_s_tvalid] [get_bd_pins xfft_1/s_axis_data_tvalid]
+connect_bd_net [get_bd_ports fft1_s_tlast]  [get_bd_pins xfft_1/s_axis_data_tlast]
+connect_bd_net [get_bd_ports fft1_s_tdata]  [get_bd_pins xfft_1/s_axis_data_tdata]
+connect_bd_net [get_bd_pins xfft_1/s_axis_data_tready] [get_bd_ports fft1_s_tready]
 
-## xfft config: connect the constant word and tvalid using explicit net names so
-## that Vivado does not silently ignore the connection if the interface pin is
-## only accessible through the disaggregated S_AXIS_CONFIG interface.
-## tvalid=1 (const_one) ensures the config handshake fires as soon as the xfft
-## asserts s_axis_config_tready (at the start of each input frame in nonrealtime
-## mode), keeping the same scaling/direction config in effect for every frame.
-set fft_cfg_tdata_pin [get_bd_pins -quiet xfft_0/s_axis_config_tdata]
-set fft_cfg_tvalid_pin [get_bd_pins -quiet xfft_0/s_axis_config_tvalid]
-if {$fft_cfg_tdata_pin eq "" || $fft_cfg_tvalid_pin eq ""} {
-    puts "WARNING: xfft_0/s_axis_config_{tdata,tvalid} not found as flat pins."
-    puts "         Attempting interface-level connection via xlconstant — "
-    puts "         verify S_AXIS_CONFIG is connected in the generated schematic."
-} else {
-    connect_bd_net [get_bd_pins const_fft_cfg/dout] $fft_cfg_tdata_pin
-    connect_bd_net [get_bd_pins const_one/dout]     $fft_cfg_tvalid_pin
-    ## TLAST must be 1 on the single-beat config transfer (AXI-Stream protocol
-    ## requirement). Without TLAST some xfft implementations will not latch the
-    ## configuration word. Drive with the same const_one used for TVALID.
-    set fft_cfg_tlast_pin [get_bd_pins -quiet xfft_0/s_axis_config_tlast]
-    if {$fft_cfg_tlast_pin ne ""} {
-        connect_bd_net [get_bd_pins const_one/dout] $fft_cfg_tlast_pin
+## xfft_1 m_axis_data (inverse FFT output y[n]) → RTL (one mux input).
+create_bd_port -dir O fft1_m_tvalid
+create_bd_port -dir O fft1_m_tlast
+create_bd_port -dir O fft1_m_tdata -from 31 -to 0
+create_bd_port -dir I fft1_m_tready
+connect_bd_net [get_bd_pins xfft_1/m_axis_data_tvalid] [get_bd_ports fft1_m_tvalid]
+connect_bd_net [get_bd_pins xfft_1/m_axis_data_tlast]  [get_bd_ports fft1_m_tlast]
+connect_bd_net [get_bd_pins xfft_1/m_axis_data_tdata]  [get_bd_ports fft1_m_tdata]
+connect_bd_net [get_bd_ports fft1_m_tready]            [get_bd_pins xfft_1/m_axis_data_tready]
+
+## DMA S2MM slave ← RTL (driven by the bypass mux: xfft_0 out OR xfft_1 out).
+## These are the SINK side; RTL drives tvalid/tlast/tdata, BD returns tready.
+create_bd_port -dir I s2mm_tvalid
+create_bd_port -dir I s2mm_tlast
+create_bd_port -dir I s2mm_tdata -from 31 -to 0
+create_bd_port -dir O s2mm_tready
+connect_bd_net [get_bd_ports s2mm_tvalid] [get_bd_pins axi_dma_0/S_AXIS_S2MM_TVALID]
+connect_bd_net [get_bd_ports s2mm_tlast]  [get_bd_pins axi_dma_0/S_AXIS_S2MM_TLAST]
+connect_bd_net [get_bd_ports s2mm_tdata]  [get_bd_pins axi_dma_0/S_AXIS_S2MM_TDATA]
+connect_bd_net [get_bd_pins axi_dma_0/S_AXIS_S2MM_TREADY] [get_bd_ports s2mm_tready]
+
+## xfft config words: forward (const_fft_cfg=0x1555) on xfft_0, inverse
+## (const_ifft_cfg=0x1554) on xfft_1.  Same const_one tvalid/tlast handshake.
+proc connect_fft_config {cell cfg_const} {
+    set tdata  [get_bd_pins -quiet $cell/s_axis_config_tdata]
+    set tvalid [get_bd_pins -quiet $cell/s_axis_config_tvalid]
+    if {$tdata eq "" || $tvalid eq ""} {
+        puts "WARNING: $cell/s_axis_config_{tdata,tvalid} not found as flat pins."
+        puts "         Verify S_AXIS_CONFIG is connected in the generated schematic."
+    } else {
+        connect_bd_net [get_bd_pins $cfg_const/dout] $tdata
+        connect_bd_net [get_bd_pins const_one/dout]  $tvalid
+        set tlast [get_bd_pins -quiet $cell/s_axis_config_tlast]
+        if {$tlast ne ""} {
+            connect_bd_net [get_bd_pins const_one/dout] $tlast
+        }
     }
 }
+connect_fft_config xfft_0 const_fft_cfg
+connect_fft_config xfft_1 const_ifft_cfg
 
 ## ── 11. Clock distribution ──────────────────────────────────────────────────
 set aclk [get_bd_pins clk_wiz_0/clk_out1]
@@ -450,6 +568,7 @@ foreach pin {
     rx_bram_ctrl/s_axi_aclk
     coeff_bram_ctrl/s_axi_aclk
     xfft_0/aclk
+    xfft_1/aclk
     axi_intc_0/s_axi_aclk
     axi_gpio_0/s_axi_aclk
 } {
@@ -476,9 +595,24 @@ foreach pin {
 ## xfft_0/aresetn is controlled by the AND gate (xfft_rst_and), NOT directly
 ## by peripheral_aresetn.  This lets firmware reset the xfft pipeline per-transform
 ## (via AXI GPIO) while still passing system reset through to the xfft.
-connect_bd_net [get_bd_pins axi_gpio_0/gpio_io_o] [get_bd_pins xfft_rst_and/Op1]
+##
+## xfft_1 (inverse) shares the SAME gated reset net, and Op1 is driven from GPIO
+## bit 0 ONLY (the aresetn gate) — slice it out since the GPIO is now 2 bits
+## wide (bit1 = filter bypass, which must NOT gate the reset).  One firmware
+## reset pulse therefore flushes BOTH transform pipelines and the spectral
+## filter between them, so no stale tvalid/tlast can leak across a transform.
+create_bd_cell -type ip -vlnv xilinx.com:ip:xlslice:1.0 gpio_rst_slice
+set_property -dict {
+    CONFIG.DIN_WIDTH {2}
+    CONFIG.DIN_FROM  {0}
+    CONFIG.DIN_TO    {0}
+    CONFIG.DOUT_WIDTH {1}
+} [get_bd_cells gpio_rst_slice]
+connect_bd_net [get_bd_pins axi_gpio_0/gpio_io_o] [get_bd_pins gpio_rst_slice/Din]
+connect_bd_net [get_bd_pins gpio_rst_slice/Dout]  [get_bd_pins xfft_rst_and/Op1]
 connect_bd_net $peripheral_rstn                   [get_bd_pins xfft_rst_and/Op2]
 connect_bd_net [get_bd_pins xfft_rst_and/Res]     [get_bd_pins xfft_0/aresetn]
+connect_bd_net [get_bd_pins xfft_rst_and/Res]     [get_bd_pins xfft_1/aresetn]
 
 ## Expose the xfft aresetn so xem7310_top.vhd can clear the overflow latch on
 ## the per-transform reset pulse (firmware drives GPIO bit 0 low → aresetn low).
