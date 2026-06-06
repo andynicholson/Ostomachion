@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  source intent: ACCEL_ARCH.md §2 — system block + AXI memory map.
+  NEORV32 → XBUS→AXI4-Lite bridge → AXI SmartConnect (3 masters × 6 slaves):
+  AXI DMA, AXI INTC, AXI GPIO, TX/RX BRAM, coeff BRAM. DMA streams through the
+  forward/filter/inverse xfft chain. INTC Ch2 = xfft_1 (inverse) frame-done.
+  Palette shared with docs/img/logo.svg.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 470" width="900" height="470"
+     font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+     role="img" aria-labelledby="t d">
+  <title id="t">Accelerator system block and AXI memory map</title>
+  <desc id="d">NEORV32 reaches the accelerator through an XBUS-to-AXI4-Lite bridge and an AXI SmartConnect that fans out to the DMA, interrupt controller, GPIO, and the TX, RX and coefficient BRAMs.</desc>
+
+  <rect x="0" y="0" width="900" height="470" rx="10" fill="#FBF8F3" stroke="#E3D9C8"/>
+  <defs>
+    <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1B2A4E"/>
+    </marker>
+    <style>
+      .b{stroke:#1B2A4E;stroke-width:1.5;}
+      .t{fill:#fff;font-size:13px;font-weight:600;}
+      .a{fill:#eaf0f8;font-size:10px;}
+      .f{stroke:#1B2A4E;stroke-width:1.6;fill:none;marker-end:url(#ar2);}
+      .irq{stroke:#7E2D40;stroke-width:1.6;fill:none;marker-end:url(#ar2);}
+      .cap{fill:#0F1729;font-size:12px;}
+    </style>
+  </defs>
+
+  <text x="20" y="30" fill="#1B2A4E" font-size="15" font-weight="700">Accelerator fabric — CPU view through the AXI map</text>
+
+  <!-- NEORV32 -->
+  <rect class="b" x="30" y="70" width="150" height="60" rx="6" fill="#1B2A4E"/>
+  <text class="t" x="105" y="96" text-anchor="middle">NEORV32 RISC-V</text>
+  <text class="a" x="105" y="114" text-anchor="middle">XBUS master</text>
+
+  <!-- bridge -->
+  <rect class="b" x="30" y="170" width="150" height="56" rx="6" fill="#2E4374"/>
+  <text class="t" x="105" y="193" text-anchor="middle">xbus2axi4_bridge</text>
+  <text class="a" x="105" y="210" text-anchor="middle">XBUS → AXI4-Lite</text>
+
+  <!-- SmartConnect -->
+  <rect class="b" x="30" y="266" width="150" height="150" rx="6" fill="#155263"/>
+  <text class="t" x="105" y="300" text-anchor="middle">AXI</text>
+  <text class="t" x="105" y="318" text-anchor="middle">SmartConnect</text>
+  <text class="a" x="105" y="340" text-anchor="middle">3 masters ×</text>
+  <text class="a" x="105" y="354" text-anchor="middle">6 slaves</text>
+  <text class="a" x="105" y="376" text-anchor="middle">+ DMA MM2S/S2MM</text>
+
+  <line class="f" x1="105" y1="130" x2="105" y2="168"/>
+  <line class="f" x1="105" y1="226" x2="105" y2="264"/>
+
+  <!-- slaves column -->
+  <g>
+    <rect class="b" x="300" y="70"  width="250" height="46" rx="6" fill="#4A6FA5"/>
+    <text class="t" x="316" y="98">AXI DMA</text>
+    <text class="a" x="540" y="98" text-anchor="end">0x4000_0000 · 128 B</text>
+
+    <rect class="b" x="300" y="126" width="250" height="46" rx="6" fill="#4A6FA5"/>
+    <text class="t" x="316" y="154">AXI INTC</text>
+    <text class="a" x="540" y="154" text-anchor="end">0x4001_0000 · 128 B</text>
+
+    <rect class="b" x="300" y="182" width="250" height="46" rx="6" fill="#4A6FA5"/>
+    <text class="t" x="316" y="204">AXI GPIO</text>
+    <text class="a" x="540" y="201" text-anchor="end">0x4002_0000 · 128 B</text>
+    <text class="a" x="540" y="216" text-anchor="end">ch1 reset/bypass · ch2 overflow</text>
+
+    <rect class="b" x="300" y="238" width="250" height="46" rx="6" fill="#6B97B5"/>
+    <text class="t" x="316" y="266">TX BRAM</text>
+    <text class="a" x="540" y="266" text-anchor="end">0x4100_0000 · 32 KB</text>
+
+    <rect class="b" x="300" y="294" width="250" height="46" rx="6" fill="#6B97B5"/>
+    <text class="t" x="316" y="322">RX BRAM</text>
+    <text class="a" x="540" y="322" text-anchor="end">0x4100_8000 · 32 KB</text>
+
+    <rect class="b" x="300" y="350" width="250" height="46" rx="6" fill="#9E3D3D"/>
+    <text class="t" x="316" y="378">coeff BRAM H[k]</text>
+    <text class="a" x="540" y="375" text-anchor="end">0x4200_0000 · 16 KB</text>
+    <text class="a" x="540" y="389" text-anchor="end">CPU-only (DMA-excluded)</text>
+  </g>
+
+  <!-- fan-out -->
+  <line class="f" x1="180" y1="320" x2="298" y2="93"/>
+  <line class="f" x1="180" y1="328" x2="298" y2="149"/>
+  <line class="f" x1="180" y1="336" x2="298" y2="205"/>
+  <line class="f" x1="180" y1="344" x2="298" y2="261"/>
+  <line class="f" x1="180" y1="352" x2="298" y2="317"/>
+  <line class="f" x1="180" y1="360" x2="298" y2="373"/>
+
+  <!-- xfft chain box -->
+  <rect class="b" x="610" y="238" width="260" height="102" rx="6" fill="#2F5D62"/>
+  <text class="t" x="740" y="264" text-anchor="middle">xfft_0 → spectral_filter → xfft_1</text>
+  <text class="a" x="740" y="284" text-anchor="middle">forward · H[k]·X[k] · inverse</text>
+  <text class="a" x="740" y="300" text-anchor="middle">AXI-Stream Q1.15, N=4096</text>
+  <text class="a" x="740" y="320" text-anchor="middle">bypass mux selects S2MM source</text>
+
+  <!-- DMA → xfft chain and BRAM↔chain -->
+  <line class="f" x1="550" y1="261" x2="608" y2="270"/>
+  <text class="cap" x="566" y="256">stream</text>
+  <line class="f" x1="550" y1="317" x2="608" y2="305"/>
+
+  <!-- coeff Port B feed -->
+  <line class="irq" x1="550" y1="373" x2="700" y2="342" stroke-dasharray="5 3"/>
+  <text x="612" y="368" fill="#7E2D40" font-size="10">Port B H[k]</text>
+
+  <!-- INTC → CPU: route up into the clear band above the boxes, then across,
+       avoiding the SmartConnect→slave fan-out in the 180–298 x-band. -->
+  <path class="irq" d="M300,138 L218,138 L218,56 L105,56 L105,68"/>
+  <text x="332" y="46" fill="#7E2D40" font-size="11">INTC Ch0 MM2S · Ch1 S2MM · Ch2 xfft_1 frame-done → mext_irq_i</text>
+</svg>

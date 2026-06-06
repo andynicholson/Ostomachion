@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  source intent: README.md "RTL design" — fabric hierarchy.
+  xem7310_top.vhd (hand-written board RTL: clocks, NEORV32, bridge, FrontPanel,
+  UART bridge, spectral_filter, bypass mux, beat counters) wraps the Tcl-
+  generated ostomachion_bd_wrapper (Xilinx IP only: MMCM, SmartConnect, AXI DMA,
+  xfft_0 + xfft_1, TX/RX/coeff BRAM, INTC, GPIO). Palette shared with logo.svg.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 560" width="860" height="560"
+     font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+     role="img" aria-labelledby="t d">
+  <title id="t">FPGA fabric hierarchy</title>
+  <desc id="d">The hand-written board top xem7310_top.vhd wraps the Tcl-generated block-design wrapper. The board RTL holds the CPU, bridge, FrontPanel and the spectral filter and bypass mux; the wrapper holds the Xilinx IP — clocking, interconnect, DMA, the two FFT cores and the TX, RX and coefficient BRAMs.</desc>
+
+  <rect x="0" y="0" width="860" height="560" rx="10" fill="#FBF8F3" stroke="#E3D9C8"/>
+  <defs>
+    <style>
+      .box{stroke:#1B2A4E;stroke-width:1.4;}
+      .t{fill:#fff;font-size:12px;font-weight:600;}
+      .a{fill:#eef2f8;font-size:10px;}
+      .hdr{fill:#0F1729;font-size:13px;font-weight:700;}
+    </style>
+  </defs>
+
+  <text x="20" y="30" fill="#1B2A4E" font-size="15" font-weight="700">Fabric hierarchy — hand-written top wraps the Tcl block design</text>
+
+  <!-- OUTER: xem7310_top -->
+  <rect class="box" x="24" y="48" width="812" height="492" rx="10" fill="#fff" stroke="#1B2A4E" stroke-width="2"/>
+  <text class="hdr" x="40" y="72">xem7310_top.vhd — board RTL (hand-written)</text>
+  <text x="40" y="90" fill="#3a4a63" font-size="10">IBUFDS · NEORV32 · xbus2axi4_bridge · okHost/Wire/Pipe · fp_uart_bridge · fp_fft_pipe_bridge</text>
+
+  <!-- board-RTL-only blocks across the top -->
+  <rect class="box" x="40"  y="104" width="150" height="48" rx="6" fill="#1B2A4E"/>
+  <text class="t" x="115" y="126" text-anchor="middle">NEORV32 + bridge</text>
+  <text class="a" x="115" y="142" text-anchor="middle">XBUS → AXI4-Lite</text>
+
+  <rect class="box" x="206" y="104" width="170" height="48" rx="6" fill="#2E4374"/>
+  <text class="t" x="291" y="126" text-anchor="middle">spectral_filter</text>
+  <text class="a" x="291" y="142" text-anchor="middle">H[k]·X[k] · Q2.30→Q1.15</text>
+
+  <rect class="box" x="392" y="104" width="120" height="48" rx="6" fill="#E76F51"/>
+  <text class="t" x="452" y="126" text-anchor="middle">bypass mux</text>
+  <text class="a" x="452" y="142" text-anchor="middle">GPIO ch1 bit1</text>
+
+  <rect class="box" x="528" y="104" width="140" height="48" rx="6" fill="#7E2D40"/>
+  <text class="t" x="598" y="126" text-anchor="middle">FrontPanel</text>
+  <text class="a" x="598" y="142" text-anchor="middle">Wire/Pipe · beat ctrs</text>
+
+  <rect class="box" x="684" y="104" width="136" height="48" rx="6" fill="#155263"/>
+  <text class="t" x="752" y="126" text-anchor="middle">fp_uart_bridge</text>
+  <text class="a" x="752" y="142" text-anchor="middle">UART ↔ pipes</text>
+
+  <!-- INNER: bd wrapper -->
+  <rect class="box" x="40" y="176" width="780" height="348" rx="8" fill="#f3ede2" stroke="#9E3D3D" stroke-width="1.8"/>
+  <text x="56" y="200" fill="#7E2D40" font-size="13" font-weight="700">ostomachion_bd_wrapper — Tcl-generated (Xilinx IP only)</text>
+
+  <!-- clocking / reset -->
+  <rect class="box" x="56"  y="216" width="220" height="56" rx="6" fill="#2F5D62"/>
+  <text class="t" x="166" y="240" text-anchor="middle">clk_wiz (MMCM) · proc_sys_reset</text>
+  <text class="a" x="166" y="258" text-anchor="middle">200 MHz LVDS → 100 MHz aclk</text>
+
+  <!-- smartconnect -->
+  <rect class="box" x="296" y="216" width="240" height="56" rx="6" fill="#155263"/>
+  <text class="t" x="416" y="240" text-anchor="middle">AXI SmartConnect</text>
+  <text class="a" x="416" y="258" text-anchor="middle">3 masters × 6 slaves</text>
+
+  <!-- dma + intc + gpio -->
+  <rect class="box" x="556" y="216" width="248" height="56" rx="6" fill="#4A6FA5"/>
+  <text class="t" x="680" y="240" text-anchor="middle">AXI DMA · INTC · GPIO</text>
+  <text class="a" x="680" y="258" text-anchor="middle">MM2S/S2MM · IRQ · reset/bypass/ovf</text>
+
+  <!-- xfft pair -->
+  <rect class="box" x="56" y="296" width="360" height="64" rx="6" fill="#1B2A4E"/>
+  <text class="t" x="236" y="322" text-anchor="middle">xfft_0 (forward)  ·  xfft_1 (inverse)</text>
+  <text class="a" x="236" y="342" text-anchor="middle">4096-pt · 16-bit Q1.15 · pipelined streaming · natural order</text>
+
+  <!-- BRAMs -->
+  <rect class="box" x="436" y="296" width="368" height="64" rx="6" fill="#6B97B5"/>
+  <text class="t" x="620" y="318" text-anchor="middle">TX BRAM · RX BRAM · coeff BRAM</text>
+  <text class="a" x="620" y="336" text-anchor="middle">0x4100_0000 · 0x4100_8000 · 0x4200_0000 (H[k])</text>
+
+  <!-- address map strip -->
+  <rect class="box" x="56" y="384" width="748" height="120" rx="6" fill="#fff" stroke="#9E3D3D"/>
+  <text x="72" y="406" fill="#7E2D40" font-size="12" font-weight="700">AXI map (CPU view)</text>
+  <text x="72"  y="428" fill="#0F1729" font-size="11">0x4000_0000  AXI DMA (128 B)</text>
+  <text x="72"  y="448" fill="#0F1729" font-size="11">0x4001_0000  AXI INTC (128 B)</text>
+  <text x="72"  y="468" fill="#0F1729" font-size="11">0x4002_0000  AXI GPIO (128 B)</text>
+  <text x="430" y="428" fill="#0F1729" font-size="11">0x4100_0000  TX BRAM (32 KB)</text>
+  <text x="430" y="448" fill="#0F1729" font-size="11">0x4100_8000  RX BRAM (32 KB)</text>
+  <text x="430" y="468" fill="#0F1729" font-size="11">0x4200_0000  coeff BRAM (16 KB)</text>
+  <text x="72"  y="492" fill="#3a4a63" font-size="10">Application logic (filter, mux, beat counters) lives in the board RTL; only Xilinx IP lives in the BD wrapper.</text>
+</svg>

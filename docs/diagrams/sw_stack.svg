@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  source intent: README.md "Architecture" — the application-to-hardware stack.
+  ZTEST/app → C++20 HAL → Zephyr BSP → board RTL (xem7310_top) →
+  ostomachion_bd_wrapper (Xilinx IP) → XEM7310 hardware / GHDL sim.
+  Palette shared with docs/img/logo.svg.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 470" width="720" height="470"
+     font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+     role="img" aria-labelledby="t d">
+  <title id="t">Application-to-hardware software stack</title>
+  <desc id="d">Six layers from the test and application code, through the C++20 HAL, Zephyr BSP, board RTL and the Tcl-generated block-design wrapper, down to the XEM7310 hardware or GHDL simulation.</desc>
+
+  <rect x="0" y="0" width="720" height="470" rx="10" fill="#FBF8F3" stroke="#E3D9C8"/>
+  <defs>
+    <marker id="ar5" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3a4a63"/>
+    </marker>
+    <style>
+      .layer{stroke:#1B2A4E;stroke-width:1.5;}
+      .t{fill:#fff;font-size:14px;font-weight:600;}
+      .a{fill:#eef2f8;font-size:11px;}
+      .seam{stroke:#3a4a63;stroke-width:1.4;fill:none;marker-end:url(#ar5);}
+      .if{fill:#5b4636;font-size:10px;font-style:italic;}
+    </style>
+  </defs>
+
+  <text x="20" y="30" fill="#1B2A4E" font-size="15" font-weight="700">From std::span to fabric — the layer cake</text>
+
+  <!-- L1 app -->
+  <rect class="layer" x="120" y="50" width="480" height="50" rx="6" fill="#1B2A4E"/>
+  <text class="t" x="360" y="72" text-anchor="middle">Application · ZTEST suites</text>
+  <text class="a" x="360" y="90" text-anchor="middle">test_spi · test_i2c · test_gpio · test_fft_accel</text>
+
+  <!-- L2 HAL -->
+  <rect class="layer" x="120" y="124" width="480" height="50" rx="6" fill="#2E4374"/>
+  <text class="t" x="360" y="146" text-anchor="middle">C++20 HAL — ostomachion::</text>
+  <text class="a" x="360" y="164" text-anchor="middle">zero-overhead wrappers · std::span · [[nodiscard]] · noexcept</text>
+
+  <!-- L3 BSP -->
+  <rect class="layer" x="120" y="198" width="480" height="50" rx="6" fill="#155263"/>
+  <text class="t" x="360" y="220" text-anchor="middle">Zephyr BSP</text>
+  <text class="a" x="360" y="238" text-anchor="middle">out-of-tree drivers · DTS overlays · Kconfig</text>
+
+  <!-- L4 board RTL -->
+  <rect class="layer" x="120" y="272" width="480" height="50" rx="6" fill="#2F5D62"/>
+  <text class="t" x="360" y="294" text-anchor="middle">Board RTL — xem7310_top.vhd</text>
+  <text class="a" x="360" y="312" text-anchor="middle">NEORV32 · XBUS→AXI4-Lite bridge · FrontPanel · UART bridge</text>
+
+  <!-- L5 BD wrapper -->
+  <rect class="layer" x="120" y="346" width="480" height="50" rx="6" fill="#9E3D3D"/>
+  <text class="t" x="360" y="368" text-anchor="middle">ostomachion_bd_wrapper (Tcl → Xilinx IP)</text>
+  <text class="a" x="360" y="386" text-anchor="middle">AXI DMA · xfft ×2 · spectral filter · BRAM · INTC · MMCM</text>
+
+  <!-- L6 hw -->
+  <rect class="layer" x="120" y="420" width="480" height="40" rx="6" fill="#B5651D"/>
+  <text class="t" x="360" y="445" text-anchor="middle">XEM7310-A200 hardware  /  GHDL simulation</text>
+
+  <!-- seams with interface labels -->
+  <line class="seam" x1="360" y1="100" x2="360" y2="123"/>
+  <text class="if" x="370" y="116">SpiDevice · FftAccel</text>
+  <line class="seam" x1="360" y1="174" x2="360" y2="197"/>
+  <text class="if" x="370" y="190">spi_transceive() · fft_accel_transform()</text>
+  <line class="seam" x1="360" y1="248" x2="360" y2="271"/>
+  <text class="if" x="370" y="264">MMIO sys_read32 / sys_write32</text>
+  <line class="seam" x1="360" y1="322" x2="360" y2="345"/>
+  <text class="if" x="370" y="338">s_axi_cpu · clocks · mext_irq</text>
+  <line class="seam" x1="360" y1="396" x2="360" y2="419"/>
+</svg>

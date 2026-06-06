@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  source intent: ACCEL_ARCH.md §7 — programmable frequency-domain filter.
+  TX BRAM → MM2S → xfft_0 (forward X[k]) → spectral_filter (Y[k]=H[k]·X[k],
+  Q2.30→Q1.15) → xfft_1 (inverse y[n]) → 2:1 bypass mux → S2MM → RX BRAM.
+  coeff BRAM Port B feeds H[k]. GPIO ch1 bit1 selects the bypass mux.
+  Palette shared with docs/img/logo.svg.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 320" width="920" height="320"
+     font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+     role="img" aria-labelledby="t d">
+  <title id="t">Programmable frequency-domain filter datapath</title>
+  <desc id="d">Forward FFT, per-bin complex multiply by a coefficient-BRAM mask H[k], inverse FFT, and a bypass multiplexer selecting the S2MM source.</desc>
+
+  <rect x="0" y="0" width="920" height="320" rx="10" fill="#FBF8F3" stroke="#E3D9C8"/>
+
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1B2A4E"/>
+    </marker>
+    <style>
+      .box{stroke:#1B2A4E;stroke-width:1.5;rx:6;}
+      .lbl{fill:#0F1729;font-size:13px;}
+      .sub{fill:#3a4a63;font-size:11px;}
+      .flow{stroke:#1B2A4E;stroke-width:1.6;fill:none;marker-end:url(#ar);}
+      .coef{stroke:#7E2D40;stroke-width:1.6;fill:none;marker-end:url(#ar);stroke-dasharray:5 3;}
+      .ttl{fill:#fff;font-size:13px;font-weight:600;}
+    </style>
+  </defs>
+
+  <!-- title strip -->
+  <text x="20" y="28" fill="#1B2A4E" font-size="15" font-weight="700">time → FFT → per-bin filter H[k] → IFFT → time</text>
+
+  <!-- TX BRAM -->
+  <rect class="box" x="20"  y="120" width="92" height="56" fill="#4A6FA5"/>
+  <text class="ttl" x="66" y="144" text-anchor="middle">TX BRAM</text>
+  <text x="66" y="162" text-anchor="middle" fill="#eaf0f8" font-size="10">0x4100_0000</text>
+
+  <!-- xfft_0 forward -->
+  <rect class="box" x="158" y="116" width="120" height="64" fill="#155263"/>
+  <text class="ttl" x="218" y="142" text-anchor="middle">xfft_0</text>
+  <text x="218" y="160" text-anchor="middle" fill="#dff0f0" font-size="10">forward · X[k]</text>
+  <text x="218" y="173" text-anchor="middle" fill="#dff0f0" font-size="9">cfg 0x1555</text>
+
+  <!-- spectral_filter -->
+  <rect class="box" x="322" y="112" width="150" height="72" fill="#2E4374"/>
+  <text class="ttl" x="397" y="138" text-anchor="middle">spectral_filter</text>
+  <text x="397" y="156" text-anchor="middle" fill="#e6ecf6" font-size="10">Y[k] = H[k]·X[k]</text>
+  <text x="397" y="170" text-anchor="middle" fill="#e6ecf6" font-size="9">Q2.30 → Q1.15</text>
+
+  <!-- xfft_1 inverse -->
+  <rect class="box" x="516" y="116" width="120" height="64" fill="#155263"/>
+  <text class="ttl" x="576" y="142" text-anchor="middle">xfft_1</text>
+  <text x="576" y="160" text-anchor="middle" fill="#dff0f0" font-size="10">inverse · y[n]</text>
+  <text x="576" y="173" text-anchor="middle" fill="#dff0f0" font-size="9">cfg 0x1554 (÷N)</text>
+
+  <!-- bypass mux -->
+  <polygon class="box" points="690,112 722,128 722,168 690,184" fill="#E76F51"/>
+  <text x="700" y="146" fill="#fff" font-size="11" font-weight="600">mux</text>
+  <text x="706" y="202" text-anchor="middle" fill="#7E2D40" font-size="10">GPIO ch1 bit1</text>
+  <text x="706" y="214" text-anchor="middle" fill="#7E2D40" font-size="9">bypass select</text>
+
+  <!-- RX BRAM -->
+  <rect class="box" x="800" y="120" width="100" height="56" fill="#4A6FA5"/>
+  <text class="ttl" x="850" y="144" text-anchor="middle">RX BRAM</text>
+  <text x="850" y="162" text-anchor="middle" fill="#eaf0f8" font-size="10">0x4100_8000</text>
+
+  <!-- coeff BRAM -->
+  <rect class="box" x="322" y="244" width="150" height="52" fill="#9E3D3D"/>
+  <text class="ttl" x="397" y="266" text-anchor="middle">coeff BRAM H[k]</text>
+  <text x="397" y="283" text-anchor="middle" fill="#f3e0e0" font-size="9">Port B · 0x4200_0000</text>
+
+  <!-- main flow arrows -->
+  <line class="flow" x1="112" y1="148" x2="156" y2="148"/>
+  <text class="sub" x="134" y="140" text-anchor="middle">MM2S</text>
+  <line class="flow" x1="278" y1="148" x2="320" y2="148"/>
+  <line class="flow" x1="472" y1="148" x2="514" y2="148"/>
+  <line class="flow" x1="636" y1="148" x2="688" y2="148"/>
+  <line class="flow" x1="722" y1="148" x2="798" y2="148"/>
+  <text class="sub" x="762" y="140" text-anchor="middle">S2MM</text>
+
+  <!-- coeff feed (Port B → filter) -->
+  <line class="coef" x1="397" y1="244" x2="397" y2="186"/>
+  <text x="404" y="218" fill="#7E2D40" font-size="10">H[k]</text>
+
+  <!-- bypass path: xfft_0 output also routed straight to the mux (forward-only) -->
+  <path class="flow" d="M218,116 L218,70 L700,70 L700,112" stroke-dasharray="6 4"/>
+  <text class="sub" x="450" y="62" text-anchor="middle">bypass = 1 : forward FFT bins → S2MM (filter + IFFT skipped)</text>
+</svg>

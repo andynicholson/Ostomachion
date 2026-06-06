@@ -102,8 +102,9 @@ Fabric hierarchy (**`xem7310_top.vhd`** vs **`ostomachion_bd_wrapper`**) matches
 | AXI DMA ctrl | — | ✅ | `0x40000000` | MEI (IRQ 11) | `ostomachion,fft-accel` |
 | TX BRAM | — | ✅ | `0x41000000` (32 KB) | — | (part of fft-accel) |
 | RX BRAM | — | ✅ | `0x41008000` (32 KB) | — | (part of fft-accel) |
+| coeff BRAM | — | ✅ | `0x42000000` (16 KB) | — | (part of fft-accel; filter `H[k]`) |
 | AXI INTC | — | ✅ | `0x40010000` | — | (part of fft-accel) |
-| AXI GPIO (xfft reset gate) | — | ✅ | `0x40020000` | — | (BD only; fft aresetn) |
+| AXI GPIO | — | ✅ | `0x40020000` | — | (BD only; ch1 reset+bypass, ch2 overflow) |
 
 IMEM: 128 KB (FPGA), 64 KB (sim).  DMEM: 64 KB both targets.
 
@@ -111,10 +112,11 @@ IMEM: 128 KB (FPGA), 64 KB (sim).  DMEM: 64 KB both targets.
 
 **Interrupt topology**: AXI INTC (PG099) aggregates three sources into the
 single NEORV32 MEI line: Ch0 = DMA MM2S, Ch1 = DMA S2MM, Ch2 = xfft
-frame-complete (`m_axis_status_tvalid`).  The driver ISR reads INTC ISR to
-identify pending sources and acknowledges via INTC IAR after clearing DMA
-DMASR (W1C) to avoid spurious re-entry on the level-sensitive channels.
-Full contract in [ACCEL_ARCH.md](ACCEL_ARCH.md).
+frame-complete (`m_axis_status_tvalid`, sourced from the inverse `xfft_1` on
+the filter bitstream).  The driver ISR reads INTC ISR to identify pending
+sources and acknowledges via INTC IAR after clearing DMA DMASR (W1C) to avoid
+spurious re-entry on the level-sensitive channels.  Full contract in
+[ACCEL_ARCH.md](ACCEL_ARCH.md).
 
 ---
 
@@ -170,15 +172,30 @@ static fft_sample_t in[4096]{};   // Q1.15 complex: {int16_t re, int16_t im}
 static fft_sample_t out[4096]{};
 
 in[0].re = 16384;  // 0.5 in Q1.15
-int err = accel.transform(in, out, 4096);
+int err = accel.transform(in, out, 4096);          // forward FFT → bins
 
 if (accel.last_overflow()) { /* reduce input amplitude */ }
 ```
 
+The same device also drives the programmable filter (FFT → per-bin
+`H[k]·X[k]` → IFFT → time).  Load a mask, then run the filtered round trip:
+
+```cpp
+static ostomachion::filter::Coeff scratch[4096];   // synth target
+accel.set_lowpass(4096, /*cutoff bin*/ 256, /*gain*/ 0x7FFF, scratch);
+int err = accel.transform_filtered(in, out, 4096);  // out is time-domain
+```
+
+`load_coeffs()` writes a raw 4096-entry table; `set_lowpass/highpass/bandpass/
+notch()` synthesise a brick-wall mask (via `ostomachion::filter`) and load it.
+The synthesis math is host-testable and bit-identical to the fabric — see
+[ACCEL_ARCH.md §7](ACCEL_ARCH.md#7-programmable-frequency-domain-filter-fft--filter--ifft).
+
 Via the generic platform interface:
 
 ```cpp
-ostomachion::FftOpDesc op{in, out, 4096};
+ostomachion::FftOpDesc    op{in, out, 4096};        // forward FFT
+ostomachion::FilterOpDesc fop{in, out, 4096};       // filtered round trip
 int err = accel.submit(op);  // type-safe, no RTTI
 ```
 
@@ -204,7 +221,7 @@ Kconfig: `CONFIG_FFT_ACCEL=y`, `CONFIG_FFT_ACCEL_TIMEOUT_MS` (default 100 ms).
 namespace ostomachion {
 
 struct AccelOpDesc {
-    enum class Type : unsigned { Unknown = 0, Fft = 1 };
+    enum class Type : unsigned { Unknown = 0, Fft = 1, Filter = 2 };
     const Type type_id;
 protected:
     explicit AccelOpDesc(Type t = Type::Unknown) : type_id{t} {}
@@ -426,17 +443,14 @@ for simulation.
 
 ## Interrupt architecture
 
-```
-INTC Ch0 — AXI DMA MM2S complete / error
-INTC Ch1 — AXI DMA S2MM complete / error      ──OR──→  NEORV32 mext_irq_i
-INTC Ch2 — xfft frame complete (m_axis_status_tvalid)
-```
+![AXI INTC interrupt routing](docs/diagrams/intc_routing.svg)
 
 - Channels 0 and 1 are **level-sensitive** (`C_KIND_OF_INTR` bits 0–1 = 0):
   `mm2s_introut`/`s2mm_introut` stay asserted until DMASR is W1C-cleared.
 - Channel 2 is **edge-sensitive** (`C_KIND_OF_INTR` bit 2 = 1):
-  `m_axis_status_tvalid` is a single-cycle pulse.  It marks frame
-  completion, not overflow specifically — see [ACCEL_ARCH.md §2.2](ACCEL_ARCH.md#22-axi-intc-channel-wiring).
+  `m_axis_status_tvalid` is a single-cycle pulse from the inverse `xfft_1`
+  (frame complete = whole filtered result ready).  It marks frame completion,
+  not overflow specifically — see [ACCEL_ARCH.md §2.2](ACCEL_ARCH.md#22-axi-intc-channel-wiring).
 
 The ISR clears DMASR (W1C) before writing INTC IAR; acknowledging IAR before
 the source de-asserts causes the ISR bit to re-assert immediately (spurious

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  source intent: DEVELOPER.md "Interrupt architecture".
+  AXI INTC aggregates three sources into NEORV32 mext_irq_i:
+  Ch0 = DMA MM2S (level), Ch1 = DMA S2MM (level), Ch2 = xfft_1 (inverse)
+  m_axis_status_tvalid frame-done (edge). Palette shared with docs/img/logo.svg.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 250" width="760" height="250"
+     font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+     role="img" aria-labelledby="t d">
+  <title id="t">AXI INTC interrupt routing</title>
+  <desc id="d">Three interrupt sources — DMA MM2S complete, DMA S2MM complete, and the inverse FFT frame-done pulse — are aggregated by the AXI interrupt controller into the NEORV32 external interrupt line.</desc>
+
+  <rect x="0" y="0" width="760" height="250" rx="10" fill="#FBF8F3" stroke="#E3D9C8"/>
+  <defs>
+    <marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1B2A4E"/>
+    </marker>
+    <style>
+      .b{stroke:#1B2A4E;stroke-width:1.5;}
+      .t{fill:#fff;font-size:12px;font-weight:600;}
+      .a{fill:#eaf0f8;font-size:10px;}
+      .f{stroke:#1B2A4E;stroke-width:1.6;fill:none;marker-end:url(#ar3);}
+    </style>
+  </defs>
+
+  <text x="20" y="30" fill="#1B2A4E" font-size="15" font-weight="700">AXI INTC → NEORV32 mext_irq_i</text>
+
+  <!-- channels -->
+  <rect class="b" x="30" y="58"  width="250" height="44" rx="6" fill="#4A6FA5"/>
+  <text class="t" x="44" y="80">Ch0 · DMA MM2S complete/err</text>
+  <text class="a" x="266" y="96" text-anchor="end">level</text>
+
+  <rect class="b" x="30" y="112" width="250" height="44" rx="6" fill="#4A6FA5"/>
+  <text class="t" x="44" y="134">Ch1 · DMA S2MM complete/err</text>
+  <text class="a" x="266" y="150" text-anchor="end">level</text>
+
+  <rect class="b" x="30" y="166" width="250" height="44" rx="6" fill="#2F5D62"/>
+  <text class="t" x="44" y="186">Ch2 · xfft_1 frame-done</text>
+  <text class="a" x="266" y="204" text-anchor="end">edge · m_axis_status_tvalid</text>
+
+  <!-- INTC OR block -->
+  <rect class="b" x="400" y="100" width="150" height="70" rx="6" fill="#155263"/>
+  <text class="t" x="475" y="130" text-anchor="middle">AXI INTC</text>
+  <text class="a" x="475" y="150" text-anchor="middle">aggregate (OR)</text>
+
+  <!-- NEORV32 -->
+  <rect class="b" x="610" y="100" width="120" height="70" rx="6" fill="#1B2A4E"/>
+  <text class="t" x="670" y="130" text-anchor="middle">NEORV32</text>
+  <text class="a" x="670" y="150" text-anchor="middle">mext_irq_i</text>
+
+  <line class="f" x1="280" y1="80"  x2="398" y2="120"/>
+  <line class="f" x1="280" y1="134" x2="398" y2="134"/>
+  <line class="f" x1="280" y1="188" x2="398" y2="150"/>
+  <line class="f" x1="550" y1="135" x2="608" y2="135"/>
+
+  <text x="20" y="238" fill="#3a4a63" font-size="11">ISR clears DMASR (W1C) before INTC IAR; Ch2 marks IFFT frame completion, not overflow.</text>
+</svg>

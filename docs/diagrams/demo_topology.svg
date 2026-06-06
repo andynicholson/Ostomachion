@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  source intent: tools/fft_demo/README.md topology.
+  PyQt6 GUI ↔ FrontPanel (BTPipe 0x81/0xA1 samples, WireIn 0x01 filter cfg,
+  WireOut 0x25/0x26/0x28 status) ↔ demo firmware (CPU in the loop) ↔ the
+  forward/filter/inverse xfft accelerator. Palette shared with docs/img/logo.svg.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" width="900" height="300"
+     font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+     role="img" aria-labelledby="t d">
+  <title id="t">FFT demo host-to-fabric topology</title>
+  <desc id="d">The PyQt6 desktop app exchanges sample frames and a filter-control word with the demo firmware over FrontPanel pipes and wires; the firmware drives the forward, filter and inverse FFT accelerator and echoes status back.</desc>
+
+  <rect x="0" y="0" width="900" height="300" rx="10" fill="#FBF8F3" stroke="#E3D9C8"/>
+  <defs>
+    <marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1B2A4E"/>
+    </marker>
+    <style>
+      .b{stroke:#1B2A4E;stroke-width:1.5;}
+      .t{fill:#fff;font-size:13px;font-weight:600;}
+      .a{fill:#eaf0f8;font-size:10px;}
+      .f{stroke:#1B2A4E;stroke-width:1.6;fill:none;marker-end:url(#ar4);}
+      .c{stroke:#7E2D40;stroke-width:1.6;fill:none;marker-end:url(#ar4);stroke-dasharray:5 3;}
+      .cap{fill:#3a4a63;font-size:10px;}
+    </style>
+  </defs>
+
+  <text x="20" y="30" fill="#1B2A4E" font-size="15" font-weight="700">PyQt6 demo ↔ FrontPanel ↔ firmware ↔ accelerator</text>
+
+  <!-- GUI -->
+  <rect class="b" x="30" y="80" width="170" height="150" rx="6" fill="#1B2A4E"/>
+  <text class="t" x="115" y="116" text-anchor="middle">PyQt6 GUI</text>
+  <text class="a" x="115" y="138" text-anchor="middle">3-pane plots</text>
+  <text class="a" x="115" y="154" text-anchor="middle">numpy reference</text>
+  <text class="a" x="115" y="170" text-anchor="middle">filter sliders</text>
+  <text class="a" x="115" y="186" text-anchor="middle">H[k] mask overlay</text>
+
+  <!-- firmware -->
+  <rect class="b" x="380" y="80" width="180" height="150" rx="6" fill="#2E4374"/>
+  <text class="t" x="470" y="116" text-anchor="middle">demo firmware</text>
+  <text class="a" x="470" y="138" text-anchor="middle">CPU in the loop</text>
+  <text class="a" x="470" y="154" text-anchor="middle">pop → transform → push</text>
+  <text class="a" x="470" y="170" text-anchor="middle">load_coeffs on cfg change</text>
+  <text class="a" x="470" y="186" text-anchor="middle">fifo_in / fifo_out (XBUS)</text>
+
+  <!-- accelerator -->
+  <rect class="b" x="700" y="80" width="170" height="150" rx="6" fill="#155263"/>
+  <text class="t" x="785" y="116" text-anchor="middle">accelerator</text>
+  <text class="a" x="785" y="138" text-anchor="middle">xfft_0</text>
+  <text class="a" x="785" y="154" text-anchor="middle">spectral_filter</text>
+  <text class="a" x="785" y="170" text-anchor="middle">xfft_1</text>
+  <text class="a" x="785" y="186" text-anchor="middle">AXI DMA · BRAM</text>
+
+  <!-- GUI ↔ firmware: samples + control -->
+  <line class="f" x1="200" y1="108" x2="378" y2="108"/>
+  <text class="cap" x="289" y="100" text-anchor="middle">BTPipe 0x81 — input samples →</text>
+  <line class="f" x1="378" y1="132" x2="200" y2="132"/>
+  <text class="cap" x="289" y="148" text-anchor="middle">← BTPipe 0xA1 — output frame</text>
+  <line class="c" x1="200" y1="170" x2="378" y2="170"/>
+  <text class="cap" x="289" y="184" text-anchor="middle" fill="#7E2D40">WireIn 0x01 — filter cfg →</text>
+  <line class="c" x1="378" y1="200" x2="200" y2="200"/>
+  <text class="cap" x="289" y="216" text-anchor="middle" fill="#7E2D40">← WireOut 0x25/0x26/0x28 status</text>
+
+  <!-- firmware ↔ accelerator -->
+  <line class="f" x1="560" y1="140" x2="698" y2="140"/>
+  <text class="cap" x="629" y="132" text-anchor="middle">transform[_filtered]()</text>
+  <line class="f" x1="698" y1="168" x2="560" y2="168"/>
+  <text class="cap" x="629" y="184" text-anchor="middle">bins / filtered time</text>
+
+  <text x="20" y="270" fill="#3a4a63" font-size="11">Bypass → output is forward-FFT bins; filter active → output is the ÷N inverse-transformed time-domain signal (WireOut 0x28 echo tells the host which).</text>
+</svg>
