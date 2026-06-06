@@ -47,12 +47,20 @@ LOG_MODULE_REGISTER(test_fft_accel, LOG_LEVEL_INF);
 
 /* ── Shared file-scope buffers ───────────────────────────────────────────────
  * Declaring all buffers at file scope prevents the linker stacking multiple
- * per-function 'static' arrays of 16 KB each in BSS simultaneously.  g_coeffs
- * (16 KB) is the filter coefficient scratch used by the filter tests below.
+ * per-function 'static' arrays of 16 KB each in BSS simultaneously.  Only TWO
+ * 16 KB buffers exist: the filter tests synthesise their coefficient mask into
+ * g_out (reinterpreted as Coeff[], layout-compatible with fft_sample_t), load
+ * it to the fabric coeff BRAM, then reuse g_out for the transform result — so
+ * no third 16 KB buffer is needed (DMEM is only 64 KB; three would overflow).
  */
 static fft_sample_t g_in[FFT_N];
 static fft_sample_t g_out[FFT_N];
-static ostomachion::filter::Coeff g_coeffs[FFT_N];
+
+/* g_out reinterpreted as a coefficient scratch (same 32-bit {im,re} layout). */
+static inline ostomachion::filter::Coeff *coeff_scratch(void)
+{
+    return reinterpret_cast<ostomachion::filter::Coeff *>(g_out);
+}
 
 /* ── Fixture ─────────────────────────────────────────────────────────────────*/
 
@@ -351,8 +359,8 @@ namespace flt = ostomachion::filter;
 static bool filter_hw_present(const struct device *dev)
 {
     ostomachion::FftAccel accel(dev);
-    flt::all_pass(FFT_N, 0x7FFF, g_coeffs);
-    int rc = accel.load_coeffs(g_coeffs, FFT_N);
+    flt::all_pass(FFT_N, 0x7FFF, coeff_scratch());
+    int rc = accel.load_coeffs(coeff_scratch(), FFT_N);
     if (rc == -ENOTSUP) {
         return false;
     }
@@ -396,8 +404,8 @@ ZTEST_F(ostomachion_fft, test_filter_allpass_roundtrip)
     }
 
     ostomachion::FftAccel accel(fixture->dev);
-    flt::all_pass(FFT_N, 0x7FFF, g_coeffs);
-    zassert_equal(accel.load_coeffs(g_coeffs, FFT_N), 0, "coeff load failed");
+    flt::all_pass(FFT_N, 0x7FFF, coeff_scratch());
+    zassert_equal(accel.load_coeffs(coeff_scratch(), FFT_N), 0, "coeff load failed");
 
     int rc = accel.transform_filtered(g_in, g_out, FFT_N);
     zassert_equal(rc, 0, "filtered transform failed: %d", rc);
@@ -435,7 +443,7 @@ ZTEST_F(ostomachion_fft, test_filter_lowpass)
     }
 
     ostomachion::FftAccel accel(fixture->dev);
-    zassert_equal(accel.set_lowpass(FFT_N, /*cutoff=*/100, 0x7FFF, g_coeffs), 0,
+    zassert_equal(accel.set_lowpass(FFT_N, /*cutoff=*/100, 0x7FFF, coeff_scratch()), 0,
                   "set_lowpass failed");
 
     int rc = accel.transform_filtered(g_in, g_out, FFT_N);
@@ -471,7 +479,7 @@ ZTEST_F(ostomachion_fft, test_filter_highpass)
     }
 
     ostomachion::FftAccel accel(fixture->dev);
-    zassert_equal(accel.set_highpass(FFT_N, /*cutoff=*/100, 0x7FFF, g_coeffs), 0,
+    zassert_equal(accel.set_highpass(FFT_N, /*cutoff=*/100, 0x7FFF, coeff_scratch()), 0,
                   "set_highpass failed");
 
     int rc = accel.transform_filtered(g_in, g_out, FFT_N);
@@ -507,7 +515,7 @@ ZTEST_F(ostomachion_fft, test_filter_notch)
     }
 
     ostomachion::FftAccel accel(fixture->dev);
-    zassert_equal(accel.set_notch(FFT_N, NOTCH - 2, NOTCH + 2, 0x7FFF, g_coeffs), 0,
+    zassert_equal(accel.set_notch(FFT_N, NOTCH - 2, NOTCH + 2, 0x7FFF, coeff_scratch()), 0,
                   "set_notch failed");
 
     int rc = accel.transform_filtered(g_in, g_out, FFT_N);
@@ -537,8 +545,8 @@ ZTEST_F(ostomachion_fft, test_filter_beat_count_invariant)
 
     fill_cosine(1);
     ostomachion::FftAccel accel(fixture->dev);
-    flt::all_pass(FFT_N, 0x7FFF, g_coeffs);
-    zassert_equal(accel.load_coeffs(g_coeffs, FFT_N), 0, "coeff load failed");
+    flt::all_pass(FFT_N, 0x7FFF, coeff_scratch());
+    zassert_equal(accel.load_coeffs(coeff_scratch(), FFT_N), 0, "coeff load failed");
 
     int rc = accel.transform_filtered(g_in, g_out, FFT_N);
     zassert_equal(rc, 0, "filtered transform failed: %d", rc);
