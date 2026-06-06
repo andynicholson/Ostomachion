@@ -16,6 +16,8 @@ Fabric hierarchy (**`xem7310_top.vhd`** vs **`ostomachion_bd_wrapper`**) matches
 ├── .github/workflows/ci.yml          # GitHub Actions CI (sim, twister, vhdl-lint, …)
 ├── .github/workflows/vivado-synth.yml  # Manual Vivado synthesis (self-hosted runner)
 ├── docs/
+│   ├── img/logo.svg                  # Project logo
+│   ├── diagrams/                     # Hand-authored architecture SVGs (README / ACCEL_ARCH / …)
 │   ├── acceptance_test_procedure.md  # HIL / self-hosted runner expectations
 │   └── neorv32_upgrade_notes.md    # Checklist before bumping the neorv32 submodule
 ├── scripts/
@@ -28,11 +30,15 @@ Fabric hierarchy (**`xem7310_top.vhd`** vs **`ostomachion_bd_wrapper`**) matches
 ├── rtl/
 │   └── neorv32_wrapper.vhd           # Simulation wrapper around neorv32_top
 ├── fpga/xem7310/
-│   ├── xem7310_top.vhd               # Board top: IBUFDS, NEORV32, bridge, BD wrapper, FrontPanel
+│   ├── xem7310_top.vhd               # Board top: IBUFDS, NEORV32, bridge, BD wrapper, FrontPanel, filter, bypass mux
+│   ├── spectral_filter.vhd           # Per-bin complex filter Y[k]=H[k]·X[k] (between xfft_0 and xfft_1)
+│   ├── cmpy_normalizer.vhd           # Q2.30 → Q1.15 round/saturate for the filter multiply
+│   ├── fft_beat_counter.vhd          # Passive xfft beat/TLAST counter (WireOut 0x22 / 0x27)
 │   ├── fp_uart_bridge.vhd            # FrontPanel UART bridge (async FIFOs + Pipe endpoints)
+│   ├── fp_fft_pipe_bridge.vhd        # FrontPanel FFT sample pipes + filter cfg / status (WireIn 0x01, WireOut 0x28)
 │   ├── xem7310.xdc                   # Vivado pin + timing constraints (XC7A200T)
 │   ├── build.tcl                     # Non-interactive Vivado batch script
-│   ├── ostomachion_bd.tcl            # IP Integrator block design (AXI DMA, xfft, BRAMs, INTC)
+│   ├── ostomachion_bd.tcl            # IP Integrator block design (AXI DMA, xfft ×2, TX/RX/coeff BRAM, INTC, GPIO)
 │   ├── check_build.tcl               # Post-build quality gates (timing, utilisation, DRC)
 │   ├── program_jtag.tcl              # JTAG bitstream programming (fallback)
 │   ├── program_flash.tcl             # SPI flash programming (persistent boot)
@@ -43,6 +49,16 @@ Fabric hierarchy (**`xem7310_top.vhd`** vs **`ostomachion_bd_wrapper`**) matches
 ├── neorv32/                          # NEORV32 RTL submodule (v1.11.6)
 │   └── rtl/system_integration/xbus2axi4_bridge.vhd   # XBUS → AXI4-Lite (FPGA fabric; vhdl-lint CI)
 ├── sw/test_gpio_uart/                # Bare-metal smoke-test firmware (C)
+├── host_tests/                       # Host (non-Zephyr) unit tests
+│   ├── CMakeLists.txt                # ctest project (run via remote-build.sh math)
+│   └── test_filter_mask.cpp          # filter_mask.hpp synthesis vs golden model
+├── tools/fft_demo/                   # PyQt6 desktop demo (drives the fabric filter live)
+│   ├── app.py                        # GUI: sliders, filter panel, 3-pane plots
+│   ├── transport.py                  # FrontPanel ok.FrontPanel wrapper (pipes + filter cfg/status)
+│   ├── sources.py                    # Q1.15 signal generators + pipe pack/unpack
+│   ├── filter_mask.py                # Host mask synth (mirrors filter_mask.hpp) + cfg/status words
+│   ├── smoke_test.py / test_*.py     # CLI smoke test + mask / mock-UI / HIL tests
+│   └── README.md                     # Demo usage
 └── zephyr_app/
     ├── CMakeLists.txt
     ├── testcase.yaml                 # West Twister test matrix (app root → buildable project)
@@ -51,6 +67,7 @@ Fabric hierarchy (**`xem7310_top.vhd`** vs **`ostomachion_bd_wrapper`**) matches
     ├── prj_fpga.conf                 # Overlay — FPGA (IRQ drivers, larger stacks)
     ├── prj_accel.conf                # Overlay — FFT accelerator
     ├── prj_shell.conf                # Overlay — interactive shell (no ZTEST)
+    ├── prj_demo.conf                 # Overlay — host-pipe FFT demo (CONFIG_FFT_DEMO)
     ├── prj_hw_test.conf              # Overlay — verbose hardware test
     ├── app.overlay                   # DTS — spi0, i2c0 (simulation + FPGA base)
     ├── app_fpga.overlay              # DTS overlay — 115200 baud, FPGA clocks
@@ -58,6 +75,7 @@ Fabric hierarchy (**`xem7310_top.vhd`** vs **`ostomachion_bd_wrapper`**) matches
     ├── include/
     │   ├── ostomachion/
     │   │   ├── accel.hpp             # Generic Accel / AccelOpDesc base (RTTI-free)
+    │   │   ├── filter_mask.hpp       # Brick-wall mask synthesis (host- + target-compilable)
     │   │   └── hal/
     │   │       ├── gpio.hpp          # GpioOutput + GpioInput
     │   │       ├── spi.hpp           # SpiDevice (std::span API)
@@ -67,13 +85,15 @@ Fabric hierarchy (**`xem7310_top.vhd`** vs **`ostomachion_bd_wrapper`**) matches
     │       └── fft_accel.h           # Public C API: fft_accel_transform(), _get_last_overflow()
     ├── src/
     │   ├── main.cpp                  # LED heartbeat thread (K_THREAD_DEFINE)
-    │   ├── fft_shell.c               # "fft" shell commands
+    │   ├── fft_shell.c               # "fft" shell commands (incl. "fft filter")
+    │   ├── fft_demo_main.c           # Host-pipe FFT/filter demo thread (CONFIG_FFT_DEMO)
     │   └── test_runner.c             # "test run" shell command
     ├── tests/                       # ZTEST suites (compiled in when CONFIG_ZTEST=y)
     │   ├── test_spi.cpp
     │   ├── test_i2c.cpp
     │   ├── test_gpio.cpp
-    │   ├── test_fft_accel.cpp
+    │   ├── test_fft_accel.cpp       # Forward FFT + filter HIL tests
+    │   ├── test_filter_mask.cpp     # On-sim mask-synthesis ZTEST
     │   └── test_wdt.cpp
     ├── dts/bindings/
     │   ├── misc/ostomachion,fft-accel.yaml
@@ -281,11 +301,12 @@ Use errno return codes instead of exceptions.
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` — four jobs on PR and push to `main`/`master`/`develop`:
+`.github/workflows/ci.yml` — five jobs on PR and push to `main`/`master`/`develop`:
 
 | Job | Runner | What it does |
 |-----|--------|-------------|
-| `sim` | ubuntu-latest | `make ZEPHYR_SIM_TIME=800ms test-zephyr`; assert `PROJECT EXECUTION SUCCESSFUL` in the log |
+| `host-tests` | ubuntu-latest | CMake + ctest on `host_tests/` (filter-mask synthesis math; no GHDL/Vivado) |
+| `sim` | ubuntu-latest | `make ZEPHYR_SIM_TIME=1200ms test-zephyr`; assert `PROJECT EXECUTION SUCCESSFUL` in the log |
 | `twister` | ubuntu-latest | `west twister -T zephyr_app --integration --exclude-tag hw` (after `sim` succeeds) |
 | `vhdl-lint` | ubuntu-latest | GHDL `-i`: NEORV32 core lib, `xbus2axi4_bridge.vhd`, `rtl/neorv32_wrapper.vhd` |
 | `firmware-analysis` | ubuntu-latest | clang-tidy, `nm --size-sort` memory map, thread analyser (runs after `twister`) |
@@ -341,6 +362,7 @@ west twister -T zephyr_app --integration --exclude-tag hw -v
 | Test ID | Board | Type |
 |---------|-------|------|
 | `ostomachion.peripherals.baseline` | neorv32 sim | build + run |
+| `ostomachion.filter.mask` | neorv32 sim | build + run (mask-synthesis ZTEST) |
 | `ostomachion.fft.compile` | neorv32 sim | build only |
 | `ostomachion.shell.compile` | neorv32 sim | build only |
 | `ostomachion.wdt.compile` | neorv32 sim | build + run |
