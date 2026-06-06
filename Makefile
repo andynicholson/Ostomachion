@@ -106,7 +106,13 @@ zephyr:
 	cp $(ZEPHYR_BUILD_DIR)/zephyr/zephyr.vhd zephyr_imem_image.vhd
 	$(call update-compile-commands,$(ZEPHYR_BUILD_DIR))
 
-ZEPHYR_SIM_TIME ?= 800ms
+# 1200 ms covers the full ZTEST suite UART output through the final
+# "PROJECT EXECUTION SUCCESSFUL" banner.  The filter-mask suite
+# (zephyr_app/tests/test_filter_mask.cpp) added ~7 cases whose summary output
+# pushed the run past the old 800 ms budget (the sim clock reached the stop
+# time before the banner was transmitted over the slow simulated UART, failing
+# the gate even though every suite PASSED).
+ZEPHYR_SIM_TIME ?= 1200ms
 
 test-zephyr: zephyr clean-ghdl
 	$(MAKE) IMEM_IMAGE=zephyr_imem_image.vhd SIM_TIME=$(ZEPHYR_SIM_TIME) all
