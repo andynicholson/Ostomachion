@@ -173,9 +173,21 @@ Subsequent firmware iterations only require `make fpga-fw` — no Vivado run.
 
 ```bash
 make test-hw         # SPI / I2C / GPIO / WDT ZTEST suite
-make test-accel-hw   # FFT accelerator ZTEST suite
-make shell-hw        # Interactive shell (fft dc, fft sine 8, test run …)
+make test-accel-hw   # FFT accelerator ZTEST suite (forward FFT + filter)
+make shell-hw        # Interactive shell (fft dc, fft sine 8, fft filter lp 64, test run …)
 ```
+
+### FFT demo (live spectral filter)
+
+```bash
+make demo-hw                                     # build + upload the demo firmware
+pip install -r tools/fft_demo/requirements.txt
+python3 -m fft_demo                              # launch the PyQt6 desktop app
+```
+
+The desktop app drives the real FFT → filter → IFFT fabric: choose a filter,
+watch its mask `H[k]` and the filtered time-domain output update live.  See
+[`tools/fft_demo/README.md`](tools/fft_demo/README.md).
 
 ### Baud rate reference
 

@@ -18,15 +18,7 @@ applied mode / availability / overflow on `WireOut 0x28`.  The host transport
 replaces UART for bulk samples only — the existing accelerator driver, HAL, and
 DMA contract from [`ACCEL_ARCH.md`](../../ACCEL_ARCH.md) are untouched.
 
-```
-+--------------+   WireIn 0x01 (filter mode/lo/hi) ->  +-----------+
-|   PyQt6 GUI  |      BTPipe 0x81                       | fifo_in   |--+
-| (numpy.fft   |---- 4096 × 32 b samples ------------->|           |  |  XBUS  fft_accel_transform[_filtered]()
-|  reference + |<--- 4096 × 32 b samples -------------| fifo_out  |  |  copy  +-----------------------------+
-|  H[k] mask)  |      BTPipe 0xA1                       +-----------+  +-->    | AXI DMA + xfft_0            |
-+--------------+   WireOut 0x28 (applied mode/avail/ovf)     ^                | + spectral_filter + xfft_1 |
-   WireOut 0x25 (hw_cycles)  0x26 (frame_n)                  +----------------+----------------------------+
-```
+![FFT demo host-to-fabric topology](../../docs/diagrams/demo_topology.svg)
 
 When a filter is active the output frame is the **inverse-transformed**
 (÷N-scaled) time-domain signal; in bypass it is the forward-FFT frequency bins,

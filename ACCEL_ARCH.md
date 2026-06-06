@@ -15,21 +15,31 @@ overlay.
 
 ## 1. Purpose and scope
 
-The accelerator turns a 4096-point complex Q1.15 input frame into a
-4096-point natural-order complex Q1.15 output frame, with no host
-intervention between the start of a transform and the IOC interrupt that
-signals the result is committed to RX BRAM.  The hardware is:
+The accelerator is a programmable frequency-spectrum transform: a 4096-point
+complex Q1.15 input frame goes through a forward FFT, an optional per-bin
+complex filter, and an inverse FFT, landing as a 4096-point natural-order
+complex Q1.15 output frame in RX BRAM — with no host intervention between the
+start of a transform and the IOC interrupt that signals the result is
+committed.  A bypass bit lets the same bitstream serve both the plain forward
+FFT and the filtered round trip.  §2–§6 specify the forward-FFT core; §7 adds
+the filter and inverse FFT.  The hardware is:
 
-- **Xilinx xfft v9.1** — pipelined streaming, 4096-point, 16-bit Q1.15,
-  natural-order output, scaling enabled, truncation rounding, nonrealtime
-  throttle mode, overflow output enabled.
+- **Xilinx xfft v9.1 ×2** — `xfft_0` (forward) and `xfft_1` (inverse):
+  pipelined streaming, 4096-point, 16-bit Q1.15, natural-order output, scaling
+  enabled, truncation rounding, nonrealtime throttle mode, overflow output
+  enabled.
+- **`spectral_filter` + `cmpy_normalizer`** — fabric per-bin complex multiply
+  `Y[k] = H[k]·X[k]` (hand-written RTL, not BD IP); see §7.
 - **AXI DMA (Xilinx PG021)** — two independent channels, MM2S and S2MM,
   register-direct (no scatter-gather), 32-bit data width.
 - **TX / RX BRAM** — `blk_mem_gen` single-port RAM, 8192×32 b each, fronted
   by an AXI BRAM Controller (Xilinx PG078) in single-port mode.
+- **Coefficient BRAM** — `blk_mem_gen` true-dual-port RAM, 4096×32 b
+  (`0x4200_0000`), holding the per-bin filter mask `H[k]`; see §7.
 - **AXI INTC (Xilinx PG099)** — three channels aggregated onto the single
   NEORV32 `mext_irq_i` line.
-- **AXI GPIO (Xilinx PG144)** — one output bit gating xfft `aresetn`.
+- **AXI GPIO (Xilinx PG144)** — channel 1 outputs (bit 0 gates xfft `aresetn`,
+  bit 1 selects the filter bypass); channel 2 inputs read the overflow latches.
 
 Application code reaches the accelerator through the Zephyr driver
 [`fft_accel.c`](zephyr_app/drivers/accel/fft_accel.c) and its C++20 HAL
@@ -39,27 +49,7 @@ wrapper [`ostomachion::FftAccel`](zephyr_app/include/ostomachion/hal/fft_accel.h
 
 ## 2. System block diagram and AXI memory map
 
-```text
-NEORV32 RISC-V
-   │
-   └─ XBUS ── xbus2axi4_bridge ── AXI SmartConnect (3M × 5S)
-                                       │
-                  ┌────────────────────┼────────────────────┐
-                  │                    │                    │
-             AXI DMA              AXI INTC             AXI GPIO
-            0x4000_0000          0x4001_0000          0x4002_0000
-            MM2S│ S2MM         IRQ → mext_irq_i      bit0 → xfft_aresetn
-                │    │
-           TX BRAM   RX BRAM
-          0x4100_0000 0x4100_8000
-            32 KB     32 KB
-                │    │
-           AXI-Stream (TDATA 32 b Q1.15, TVALID/TREADY/TLAST)
-                │    │
-              Xilinx xfft v9.1
-        (N=4096, pipelined-streaming,
-         natural order, scaled, nonrealtime throttle)
-```
+![Accelerator system block and AXI memory map](docs/diagrams/accel_system.svg)
 
 ### 2.1. Address map (XBUS region `0x4000_0000`–`0x4FFF_FFFF`)
 
@@ -67,14 +57,17 @@ NEORV32 RISC-V
 |------|------|------------|------------------------|
 | `0x4000_0000` | 128 B | AXI DMA AXI4-Lite control | `dma` |
 | `0x4001_0000` | 128 B | AXI INTC AXI4-Lite | `intc` |
-| `0x4002_0000` | 128 B | AXI GPIO (xfft reset gate + overflow readback) | `gpio` |
+| `0x4002_0000` | 128 B | AXI GPIO (ch1 reset/bypass, ch2 overflow readback) | `gpio` |
 | `0x4100_0000` | 32 KB | TX BRAM (CPU writes input samples) | `tx_bram` |
 | `0x4100_8000` | 32 KB | RX BRAM (CPU reads output samples) | `rx_bram` |
+| `0x4200_0000` | 16 KB | Coefficient BRAM (per-bin filter mask `H[k]`; CPU-only — see §7) | `coeff_bram` |
 
 The AXI SmartConnect crossbar aggregates three masters (NEORV32 via the
-XBUS-to-AXI4-Lite bridge, plus the DMA's MM2S and S2MM ports) onto five
-slaves; the address ranges above are aligned to power-of-two BRAM depths so
-the SmartConnect alignment constraint (`range == depth × 4`) is satisfied.
+XBUS-to-AXI4-Lite bridge, plus the DMA's MM2S and S2MM ports) onto six
+slaves; the BRAM ranges are aligned to power-of-two depths so the
+SmartConnect alignment constraint (`range == depth × 4`) is satisfied.  The
+coefficient BRAM is mapped for the CPU only and excluded from both DMA address
+spaces, so the DMA can never reach it.
 
 ### 2.2. AXI INTC channel wiring
 
@@ -85,7 +78,7 @@ The AXI INTC aggregates three sources into the single NEORV32 MEI line
 |---------|--------|-------------|----------------|
 | Ch0 | `axi_dma_0/mm2s_introut` | Level | Log error; release semaphore on error |
 | Ch1 | `axi_dma_0/s2mm_introut` | Level | Release semaphore on IOC or error |
-| Ch2 | `xfft_0/m_axis_status_tvalid` | Edge  | None (frame-complete pulse; not overflow-only) |
+| Ch2 | xfft `m_axis_status_tvalid` | Edge  | None (frame-complete pulse; not overflow-only) |
 
 The `C_KIND_OF_INTR` register reflects this: bits 0 and 1 are 0
 (level-sensitive), bit 2 is 1 (edge-sensitive).
@@ -94,6 +87,10 @@ Channel 2 is **not** a clean overflow indicator — it is just the frame-done
 pulse.  The actual overflow bit lives in `m_axis_status_tdata[0]`, which is
 captured separately (see §2.3); the driver treats Ch2 as a frame-done
 notification only and does not act on it in the ISR.
+
+On the filter bitstream Ch2 is sourced from the **inverse** `xfft_1`, so the
+pulse marks "whole filtered result ready"; the channel map and
+`C_KIND_OF_INTR` are otherwise unchanged (see §7.3).
 
 ### 2.3. Overflow capture and readback
 
@@ -337,16 +334,7 @@ by a user-programmable mask `H[k]` → inverse FFT → time.  The SAME bitstream
 still serves the plain forward FFT; a bypass bit selects which result reaches
 RX BRAM.
 
-```text
-                          ┌── bypass=1 ──────────────────────────┐
-                          │                                      ▼
-TX BRAM → MM2S → xfft_0 ──┤                                  S2MM mux → RX BRAM
-        (forward, X[k])    └─→ spectral_filter ─→ xfft_1 ───────▲
-                              (H[k]·X[k], Q2.30      (inverse,   │
-                               → Q1.15)               y[n])  bypass=0
-                                   ▲
-                          coeff BRAM Port B (H[k], 0x4200_0000)
-```
+![Programmable frequency-domain filter datapath](docs/diagrams/filter_datapath.svg)
 
 - **`spectral_filter` + `cmpy_normalizer`** ([`fpga/xem7310/`](fpga/xem7310/))
   live in `xem7310_top.vhd` (application glue, not the BD canvas).  Per bin:
@@ -378,7 +366,9 @@ output.
 
 ### 7.2. Filter design rules (extend §4)
 
-#### 7.3. Latency-match through the filter (exactly N beats)
+These three rules extend the §4 invariants across the filter and inverse FFT.
+
+#### Latency-match through the filter (exactly N beats)
 
 The `cmpy → normalizer` chain is a RIGID fixed-latency pipeline
 (`L = 3 + NORM_LATENCY`), and TVALID/TLAST are pipelined through the SAME
@@ -393,7 +383,7 @@ through the whole chain.
 > **WireOut 0x27** (`{beats_in_last_frame[31:16], pre_first_tlast_beats[15:0]}`)
 > — the filtered-path analogue of 0x22.  Both must read `N`.
 
-#### 7.4. Coefficient read latency
+#### Coefficient read latency
 
 `spectral_filter` presents the bin address combinationally and samples Port B
 one cycle later, where the registered `X[k]` meets it — `READ_LATENCY=1`,
@@ -403,13 +393,13 @@ latency-compensated, never stalled (the §4.1 contract applied to Port B).
 > shifts `H[k]` one bin relative to `X[k]`; every bin is multiplied by its
 > neighbour's coefficient.
 
-#### 7.5. Shared reset flushes the whole chain
+#### Shared reset flushes the whole chain
 
 `xfft_0`, `xfft_1`, and `spectral_filter` share the one GPIO-gated `aresetn`,
 so the per-transform reset pulse (§4.5) flushes both transforms and the filter
 together — no stale `tvalid`/`tlast` can leak between transforms.
 
-### 7.6. INTC, overflow, and bypass
+### 7.3. INTC, overflow, and bypass
 
 - **INTC Ch2 frame-done** is sourced from `xfft_1` (IFFT done = whole result
   ready).  The channel map (Ch0/1/2) and `C_KIND_OF_INTR` are UNCHANGED — the
@@ -424,7 +414,7 @@ together — no stale `tvalid`/`tlast` can leak between transforms.
   so a fresh filter bitstream matches the forward-only design until a filtered
   transform is requested.
 
-### 7.7. Filter verification surface
+### 7.4. Filter verification surface
 
 The `ostomachion_fft` suite adds (HIL; skipped via `-ENOTSUP` on a forward-only
 bitstream):

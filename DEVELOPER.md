@@ -16,6 +16,8 @@ Fabric hierarchy (**`xem7310_top.vhd`** vs **`ostomachion_bd_wrapper`**) matches
 ├── .github/workflows/ci.yml          # GitHub Actions CI (sim, twister, vhdl-lint, …)
 ├── .github/workflows/vivado-synth.yml  # Manual Vivado synthesis (self-hosted runner)
 ├── docs/
+│   ├── img/logo.svg                  # Project logo
+│   ├── diagrams/                     # Hand-authored architecture SVGs (README / ACCEL_ARCH / …)
 │   ├── acceptance_test_procedure.md  # HIL / self-hosted runner expectations
 │   └── neorv32_upgrade_notes.md    # Checklist before bumping the neorv32 submodule
 ├── scripts/
@@ -28,11 +30,15 @@ Fabric hierarchy (**`xem7310_top.vhd`** vs **`ostomachion_bd_wrapper`**) matches
 ├── rtl/
 │   └── neorv32_wrapper.vhd           # Simulation wrapper around neorv32_top
 ├── fpga/xem7310/
-│   ├── xem7310_top.vhd               # Board top: IBUFDS, NEORV32, bridge, BD wrapper, FrontPanel
+│   ├── xem7310_top.vhd               # Board top: IBUFDS, NEORV32, bridge, BD wrapper, FrontPanel, filter, bypass mux
+│   ├── spectral_filter.vhd           # Per-bin complex filter Y[k]=H[k]·X[k] (between xfft_0 and xfft_1)
+│   ├── cmpy_normalizer.vhd           # Q2.30 → Q1.15 round/saturate for the filter multiply
+│   ├── fft_beat_counter.vhd          # Passive xfft beat/TLAST counter (WireOut 0x22 / 0x27)
 │   ├── fp_uart_bridge.vhd            # FrontPanel UART bridge (async FIFOs + Pipe endpoints)
+│   ├── fp_fft_pipe_bridge.vhd        # FrontPanel FFT sample pipes + filter cfg / status (WireIn 0x01, WireOut 0x28)
 │   ├── xem7310.xdc                   # Vivado pin + timing constraints (XC7A200T)
 │   ├── build.tcl                     # Non-interactive Vivado batch script
-│   ├── ostomachion_bd.tcl            # IP Integrator block design (AXI DMA, xfft, BRAMs, INTC)
+│   ├── ostomachion_bd.tcl            # IP Integrator block design (AXI DMA, xfft ×2, TX/RX/coeff BRAM, INTC, GPIO)
 │   ├── check_build.tcl               # Post-build quality gates (timing, utilisation, DRC)
 │   ├── program_jtag.tcl              # JTAG bitstream programming (fallback)
 │   ├── program_flash.tcl             # SPI flash programming (persistent boot)
@@ -43,6 +49,16 @@ Fabric hierarchy (**`xem7310_top.vhd`** vs **`ostomachion_bd_wrapper`**) matches
 ├── neorv32/                          # NEORV32 RTL submodule (v1.11.6)
 │   └── rtl/system_integration/xbus2axi4_bridge.vhd   # XBUS → AXI4-Lite (FPGA fabric; vhdl-lint CI)
 ├── sw/test_gpio_uart/                # Bare-metal smoke-test firmware (C)
+├── host_tests/                       # Host (non-Zephyr) unit tests
+│   ├── CMakeLists.txt                # ctest project (run via remote-build.sh math)
+│   └── test_filter_mask.cpp          # filter_mask.hpp synthesis vs golden model
+├── tools/fft_demo/                   # PyQt6 desktop demo (drives the fabric filter live)
+│   ├── app.py                        # GUI: sliders, filter panel, 3-pane plots
+│   ├── transport.py                  # FrontPanel ok.FrontPanel wrapper (pipes + filter cfg/status)
+│   ├── sources.py                    # Q1.15 signal generators + pipe pack/unpack
+│   ├── filter_mask.py                # Host mask synth (mirrors filter_mask.hpp) + cfg/status words
+│   ├── smoke_test.py / test_*.py     # CLI smoke test + mask / mock-UI / HIL tests
+│   └── README.md                     # Demo usage
 └── zephyr_app/
     ├── CMakeLists.txt
     ├── testcase.yaml                 # West Twister test matrix (app root → buildable project)
@@ -51,6 +67,7 @@ Fabric hierarchy (**`xem7310_top.vhd`** vs **`ostomachion_bd_wrapper`**) matches
     ├── prj_fpga.conf                 # Overlay — FPGA (IRQ drivers, larger stacks)
     ├── prj_accel.conf                # Overlay — FFT accelerator
     ├── prj_shell.conf                # Overlay — interactive shell (no ZTEST)
+    ├── prj_demo.conf                 # Overlay — host-pipe FFT demo (CONFIG_FFT_DEMO)
     ├── prj_hw_test.conf              # Overlay — verbose hardware test
     ├── app.overlay                   # DTS — spi0, i2c0 (simulation + FPGA base)
     ├── app_fpga.overlay              # DTS overlay — 115200 baud, FPGA clocks
@@ -58,6 +75,7 @@ Fabric hierarchy (**`xem7310_top.vhd`** vs **`ostomachion_bd_wrapper`**) matches
     ├── include/
     │   ├── ostomachion/
     │   │   ├── accel.hpp             # Generic Accel / AccelOpDesc base (RTTI-free)
+    │   │   ├── filter_mask.hpp       # Brick-wall mask synthesis (host- + target-compilable)
     │   │   └── hal/
     │   │       ├── gpio.hpp          # GpioOutput + GpioInput
     │   │       ├── spi.hpp           # SpiDevice (std::span API)
@@ -67,13 +85,15 @@ Fabric hierarchy (**`xem7310_top.vhd`** vs **`ostomachion_bd_wrapper`**) matches
     │       └── fft_accel.h           # Public C API: fft_accel_transform(), _get_last_overflow()
     ├── src/
     │   ├── main.cpp                  # LED heartbeat thread (K_THREAD_DEFINE)
-    │   ├── fft_shell.c               # "fft" shell commands
+    │   ├── fft_shell.c               # "fft" shell commands (incl. "fft filter")
+    │   ├── fft_demo_main.c           # Host-pipe FFT/filter demo thread (CONFIG_FFT_DEMO)
     │   └── test_runner.c             # "test run" shell command
     ├── tests/                       # ZTEST suites (compiled in when CONFIG_ZTEST=y)
     │   ├── test_spi.cpp
     │   ├── test_i2c.cpp
     │   ├── test_gpio.cpp
-    │   ├── test_fft_accel.cpp
+    │   ├── test_fft_accel.cpp       # Forward FFT + filter HIL tests
+    │   ├── test_filter_mask.cpp     # On-sim mask-synthesis ZTEST
     │   └── test_wdt.cpp
     ├── dts/bindings/
     │   ├── misc/ostomachion,fft-accel.yaml
@@ -102,8 +122,9 @@ Fabric hierarchy (**`xem7310_top.vhd`** vs **`ostomachion_bd_wrapper`**) matches
 | AXI DMA ctrl | — | ✅ | `0x40000000` | MEI (IRQ 11) | `ostomachion,fft-accel` |
 | TX BRAM | — | ✅ | `0x41000000` (32 KB) | — | (part of fft-accel) |
 | RX BRAM | — | ✅ | `0x41008000` (32 KB) | — | (part of fft-accel) |
+| coeff BRAM | — | ✅ | `0x42000000` (16 KB) | — | (part of fft-accel; filter `H[k]`) |
 | AXI INTC | — | ✅ | `0x40010000` | — | (part of fft-accel) |
-| AXI GPIO (xfft reset gate) | — | ✅ | `0x40020000` | — | (BD only; fft aresetn) |
+| AXI GPIO | — | ✅ | `0x40020000` | — | (BD only; ch1 reset+bypass, ch2 overflow) |
 
 IMEM: 128 KB (FPGA), 64 KB (sim).  DMEM: 64 KB both targets.
 
@@ -111,10 +132,11 @@ IMEM: 128 KB (FPGA), 64 KB (sim).  DMEM: 64 KB both targets.
 
 **Interrupt topology**: AXI INTC (PG099) aggregates three sources into the
 single NEORV32 MEI line: Ch0 = DMA MM2S, Ch1 = DMA S2MM, Ch2 = xfft
-frame-complete (`m_axis_status_tvalid`).  The driver ISR reads INTC ISR to
-identify pending sources and acknowledges via INTC IAR after clearing DMA
-DMASR (W1C) to avoid spurious re-entry on the level-sensitive channels.
-Full contract in [ACCEL_ARCH.md](ACCEL_ARCH.md).
+frame-complete (`m_axis_status_tvalid`, sourced from the inverse `xfft_1` on
+the filter bitstream).  The driver ISR reads INTC ISR to identify pending
+sources and acknowledges via INTC IAR after clearing DMA DMASR (W1C) to avoid
+spurious re-entry on the level-sensitive channels.  Full contract in
+[ACCEL_ARCH.md](ACCEL_ARCH.md).
 
 ---
 
@@ -170,15 +192,30 @@ static fft_sample_t in[4096]{};   // Q1.15 complex: {int16_t re, int16_t im}
 static fft_sample_t out[4096]{};
 
 in[0].re = 16384;  // 0.5 in Q1.15
-int err = accel.transform(in, out, 4096);
+int err = accel.transform(in, out, 4096);          // forward FFT → bins
 
 if (accel.last_overflow()) { /* reduce input amplitude */ }
 ```
 
+The same device also drives the programmable filter (FFT → per-bin
+`H[k]·X[k]` → IFFT → time).  Load a mask, then run the filtered round trip:
+
+```cpp
+static ostomachion::filter::Coeff scratch[4096];   // synth target
+accel.set_lowpass(4096, /*cutoff bin*/ 256, /*gain*/ 0x7FFF, scratch);
+int err = accel.transform_filtered(in, out, 4096);  // out is time-domain
+```
+
+`load_coeffs()` writes a raw 4096-entry table; `set_lowpass/highpass/bandpass/
+notch()` synthesise a brick-wall mask (via `ostomachion::filter`) and load it.
+The synthesis math is host-testable and bit-identical to the fabric — see
+[ACCEL_ARCH.md §7](ACCEL_ARCH.md#7-programmable-frequency-domain-filter-fft--filter--ifft).
+
 Via the generic platform interface:
 
 ```cpp
-ostomachion::FftOpDesc op{in, out, 4096};
+ostomachion::FftOpDesc    op{in, out, 4096};        // forward FFT
+ostomachion::FilterOpDesc fop{in, out, 4096};       // filtered round trip
 int err = accel.submit(op);  // type-safe, no RTTI
 ```
 
@@ -204,7 +241,7 @@ Kconfig: `CONFIG_FFT_ACCEL=y`, `CONFIG_FFT_ACCEL_TIMEOUT_MS` (default 100 ms).
 namespace ostomachion {
 
 struct AccelOpDesc {
-    enum class Type : unsigned { Unknown = 0, Fft = 1 };
+    enum class Type : unsigned { Unknown = 0, Fft = 1, Filter = 2 };
     const Type type_id;
 protected:
     explicit AccelOpDesc(Type t = Type::Unknown) : type_id{t} {}
@@ -264,11 +301,12 @@ Use errno return codes instead of exceptions.
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` — four jobs on PR and push to `main`/`master`/`develop`:
+`.github/workflows/ci.yml` — five jobs on PR and push to `main`/`master`/`develop`:
 
 | Job | Runner | What it does |
 |-----|--------|-------------|
-| `sim` | ubuntu-latest | `make ZEPHYR_SIM_TIME=800ms test-zephyr`; assert `PROJECT EXECUTION SUCCESSFUL` in the log |
+| `host-tests` | ubuntu-latest | CMake + ctest on `host_tests/` (filter-mask synthesis math; no GHDL/Vivado) |
+| `sim` | ubuntu-latest | `make ZEPHYR_SIM_TIME=1200ms test-zephyr`; assert `PROJECT EXECUTION SUCCESSFUL` in the log |
 | `twister` | ubuntu-latest | `west twister -T zephyr_app --integration --exclude-tag hw` (after `sim` succeeds) |
 | `vhdl-lint` | ubuntu-latest | GHDL `-i`: NEORV32 core lib, `xbus2axi4_bridge.vhd`, `rtl/neorv32_wrapper.vhd` |
 | `firmware-analysis` | ubuntu-latest | clang-tidy, `nm --size-sort` memory map, thread analyser (runs after `twister`) |
@@ -324,6 +362,7 @@ west twister -T zephyr_app --integration --exclude-tag hw -v
 | Test ID | Board | Type |
 |---------|-------|------|
 | `ostomachion.peripherals.baseline` | neorv32 sim | build + run |
+| `ostomachion.filter.mask` | neorv32 sim | build + run (mask-synthesis ZTEST) |
 | `ostomachion.fft.compile` | neorv32 sim | build only |
 | `ostomachion.shell.compile` | neorv32 sim | build only |
 | `ostomachion.wdt.compile` | neorv32 sim | build + run |
@@ -426,17 +465,14 @@ for simulation.
 
 ## Interrupt architecture
 
-```
-INTC Ch0 — AXI DMA MM2S complete / error
-INTC Ch1 — AXI DMA S2MM complete / error      ──OR──→  NEORV32 mext_irq_i
-INTC Ch2 — xfft frame complete (m_axis_status_tvalid)
-```
+![AXI INTC interrupt routing](docs/diagrams/intc_routing.svg)
 
 - Channels 0 and 1 are **level-sensitive** (`C_KIND_OF_INTR` bits 0–1 = 0):
   `mm2s_introut`/`s2mm_introut` stay asserted until DMASR is W1C-cleared.
 - Channel 2 is **edge-sensitive** (`C_KIND_OF_INTR` bit 2 = 1):
-  `m_axis_status_tvalid` is a single-cycle pulse.  It marks frame
-  completion, not overflow specifically — see [ACCEL_ARCH.md §2.2](ACCEL_ARCH.md#22-axi-intc-channel-wiring).
+  `m_axis_status_tvalid` is a single-cycle pulse from the inverse `xfft_1`
+  (frame complete = whole filtered result ready).  It marks frame completion,
+  not overflow specifically — see [ACCEL_ARCH.md §2.2](ACCEL_ARCH.md#22-axi-intc-channel-wiring).
 
 The ISR clears DMASR (W1C) before writing INTC IAR; acknowledging IAR before
 the source de-asserts causes the ISR bit to re-assert immediately (spurious
