@@ -108,7 +108,13 @@ jobs:
       - name: Build Zephyr and run GHDL simulation
         run: |
           set -o pipefail
-          make ZEPHYR_SIM_TIME=800ms test-zephyr 2>&1 | tee ghdl_sim.log
+          # 1200 ms: the filter-mask ZTEST suite (test_filter_mask.cpp) adds
+          # ~7 cases whose UART summary output pushes the run past the previous
+          # 800 ms budget — the sim clock hit the stop-time before the final
+          # "PROJECT EXECUTION SUCCESSFUL" banner was transmitted over the slow
+          # simulated UART, so the make gate failed even though every suite
+          # PASSED.  Raise the budget to cover the added output.
+          make ZEPHYR_SIM_TIME=1200ms test-zephyr 2>&1 | tee ghdl_sim.log
 
       - name: Upload simulation log
         if: always()
