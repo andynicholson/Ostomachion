@@ -375,18 +375,40 @@ static bool filter_hw_present(const struct device *dev)
         }                                                                   \
     } while (0)
 
-/* Sum of |bin|^2 over an inclusive folded-frequency band [lo,hi]. */
-static int64_t band_energy(const fft_sample_t *out, int lo, int hi)
+/* Total time-domain energy of a buffer (sum of |sample|^2). */
+static int64_t total_energy(const fft_sample_t *buf, int n)
 {
     int64_t e = 0;
-    for (int k = lo; k <= hi; k++) {
-        e += mag_sq(out[k].re, out[k].im);
-        if (k != 0 && k != FFT_N / 2) {
-            int m = FFT_N - k;
-            e += mag_sq(out[m].re, out[m].im);
-        }
+    for (int k = 0; k < n; k++) {
+        e += mag_sq(buf[k].re, buf[k].im);
     }
     return e;
+}
+
+/* Drive a single real cosine at `bin` (amplitude 0.5 Q1.15) through one
+ * FFT → filter → IFFT round trip with the CURRENTLY-LOADED mask, and return the
+ * total energy of the time-domain output.
+ *
+ * Why time-domain energy, not a re-FFT: the production inverse word (0x1554) is
+ * ÷N-scaled, so the round-trip output is attenuated by ~1/N.  Re-FFT-ing that
+ * sub-LSB signal lands in the quantization floor (single-digit bins) and any
+ * pass/stop ratio there is meaningless — the original HW run failed exactly
+ * this way (`pass-band 7 not >> stop-band 15`).  Parseval says the time-domain
+ * output energy is proportional to the surviving spectral energy, and BOTH the
+ * pass-tone and stop-tone runs share the identical ÷N scaling, so their energy
+ * RATIO is scaling-invariant and robust.  A passed tone yields real energy
+ * (~the all-pass level, thousands); a masked tone collapses toward zero. */
+static int64_t filtered_tone_energy(const struct device *dev, int bin)
+{
+    for (int k = 0; k < FFT_N; k++) {
+        float angle = 2.0f * M_PI * bin * k / (float)FFT_N;
+        g_in[k].re = (int16_t)(16384.0f * cosf(angle));
+        g_in[k].im = 0;
+    }
+    ostomachion::FftAccel accel(dev);
+    int rc = accel.transform_filtered(g_in, g_out, FFT_N);
+    zassert_equal(rc, 0, "filtered transform failed: %d", rc);
+    return total_energy(g_out, FFT_N);
 }
 
 ZTEST_F(ostomachion_fft, test_filter_allpass_roundtrip)
@@ -425,114 +447,53 @@ ZTEST_F(ostomachion_fft, test_filter_allpass_roundtrip)
             (long long)e);
 }
 
+/* Shared body for the brick-wall tests: with the loaded mask, a tone in the
+ * passband must round-trip with far more energy than a tone in the stopband.
+ * Runs the pass tone first, then the stop tone, WITHOUT reloading coeffs in
+ * between (the mask is already in fabric BRAM; coeff_scratch()==g_out is only
+ * reused as transform output, never re-synthesised here). */
+static void check_passband(const struct device *dev, int pass_bin, int stop_bin,
+                           const char *name)
+{
+    int64_t pass_e = filtered_tone_energy(dev, pass_bin);
+    int64_t stop_e = filtered_tone_energy(dev, stop_bin);
+    /* Pass tone ≫ stop tone.  +1 avoids div-by-zero when the stop tone is fully
+     * killed (the ideal case).  8× is comfortable for a brick-wall mask. */
+    zassert_true(pass_e > (stop_e + 1) * 8,
+                 "%s: pass-tone energy %lld not >> stop-tone %lld",
+                 name, (long long)pass_e, (long long)stop_e);
+    LOG_INF("%s: pass-tone(bin %d) e=%lld  stop-tone(bin %d) e=%lld",
+            name, pass_bin, (long long)pass_e, stop_bin, (long long)stop_e);
+}
+
 ZTEST_F(ostomachion_fft, test_filter_lowpass)
 {
-    /* Two tones: bin 20 (pass) and bin 800 (stop) for a LP cutoff at 100.
-     * After FFT→LP→IFFT the bin-800 content is removed.  We verify in the
-     * FREQUENCY domain by running a PLAIN forward FFT of the filtered output
-     * (a second transform with bypass) and comparing band energies. */
+    /* LP cutoff at folded bin 100: bin 20 passes, bin 800 is stopped. */
     SKIP_IF_NO_FILTER(fixture->dev);
-
-    const int PASS_BIN = 20;
-    const int STOP_BIN = 800;
-    for (int k = 0; k < FFT_N; k++) {
-        float a = 2.0f * M_PI * PASS_BIN * k / (float)FFT_N;
-        float b = 2.0f * M_PI * STOP_BIN * k / (float)FFT_N;
-        g_in[k].re = (int16_t)(6000.0f * cosf(a) + 6000.0f * cosf(b));
-        g_in[k].im = 0;
-    }
-
     ostomachion::FftAccel accel(fixture->dev);
     zassert_equal(accel.set_lowpass(FFT_N, /*cutoff=*/100, 0x7FFF, coeff_scratch()), 0,
                   "set_lowpass failed");
-
-    int rc = accel.transform_filtered(g_in, g_out, FFT_N);
-    zassert_equal(rc, 0, "filtered transform failed: %d", rc);
-
-    /* Forward-FFT the filtered time-domain output to inspect its spectrum. */
-    for (int k = 0; k < FFT_N; k++) {
-        g_in[k] = g_out[k];
-    }
-    rc = accel.transform(g_in, g_out, FFT_N);   /* bypass → forward bins */
-    zassert_equal(rc, 0, "analysis FFT failed: %d", rc);
-
-    int64_t pass_e = band_energy(g_out, PASS_BIN - 2, PASS_BIN + 2);
-    int64_t stop_e = band_energy(g_out, STOP_BIN - 2, STOP_BIN + 2);
-    zassert_true(pass_e > stop_e * 8,
-                 "lowpass: pass-band energy %lld not >> stop-band %lld",
-                 (long long)pass_e, (long long)stop_e);
-    LOG_INF("Lowpass: pass_e=%lld stop_e=%lld (ratio ok)",
-            (long long)pass_e, (long long)stop_e);
+    check_passband(fixture->dev, /*pass=*/20, /*stop=*/800, "lowpass");
 }
 
 ZTEST_F(ostomachion_fft, test_filter_highpass)
 {
+    /* HP cutoff at folded bin 100: bin 800 passes, bin 20 is stopped. */
     SKIP_IF_NO_FILTER(fixture->dev);
-
-    const int STOP_BIN = 20;
-    const int PASS_BIN = 800;
-    for (int k = 0; k < FFT_N; k++) {
-        float a = 2.0f * M_PI * STOP_BIN * k / (float)FFT_N;
-        float b = 2.0f * M_PI * PASS_BIN * k / (float)FFT_N;
-        g_in[k].re = (int16_t)(6000.0f * cosf(a) + 6000.0f * cosf(b));
-        g_in[k].im = 0;
-    }
-
     ostomachion::FftAccel accel(fixture->dev);
     zassert_equal(accel.set_highpass(FFT_N, /*cutoff=*/100, 0x7FFF, coeff_scratch()), 0,
                   "set_highpass failed");
-
-    int rc = accel.transform_filtered(g_in, g_out, FFT_N);
-    zassert_equal(rc, 0, "filtered transform failed: %d", rc);
-
-    for (int k = 0; k < FFT_N; k++) {
-        g_in[k] = g_out[k];
-    }
-    rc = accel.transform(g_in, g_out, FFT_N);
-    zassert_equal(rc, 0, "analysis FFT failed: %d", rc);
-
-    int64_t pass_e = band_energy(g_out, PASS_BIN - 2, PASS_BIN + 2);
-    int64_t stop_e = band_energy(g_out, STOP_BIN - 2, STOP_BIN + 2);
-    zassert_true(pass_e > stop_e * 8,
-                 "highpass: pass-band %lld not >> stop-band %lld",
-                 (long long)pass_e, (long long)stop_e);
-    LOG_INF("Highpass: pass_e=%lld stop_e=%lld", (long long)pass_e, (long long)stop_e);
+    check_passband(fixture->dev, /*pass=*/800, /*stop=*/20, "highpass");
 }
 
 ZTEST_F(ostomachion_fft, test_filter_notch)
 {
-    /* Notch at bin 256: a tone exactly in the notch is suppressed, a nearby
-     * tone outside the notch passes. */
+    /* Notch [254,258]: bin 256 is suppressed, bin 64 passes. */
     SKIP_IF_NO_FILTER(fixture->dev);
-
-    const int NOTCH = 256;
-    const int PASS  = 64;
-    for (int k = 0; k < FFT_N; k++) {
-        float a = 2.0f * M_PI * NOTCH * k / (float)FFT_N;
-        float b = 2.0f * M_PI * PASS * k / (float)FFT_N;
-        g_in[k].re = (int16_t)(6000.0f * cosf(a) + 6000.0f * cosf(b));
-        g_in[k].im = 0;
-    }
-
     ostomachion::FftAccel accel(fixture->dev);
-    zassert_equal(accel.set_notch(FFT_N, NOTCH - 2, NOTCH + 2, 0x7FFF, coeff_scratch()), 0,
+    zassert_equal(accel.set_notch(FFT_N, 254, 258, 0x7FFF, coeff_scratch()), 0,
                   "set_notch failed");
-
-    int rc = accel.transform_filtered(g_in, g_out, FFT_N);
-    zassert_equal(rc, 0, "filtered transform failed: %d", rc);
-
-    for (int k = 0; k < FFT_N; k++) {
-        g_in[k] = g_out[k];
-    }
-    rc = accel.transform(g_in, g_out, FFT_N);
-    zassert_equal(rc, 0, "analysis FFT failed: %d", rc);
-
-    int64_t notch_e = band_energy(g_out, NOTCH - 2, NOTCH + 2);
-    int64_t pass_e  = band_energy(g_out, PASS - 2, PASS + 2);
-    zassert_true(pass_e > notch_e * 8,
-                 "notch: pass %lld not >> notched %lld",
-                 (long long)pass_e, (long long)notch_e);
-    LOG_INF("Notch: pass_e=%lld notch_e=%lld", (long long)pass_e, (long long)notch_e);
+    check_passband(fixture->dev, /*pass=*/64, /*stop=*/256, "notch");
 }
 
 ZTEST_F(ostomachion_fft, test_filter_beat_count_invariant)
