@@ -102,8 +102,66 @@ architecture rtl of xem7310_top is
   -- and index (0) at use sites so the whole-array port association type-checks.
   signal fft_status_tvalid    : std_logic;
   signal fft_status_overflow  : std_logic_vector(0 downto 0);
-  signal fft_overflow_latched : std_logic := '0';
   signal xfft_aresetn         : std_logic_vector(0 downto 0);
+
+  -- ── Filter pipeline (FFT → spectral filter → IFFT) ───────────────────────
+  -- xfft_1 (inverse) status / overflow, the bypass select, and the two-bit
+  -- overflow readback fed to the GPIO input channel (gpio2_io_i):
+  --   fft_overflow_latched(0) = xfft_0 (forward) overflow   [existing path]
+  --   fft_overflow_latched(1) = aggregated overflow (xfft_0 OR xfft_1 OR
+  --                             spectral_filter normalizer saturation)
+  signal fft1_status_tvalid   : std_logic;
+  signal fft1_status_overflow : std_logic_vector(0 downto 0);
+  signal filter_bypass        : std_logic_vector(0 downto 0);
+  signal fft_overflow_latched : std_logic_vector(1 downto 0) := (others => '0');
+  signal ovf0_latched         : std_logic := '0';  -- forward-stage sticky latch
+  signal ovf_agg_latched      : std_logic := '0';  -- aggregated sticky latch
+
+  -- xfft_0 forward output (X[k]) exposed from the BD to the filter/bypass mux.
+  signal fft0_m_tdata   : std_logic_vector(31 downto 0);
+  signal fft0_m_tvalid  : std_logic;
+  signal fft0_m_tlast   : std_logic;
+  signal fft0_m_tready  : std_logic;
+
+  -- Spectral filter output (Y[k] = H[k]·X[k]) and its coeff BRAM Port B.
+  signal filt_m_tdata   : std_logic_vector(31 downto 0);
+  signal filt_m_tvalid  : std_logic;
+  signal filt_m_tlast   : std_logic;
+  signal filt_norm_sat  : std_logic;             -- normalizer saturation flag
+  signal coeff_addr     : std_logic_vector(11 downto 0);  -- bin index (word addr)
+  signal coeff_dout     : std_logic_vector(31 downto 0);
+
+  -- Native BRAM Port B (from the BD's external coeff_bram_portb interface).
+  -- The generated wrapper presents a 32-bit BYTE address; for a 32-bit-wide RAM
+  -- bits [13:2] select the word.  spectral_filter drives a 12-bit WORD address
+  -- (the bin index), so place it at [13:2] (shift left by 2) and zero the rest.
+  signal coeff_bram_portb_addr : std_logic_vector(31 downto 0);
+  signal coeff_bram_portb_dout : std_logic_vector(31 downto 0);
+
+  -- xfft_1 inverse input (selected by the bypass mux) and output taps.
+  signal fft1_s_tdata   : std_logic_vector(31 downto 0);
+  signal fft1_s_tvalid  : std_logic;
+  signal fft1_s_tlast   : std_logic;
+  signal fft1_s_tready  : std_logic;
+  signal fft1_m_tvalid  : std_logic;
+  signal fft1_m_tready  : std_logic;
+  signal fft1_m_tlast   : std_logic;
+  signal fft1_m_tdata   : std_logic_vector(31 downto 0);
+
+  -- DMA S2MM slave inputs, driven by the bypass mux (xfft_0 vs xfft_1 output).
+  signal s2mm_tvalid    : std_logic;
+  signal s2mm_tlast     : std_logic;
+  signal s2mm_tdata     : std_logic_vector(31 downto 0);
+  signal s2mm_tready    : std_logic;
+
+  -- Output-stage beat counter (WireOut 0x27): proves the N-beat / TLAST
+  -- invariant survives the filter chain through to S2MM.
+  signal o1_pre_first_beats  : std_logic_vector(15 downto 0);
+  signal o1_last_frame_beats : std_logic_vector(15 downto 0);
+  signal o1_tlast_count      : std_logic_vector(7 downto 0);
+  signal o1_pre_first_fp     : std_logic_vector(15 downto 0);
+  signal o1_last_frame_fp    : std_logic_vector(15 downto 0);
+  signal wo27_data           : std_logic_vector(31 downto 0);
 
   -- ── NEORV32 scalar outputs (std_ulogic → converted to std_logic) ─────────
   signal uart0_txd_u : std_ulogic;
@@ -197,8 +255,9 @@ architecture rtl of xem7310_top is
   --               WireOut 0x21, WireOut 0x22, WireOut 0x23        (6 EPs)
   --   FFT pipe  : WireOut 0x24, WireOut 0x25, WireOut 0x26,
   --               BTPipeIn 0x81, BTPipeOut 0xA1                   (5 EPs)
+  --   FFT out  : WireOut 0x27  (xfft_1 output beat counter)         (1 EP)
   -- WireIns don't produce okEH outputs and are not counted in FP_EP_COUNT.
-  constant FP_EP_COUNT : natural := 11;
+  constant FP_EP_COUNT : natural := 12;
 
   signal fp_clk       : std_logic;
   signal okHE         : std_logic_vector(112 downto 0);
@@ -232,7 +291,6 @@ architecture rtl of xem7310_top is
   signal wo22_data              : std_logic_vector(31 downto 0);
   signal wo23_data              : std_logic_vector(31 downto 0);
   signal fft_dbg_m_data_tvalid  : std_logic;
-  signal fft_dbg_m_data_tready  : std_logic;
   signal fft_dbg_m_data_tlast   : std_logic;
   signal fft_pre_first_beats    : std_logic_vector(15 downto 0);
   signal fft_last_frame_beats   : std_logic_vector(15 downto 0);
@@ -392,29 +450,137 @@ begin
       fft_dbg_mm2s_tvalid      => fft_dbg_mm2s_tvalid,
       fft_dbg_s_data_tready    => fft_dbg_s_data_tready,
       fft_dbg_m_data_tvalid    => fft_dbg_m_data_tvalid,
-      fft_dbg_m_data_tready    => fft_dbg_m_data_tready,
       fft_dbg_m_data_tlast     => fft_dbg_m_data_tlast,
       fft_status_tvalid        => fft_status_tvalid,
       fft_status_overflow      => fft_status_overflow,
       xfft_aresetn_o           => xfft_aresetn,
-      fft_overflow_latched     => fft_overflow_latched
+      fft_overflow_latched     => fft_overflow_latched,
+      -- ── Filter datapath: forward FFT out → filter → inverse FFT, with a
+      -- bypass mux selecting the S2MM source (forward bins vs filtered IFFT) ──
+      fft0_m_tdata             => fft0_m_tdata,
+      fft0_m_tready            => fft0_m_tready,
+      fft1_s_tvalid            => fft1_s_tvalid,
+      fft1_s_tlast             => fft1_s_tlast,
+      fft1_s_tdata             => fft1_s_tdata,
+      fft1_s_tready            => fft1_s_tready,
+      fft1_m_tvalid            => fft1_m_tvalid,
+      fft1_m_tlast             => fft1_m_tlast,
+      fft1_m_tdata             => fft1_m_tdata,
+      fft1_m_tready            => fft1_m_tready,
+      s2mm_tvalid              => s2mm_tvalid,
+      s2mm_tlast               => s2mm_tlast,
+      s2mm_tdata               => s2mm_tdata,
+      s2mm_tready              => s2mm_tready,
+      fft1_status_tvalid       => fft1_status_tvalid,
+      fft1_status_overflow     => fft1_status_overflow,
+      filter_bypass_o          => filter_bypass,
+      -- Coefficient BRAM Port B (fabric read for the spectral filter).
+      -- Port-B addr is a 32-bit BYTE address; din/we exist (RAM is RW-capable)
+      -- but we never write from fabric (we tie din=0, we=0).  No en/rst ports:
+      -- the BMG Port B is Always_Enabled with no RSTB (see ostomachion_bd.tcl).
+      coeff_bram_portb_addr    => coeff_bram_portb_addr,
+      coeff_bram_portb_clk     => clk,
+      coeff_bram_portb_din     => (others => '0'),
+      coeff_bram_portb_dout    => coeff_bram_portb_dout,
+      coeff_bram_portb_we      => (others => '0')
     );
 
-  -- ── xfft overflow sticky latch ───────────────────────────────────────────
-  -- Set when the xfft asserts m_axis_status_tvalid with the overflow bit high;
-  -- held until the xfft pipeline is reset (aresetn low), which firmware pulses
-  -- at the start of every transform.  Result is fed back into the BD's AXI
-  -- GPIO input channel (gpio2_io_i) for the CPU to read at GPIO2_DATA 0x08.
+  -- xfft_0 forward output is exposed as discrete signals (tvalid/tlast came out
+  -- on the fft_dbg_m_data_* taps that still feed the forward beat counter).
+  fft0_m_tvalid <= fft_dbg_m_data_tvalid;
+  fft0_m_tlast  <= fft_dbg_m_data_tlast;
+
+  -- ── Spectral filter: Y[k] = H[k] · X[k] (per-bin complex Q1.15) ──────────
+  -- Reads the forward-FFT output X[k] and the coefficient mask H[k] from coeff
+  -- BRAM Port B; emits the filtered bin to the bypass mux below.  s_tvalid is
+  -- the QUALIFIED forward handshake (tvalid AND tready) so the bin counter
+  -- advances exactly once per real beat.  Shares the xfft aresetn so it is
+  -- flushed by the same per-transform reset pulse.
+  filter_i : entity work.spectral_filter
+    generic map (NBINS => 4096, NORM_LATENCY => 1)
+    port map (
+      aclk       => clk,
+      aresetn    => xfft_aresetn(0),
+      s_tvalid   => fft0_m_tvalid and fft0_m_tready,
+      s_tlast    => fft0_m_tlast,
+      s_tdata    => fft0_m_tdata,
+      coeff_addr => coeff_addr,
+      coeff_dout => coeff_dout,
+      m_tvalid   => filt_m_tvalid,
+      m_tlast    => filt_m_tlast,
+      m_tdata    => filt_m_tdata,
+      m_sat      => filt_norm_sat
+    );
+
+  -- Coeff BRAM Port B address: spectral_filter drives a 12-bit WORD address
+  -- (bin index); the BMG Port B takes a 32-bit BYTE address, so place the word
+  -- index at bits [13:2] (×4) and zero the upper/lower bits.
+  coeff_bram_portb_addr <= (31 downto 14 => '0') & coeff_addr & "00";
+  coeff_dout            <= coeff_bram_portb_dout;
+
+  -- ── Inverse-FFT input: always the filtered stream ────────────────────────
+  -- xfft_1 always inverts the filtered spectrum.  Its OUTPUT is used only when
+  -- filtering (bypass=0); when bypassing it still runs harmlessly (the forward
+  -- bins flow through the filter — with whatever mask is loaded — into xfft_1)
+  -- but the bypass mux below discards xfft_1's output and sends the FORWARD
+  -- bins to S2MM instead.  This is the key structure: the mux selects the S2MM
+  -- SOURCE, NOT the xfft_1 input, so fft_accel_transform() (bypass=1) delivers
+  -- the raw frequency bins — bit-identical to the pre-filter design — while
+  -- fft_accel_transform_filtered() (bypass=0) delivers the filtered IFFT.
+  fft1_s_tvalid <= filt_m_tvalid;
+  fft1_s_tlast  <= filt_m_tlast;
+  fft1_s_tdata  <= filt_m_tdata;
+
+  -- ── Bypass mux: select the S2MM source ───────────────────────────────────
+  --   bypass=1 → S2MM ← xfft_0 (forward bins);  forward tready ← S2MM tready.
+  --   bypass=0 → S2MM ← xfft_1 (filtered IFFT);  forward tready ← filter input
+  --              readiness (fft1_s_tready); xfft_1 output tready ← S2MM tready.
+  -- The spectral_filter is rigid (always ready), so the forward path's
+  -- readiness in the filtered case is exactly xfft_1's s_axis tready.
+  process (filter_bypass, fft0_m_tvalid, fft0_m_tlast, fft0_m_tdata,
+           fft1_m_tvalid, fft1_m_tlast, fft1_m_tdata, s2mm_tready, fft1_s_tready)
+  begin
+    if filter_bypass(0) = '1' then
+      -- Forward-FFT-only: forward output → S2MM.
+      s2mm_tvalid  <= fft0_m_tvalid;
+      s2mm_tlast   <= fft0_m_tlast;
+      s2mm_tdata   <= fft0_m_tdata;
+      fft0_m_tready <= s2mm_tready;
+      fft1_m_tready <= '1';            -- drain xfft_1 harmlessly (output unused)
+    else
+      -- Filtered round trip: inverse-FFT output → S2MM.
+      s2mm_tvalid  <= fft1_m_tvalid;
+      s2mm_tlast   <= fft1_m_tlast;
+      s2mm_tdata   <= fft1_m_tdata;
+      fft0_m_tready <= fft1_s_tready;  -- forward feeds the filter → xfft_1
+      fft1_m_tready <= s2mm_tready;
+    end if;
+  end process;
+
+  -- ── Overflow sticky latches (2-bit GPIO2 readback) ───────────────────────
+  -- bit0: forward (xfft_0) overflow — the existing path.
+  -- bit1: aggregated overflow (xfft_0 OR xfft_1 OR normalizer saturation).
+  -- Both cleared by the per-transform xfft aresetn pulse.
   process (clk)
   begin
     if rising_edge(clk) then
       if xfft_aresetn(0) = '0' then
-        fft_overflow_latched <= '0';
-      elsif fft_status_tvalid = '1' and fft_status_overflow(0) = '1' then
-        fft_overflow_latched <= '1';
+        ovf0_latched    <= '0';
+        ovf_agg_latched <= '0';
+      else
+        if fft_status_tvalid = '1' and fft_status_overflow(0) = '1' then
+          ovf0_latched <= '1';
+        end if;
+        if (fft_status_tvalid  = '1' and fft_status_overflow(0)  = '1') or
+           (fft1_status_tvalid = '1' and fft1_status_overflow(0) = '1') or
+           (filt_norm_sat = '1') then
+          ovf_agg_latched <= '1';
+        end if;
       end if;
     end if;
   end process;
+
+  fft_overflow_latched <= ovf_agg_latched & ovf0_latched;
 
   -- ── FFT m_axis_data beat counter ─────────────────────────────────────────
   -- Passive observer that counts xfft output beats (tvalid && tready) and
@@ -426,9 +592,9 @@ begin
     port map (
       aclk                  => clk,
       aresetn               => periph_rstn(0),
-      m_tvalid              => fft_dbg_m_data_tvalid,
-      m_tready              => fft_dbg_m_data_tready,
-      m_tlast               => fft_dbg_m_data_tlast,
+      m_tvalid              => fft0_m_tvalid,
+      m_tready              => fft0_m_tready,   -- mux-driven forward output tready
+      m_tlast               => fft0_m_tlast,
       pre_first_tlast_beats => fft_pre_first_beats,
       beats_in_last_frame   => fft_last_frame_beats,
       tlast_count           => fft_tlast_count
@@ -456,6 +622,37 @@ begin
                  SRC_INPUT_REG => 1, WIDTH => 8)
     port map (src_clk => clk, src_in => fft_tlast_count,
               dest_clk => fp_clk, dest_out => fft_tlast_count_fp);
+
+  -- ── Output-stage (xfft_1) beat counter → WireOut 0x27 ────────────────────
+  -- A second fft_beat_counter on the INVERSE-FFT output proves the "exactly N
+  -- beats per N-point frame, TLAST on beat N-1" invariant survives the full
+  -- cmpy/normalizer + xfft_1 chain through to S2MM (the filtered path's
+  -- analogue of the forward-stage WireOut 0x22).  Counts the xfft_1 output
+  -- handshake (tvalid && tready); tready here is the mux-selected S2MM tready
+  -- in the filtered case.
+  o1_beat_counter_i : entity work.fft_beat_counter
+    port map (
+      aclk                  => clk,
+      aresetn               => periph_rstn(0),
+      m_tvalid              => fft1_m_tvalid,
+      m_tready              => fft1_m_tready,
+      m_tlast               => fft1_m_tlast,
+      pre_first_tlast_beats => o1_pre_first_beats,
+      beats_in_last_frame   => o1_last_frame_beats,
+      tlast_count           => o1_tlast_count
+    );
+
+  cdc_o1_pre_first_i : xpm_cdc_array_single
+    generic map (DEST_SYNC_FF => 2, INIT_SYNC_FF => 0, SIM_ASSERT_CHK => 0,
+                 SRC_INPUT_REG => 1, WIDTH => 16)
+    port map (src_clk => clk, src_in => o1_pre_first_beats,
+              dest_clk => fp_clk, dest_out => o1_pre_first_fp);
+
+  cdc_o1_last_frame_i : xpm_cdc_array_single
+    generic map (DEST_SYNC_FF => 2, INIT_SYNC_FF => 0, SIM_ASSERT_CHK => 0,
+                 SRC_INPUT_REG => 1, WIDTH => 16)
+    port map (src_clk => clk, src_in => o1_last_frame_beats,
+              dest_clk => fp_clk, dest_out => o1_last_frame_fp);
 
   -- ── XBUS demux ──────────────────────────────────────────────────────────
   -- NEORV32 XBUS is split between two slaves by upper-nibble address decode:
@@ -768,6 +965,21 @@ begin
       ep_blockstrobe => open,
       ep_datain      => poA1_data,
       ep_ready       => poA1_ready
+    );
+
+  -- WireOut 0x27: xfft_1 (inverse) output beat counts — the filtered-path
+  -- analogue of 0x22.  Proves the N-beat / TLAST invariant survives the
+  -- cmpy/normalizer + IFFT chain through to S2MM.
+  --   [15:0]  = pre_first_tlast_beats   (first frame after aresetn)
+  --   [31:16] = beats_in_last_frame     (most recent frame)
+  wo27_data <= o1_last_frame_fp & o1_pre_first_fp;
+
+  wo27_i : okWireOut
+    port map (
+      okHE      => okHE,
+      okEH      => okEHx(11*65+64 downto 11*65),
+      ep_addr   => x"27",
+      ep_datain => wo27_data
     );
 
   fft_pipe_bridge_i : entity work.fp_fft_pipe_bridge

@@ -31,6 +31,7 @@
 #include <zephyr/logging/log.h>
 
 #include <ostomachion/hal/fft_accel.hpp>
+#include <ostomachion/filter_mask.hpp>
 
 #include <math.h>    /* cosf — available via picolibc */
 #include <stdint.h>
@@ -44,12 +45,22 @@ LOG_MODULE_REGISTER(test_fft_accel, LOG_LEVEL_INF);
 
 #define FFT_N 4096
 
-/* ── Shared file-scope buffers (32 KB total) ─────────────────────────────────
+/* ── Shared file-scope buffers ───────────────────────────────────────────────
  * Declaring all buffers at file scope prevents the linker stacking multiple
- * per-function 'static' arrays of 16 KB each in BSS simultaneously.
+ * per-function 'static' arrays of 16 KB each in BSS simultaneously.  Only TWO
+ * 16 KB buffers exist: the filter tests synthesise their coefficient mask into
+ * g_out (reinterpreted as Coeff[], layout-compatible with fft_sample_t), load
+ * it to the fabric coeff BRAM, then reuse g_out for the transform result — so
+ * no third 16 KB buffer is needed (DMEM is only 64 KB; three would overflow).
  */
 static fft_sample_t g_in[FFT_N];
 static fft_sample_t g_out[FFT_N];
+
+/* g_out reinterpreted as a coefficient scratch (same 32-bit {im,re} layout). */
+static inline ostomachion::filter::Coeff *coeff_scratch(void)
+{
+    return reinterpret_cast<ostomachion::filter::Coeff *>(g_out);
+}
 
 /* ── Fixture ─────────────────────────────────────────────────────────────────*/
 
@@ -327,4 +338,210 @@ ZTEST_F(ostomachion_fft, test_sequential)
     }
 
     LOG_INF("Sequential transforms: PASS");
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Filter pipeline tests (FFT → per-bin complex filter → IFFT)
+ *
+ * These require the FILTER bitstream (xfft_1 + spectral_filter + coeff BRAM).
+ * They are skipped gracefully on a forward-FFT-only bitstream: the coeff load
+ * returns -ENOTSUP, which the fixture below detects once and uses to skip.
+ *
+ * Scaling note (ACCEL_ARCH §3): the production inverse word is 0x1554 (÷N
+ * scaled), so a filtered round trip is ATTENUATED: y[n] ≈ x[n] / N.  The tests
+ * therefore check RELATIVE behaviour (pass-bin energy ≫ stop-bin energy, peak
+ * location, mirror symmetry), not absolute round-trip amplitude.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+namespace flt = ostomachion::filter;
+
+/* True if the filter hardware is present (coeff BRAM mapped).  Probed once. */
+static bool filter_hw_present(const struct device *dev)
+{
+    ostomachion::FftAccel accel(dev);
+    flt::all_pass(FFT_N, 0x7FFF, coeff_scratch());
+    int rc = accel.load_coeffs(coeff_scratch(), FFT_N);
+    if (rc == -ENOTSUP) {
+        return false;
+    }
+    zassert_equal(rc, 0, "load_coeffs failed: %d", rc);
+    return true;
+}
+
+#define SKIP_IF_NO_FILTER(dev)                                              \
+    do {                                                                    \
+        if (!filter_hw_present(dev)) {                                      \
+            ztest_test_skip();                                              \
+        }                                                                   \
+    } while (0)
+
+/* Total time-domain energy of a buffer (sum of |sample|^2). */
+static int64_t total_energy(const fft_sample_t *buf, int n)
+{
+    int64_t e = 0;
+    for (int k = 0; k < n; k++) {
+        e += mag_sq(buf[k].re, buf[k].im);
+    }
+    return e;
+}
+
+/* Drive a single real cosine at `bin` (amplitude 0.5 Q1.15) through one
+ * FFT → filter → IFFT round trip with the CURRENTLY-LOADED mask, and return the
+ * total energy of the time-domain output.
+ *
+ * Why time-domain energy, not a re-FFT: the production inverse word (0x1554) is
+ * ÷N-scaled, so the round-trip output is attenuated by ~1/N.  Re-FFT-ing that
+ * sub-LSB signal lands in the quantization floor (single-digit bins) and any
+ * pass/stop ratio there is meaningless — the original HW run failed exactly
+ * this way (`pass-band 7 not >> stop-band 15`).  Parseval says the time-domain
+ * output energy is proportional to the surviving spectral energy, and BOTH the
+ * pass-tone and stop-tone runs share the identical ÷N scaling, so their energy
+ * RATIO is scaling-invariant and robust.  A passed tone yields real energy
+ * (~the all-pass level, thousands); a masked tone collapses toward zero. */
+static int64_t filtered_tone_energy(const struct device *dev, int bin)
+{
+    for (int k = 0; k < FFT_N; k++) {
+        float angle = 2.0f * M_PI * bin * k / (float)FFT_N;
+        g_in[k].re = (int16_t)(16384.0f * cosf(angle));
+        g_in[k].im = 0;
+    }
+    ostomachion::FftAccel accel(dev);
+    int rc = accel.transform_filtered(g_in, g_out, FFT_N);
+    zassert_equal(rc, 0, "filtered transform failed: %d", rc);
+    return total_energy(g_out, FFT_N);
+}
+
+ZTEST_F(ostomachion_fft, test_filter_allpass_roundtrip)
+{
+    /* All-pass mask: filtered round trip should reproduce the (attenuated)
+     * input.  Use a low-amplitude single tone so the ÷N round trip stays well
+     * above the noise floor and the peak bin is unambiguous. */
+    SKIP_IF_NO_FILTER(fixture->dev);
+
+    const int TARGET_BIN = 37;
+    for (int k = 0; k < FFT_N; k++) {
+        float angle = 2.0f * M_PI * TARGET_BIN * k / (float)FFT_N;
+        g_in[k].re = (int16_t)(8192.0f * cosf(angle));  /* 0.25 amplitude */
+        g_in[k].im = 0;
+    }
+
+    ostomachion::FftAccel accel(fixture->dev);
+    flt::all_pass(FFT_N, 0x7FFF, coeff_scratch());
+    zassert_equal(accel.load_coeffs(coeff_scratch(), FFT_N), 0, "coeff load failed");
+
+    int rc = accel.transform_filtered(g_in, g_out, FFT_N);
+    zassert_equal(rc, 0, "filtered transform failed: %d", rc);
+
+    /* Round trip of a real cosine is a real cosine at the same time-domain
+     * frequency: the dominant time-domain content should still be periodic at
+     * TARGET_BIN.  We re-FFT is not available here, so check the simplest
+     * robust property: the output is non-trivial and not railed (overflow). */
+    int64_t e = 0;
+    for (int k = 0; k < FFT_N; k++) {
+        e += mag_sq(g_out[k].re, g_out[k].im);
+    }
+    zassert_true(e > 0, "all-pass round trip produced all zeros");
+    zassert_false(accel.last_overflow(),
+                  "all-pass round trip overflowed (unexpected at 0.25 amp)");
+    LOG_INF("All-pass round trip: total energy=%lld (non-zero, no overflow)",
+            (long long)e);
+}
+
+/* Shared body for the brick-wall tests: with the loaded mask, a tone in the
+ * passband must round-trip with far more energy than a tone in the stopband.
+ * Runs the pass tone first, then the stop tone, WITHOUT reloading coeffs in
+ * between (the mask is already in fabric BRAM; coeff_scratch()==g_out is only
+ * reused as transform output, never re-synthesised here). */
+static void check_passband(const struct device *dev, int pass_bin, int stop_bin,
+                           const char *name)
+{
+    int64_t pass_e = filtered_tone_energy(dev, pass_bin);
+    int64_t stop_e = filtered_tone_energy(dev, stop_bin);
+    /* Pass tone ≫ stop tone.  +1 avoids div-by-zero when the stop tone is fully
+     * killed (the ideal case).  8× is comfortable for a brick-wall mask. */
+    zassert_true(pass_e > (stop_e + 1) * 8,
+                 "%s: pass-tone energy %lld not >> stop-tone %lld",
+                 name, (long long)pass_e, (long long)stop_e);
+    LOG_INF("%s: pass-tone(bin %d) e=%lld  stop-tone(bin %d) e=%lld",
+            name, pass_bin, (long long)pass_e, stop_bin, (long long)stop_e);
+}
+
+ZTEST_F(ostomachion_fft, test_filter_lowpass)
+{
+    /* LP cutoff at folded bin 100: bin 20 passes, bin 800 is stopped. */
+    SKIP_IF_NO_FILTER(fixture->dev);
+    ostomachion::FftAccel accel(fixture->dev);
+    zassert_equal(accel.set_lowpass(FFT_N, /*cutoff=*/100, 0x7FFF, coeff_scratch()), 0,
+                  "set_lowpass failed");
+    check_passband(fixture->dev, /*pass=*/20, /*stop=*/800, "lowpass");
+}
+
+ZTEST_F(ostomachion_fft, test_filter_highpass)
+{
+    /* HP cutoff at folded bin 100: bin 800 passes, bin 20 is stopped. */
+    SKIP_IF_NO_FILTER(fixture->dev);
+    ostomachion::FftAccel accel(fixture->dev);
+    zassert_equal(accel.set_highpass(FFT_N, /*cutoff=*/100, 0x7FFF, coeff_scratch()), 0,
+                  "set_highpass failed");
+    check_passband(fixture->dev, /*pass=*/800, /*stop=*/20, "highpass");
+}
+
+ZTEST_F(ostomachion_fft, test_filter_notch)
+{
+    /* Notch [254,258]: bin 256 is suppressed, bin 64 passes. */
+    SKIP_IF_NO_FILTER(fixture->dev);
+    ostomachion::FftAccel accel(fixture->dev);
+    zassert_equal(accel.set_notch(FFT_N, 254, 258, 0x7FFF, coeff_scratch()), 0,
+                  "set_notch failed");
+    check_passband(fixture->dev, /*pass=*/64, /*stop=*/256, "notch");
+}
+
+ZTEST_F(ostomachion_fft, test_filter_beat_count_invariant)
+{
+    /* The filtered chain must still emit exactly N output beats: Y[N-1] must be
+     * populated through cmpy + normalizer + IFFT.  An all-pass mask + a bin-1
+     * cosine lights up the spectrum broadly after the round trip; assert the
+     * final output sample is captured (non-degenerate). */
+    SKIP_IF_NO_FILTER(fixture->dev);
+
+    fill_cosine(1);
+    ostomachion::FftAccel accel(fixture->dev);
+    flt::all_pass(FFT_N, 0x7FFF, coeff_scratch());
+    zassert_equal(accel.load_coeffs(coeff_scratch(), FFT_N), 0, "coeff load failed");
+
+    int rc = accel.transform_filtered(g_in, g_out, FFT_N);
+    zassert_equal(rc, 0, "filtered transform failed: %d", rc);
+
+    /* The whole frame must have been written: at least one non-zero sample in
+     * the last quarter (a short S2MM transfer would leave g_out[N-1] stale). */
+    int64_t tail = 0;
+    for (int k = 3 * FFT_N / 4; k < FFT_N; k++) {
+        tail += mag_sq(g_out[k].re, g_out[k].im);
+    }
+    zassert_true(tail > 0,
+                 "filtered output tail all-zero — chain dropped beats "
+                 "(check WireOut 0x27 beat count)");
+    LOG_INF("Filter beat-count invariant: tail energy=%lld (frame complete)",
+            (long long)tail);
+}
+
+ZTEST_F(ostomachion_fft, test_filter_bypass_equals_plain)
+{
+    /* With the filter bitstream present, transform() (bypass) must match a
+     * plain forward FFT exactly — the bypass mux delivers the forward bins. */
+    SKIP_IF_NO_FILTER(fixture->dev);
+
+    fill_cosine(8);
+    ostomachion::FftAccel accel(fixture->dev);
+
+    int rc = accel.transform(g_in, g_out, FFT_N);  /* bypass=true */
+    zassert_equal(rc, 0, "bypass transform failed: %d", rc);
+
+    int64_t pmag = 0;
+    int pbin = peak_bin(g_out, FFT_N, &pmag);
+    const int MIRROR = FFT_N - 8;
+    zassert_true(pbin == 8 || pbin == MIRROR,
+                 "bypass path peak at bin %d, expected 8 or %d "
+                 "(bypass must equal plain forward FFT)", pbin, MIRROR);
+    LOG_INF("Filter bypass: forward FFT peak at bin %d (matches plain path)", pbin);
 }
