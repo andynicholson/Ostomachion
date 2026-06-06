@@ -32,10 +32,10 @@ the quality gates — **WNS +0.042 ns, WHS +0.015 ns, 0 failing endpoints, DRC
 clean**, bitstream + MCS written. The only `master` commits after it (the PyQt
 demo and the docs pass) touch **no `fpga/` files**, so the bitstream represents
 `master`'s gateware; `git log 43ab2d0..HEAD -- fpga/` is empty. The
-filter datapath is **HW-verified on the XEM7310** (§5a). The one verification
-item re-confirmed for RC1 is the **GHDL + Zephyr co-simulation gate** (§8,
-`make test-zephyr` → `PROJECT EXECUTION SUCCESSFUL`, no failing suite); it is
-the single CI gate that must be green on the RC commit before tagging.
+filter datapath is **HW-verified on the XEM7310** (§5a). The **GHDL + Zephyr
+co-simulation gate** (§8) was re-run on the RC commit and **passed** —
+`PROJECT EXECUTION SUCCESSFUL`, 4 testsuites, 62 `PASS -`, 0 `FAIL -` / 0
+Assertion / 0 FATAL — so the single CI gate that gated tagging is green.
 
 ---
 
@@ -60,11 +60,11 @@ by hand (HIL / interactive shell) but has no automated CI gate, so a future
 change could regress it silently. These are enumerated in §9 with an RC1
 disposition (BLOCKER / ADVISED / NICE); none is a datapath defect.
 
-> **RC1 go/no-go in one line:** gateway and datapath are GO (synthesis current
-> and HW-verified — see the verification-basis header and §5a); the single hard
-> gate before tagging is confirming the GHDL+Zephyr co-sim green on the RC
-> commit (§8 / §9 intro). Everything else in §9 is an ADVISED/NICE coverage
-> hardening, to be accepted or scheduled explicitly — never muted.
+> **RC1 go/no-go in one line:** gateware and datapath are GO (synthesis current
+> and HW-verified — see the verification-basis header and §5a) and the one hard
+> gate, the GHDL+Zephyr co-sim, is **green on the RC commit**. Everything left in
+> §9 is ADVISED/NICE coverage hardening, to be accepted or scheduled explicitly
+> — never muted.
 
 The single highest-leverage discipline remains **treat docs as code**: every
 guarantee a comment states must be one a test or constraint enforces, and every

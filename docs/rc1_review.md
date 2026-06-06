@@ -20,9 +20,12 @@ fabric (SmartConnect address exclusions), not by convention. Synthesis is
 **current for the gateway** and **closes with margin**; the filter datapath is
 **hardware-verified** on the XEM7310.
 
-**Tagging RC1: ONE hard gate remains** — confirm the GHDL+Zephyr co-simulation
-green on the RC commit. Everything else is verification-coverage hardening to be
-accepted or scheduled explicitly, not correctness risk.
+**Tagging RC1: the one hard gate is now GREEN.** The GHDL+Zephyr co-simulation
+was re-run on the RC commit and **passed** — `PROJECT EXECUTION SUCCESSFUL`,
+4 suites, 62 `PASS -`, **0 `FAIL -` / 0 Assertion / 0 FATAL**, the Makefile gate
+printing `PASS: sim completed and no ZTEST failures detected`. Everything else is
+verification-coverage hardening to be accepted or scheduled explicitly, not
+correctness risk.
 
 | Area | State | Evidence |
 |------|-------|----------|
@@ -31,7 +34,7 @@ accepted or scheduled explicitly, not correctness risk.
 | Filter datapath | ✅ HW-verified | XEM7310 sn 2537001HTD: 14/14 fft, 7/7 filter_mask, brick-wall 16×/14×/13×, N-beat Outcome A (REVIEW §5a) |
 | §2 driver ordering contract | ✅ intact post-refactor | fences / `k_sem_reset` / W1C→IAR / S2MM-first all present in merged `fft_accel.c` |
 | Prior functional defects (WDT lock, I2C zero-len) | ✅ fixed & merged (#6) | collapsed into REVIEW §6 |
-| GHDL+Zephyr CI gate on RC commit | ⏳ **must confirm green** | the one open BLOCKER below |
+| GHDL+Zephyr CI gate on RC commit | ✅ **green** | `make test-zephyr` on the RC commit: PROJECT EXECUTION SUCCESSFUL, 4 suites, 62 PASS, 0 FAIL/FATAL |
 | Automated coverage of overflow / WDT-lock / host-control | ⚠️ gaps | hand-verified only; REVIEW §9.1–§9.5 |
 
 ---
@@ -68,15 +71,14 @@ accepted or scheduled explicitly, not correctness risk.
 
 ## 3. Go / no-go gates
 
-### BLOCKER — confirm the GHDL+Zephyr co-sim green on the RC commit
-This is the one CI job that has not been *observed* green on a post-filter
-`master` commit: the long (~90-min) `make test-zephyr`. On the latest push the
-other four jobs (host-tests, vhdl-lint, firmware-analysis, twister) are green and
-the sim was inconclusive only because the concurrency group cancelled superseded
-runs — not a failure, but not a pass either. **Action:** run `make test-zephyr`
-on the RC commit (in progress on the remote during this review) and require
-`PROJECT EXECUTION SUCCESSFUL` with no `FAIL -` / `Assertion failed` / `FATAL`.
-Tag only after it is green.
+### ✅ CLEARED — GHDL+Zephyr co-sim green on the RC commit
+This was the one CI job not yet *observed* green on a post-filter `master`
+commit: the long (~90-min) `make test-zephyr` (earlier runs were cancelled by
+the concurrency group, not failed). It was **re-run on the RC commit and
+passed**: `PROJECT EXECUTION SUCCESSFUL`, 4 testsuites, 62 `PASS -`, **0
+`FAIL -` / 0 Assertion / 0 FATAL**, Makefile gate `=== PASS: sim completed and
+no ZTEST failures detected ===`. With this green, **no BLOCKER remains** — the
+RC is clear to tag once the items below are dispositioned.
 
 ### ADVISED — accept or schedule the coverage gaps (REVIEW §9.1–§9.4)
 None blocks the *datapath*, but each is a place CI cannot catch a regression:
