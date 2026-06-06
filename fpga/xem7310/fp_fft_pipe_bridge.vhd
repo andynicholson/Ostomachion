@@ -11,21 +11,37 @@
 --   host  →  BTPipeIn  0x81  →  fifo_in  (async, 32 b × 8192 deep)  →  XBUS
 --   XBUS  →  fifo_out (async, 32 b × 8192 deep)  →  BTPipeOut 0xA1  →  host
 --
--- XBUS slave window (mapped at 0x9000_0000 in xem7310_top.vhd):
---   0x0 (R): pop one 32-bit sample from fifo_in
---   0x4 (W): push one 32-bit sample to fifo_out
---   0x8 (R): status word = { fifo_out_wr_count[15:0], fifo_in_rd_count[15:0] }
---   0xC (W): cycles latch — stores wdat in cycles_sys and bumps frame_count_sys
+-- XBUS slave window (mapped at 0x9000_0000 in xem7310_top.vhd — a 32-byte,
+-- six-register window; the parent decodes adr[27:5]=0 so only 0x9000_00{00..1F}
+-- reach this slave and any wider stray access raises xbus_err):
+--   0x00 (R): pop one 32-bit sample from fifo_in
+--   0x04 (W): push one 32-bit sample to fifo_out
+--   0x08 (R): status word = { fifo_out_wr_count[15:0], fifo_in_rd_count[15:0] }
+--   0x0C (W): cycles latch — stores wdat in cycles_sys and bumps frame_count_sys
+--   0x10 (R): filter_cfg — host filter control word (WireIn 0x01, fp→sys CDC)
+--   0x14 (W): applied_status — firmware filter status echo (sys→fp CDC → WireOut 0x28)
 --
 -- WireOut surface (driven from this entity in the fp_clk domain):
 --   0x24 : { fifo_out_rd_count[15:0], fifo_in_wr_count[15:0] }
 --   0x25 : hw_cycles_o      (last published cycle count, sys→fp CDC)
 --   0x26 : frame_count_o    (free-running frame counter, sys→fp CDC)
+--   0x28 : applied_status_o (filter status echo, sys→fp CDC)
 --
 -- The host uses fifo_out_rd_count >= 4096 as the "frame ready" indication and
 -- reads hw_cycles_o for the speedup statistic.  The CPU publishes cycles
 -- BEFORE pushing the output frame to fifo_out so the value is valid by the
 -- time the host sees the count.
+--
+-- Filter control path (host → fabric → CPU): the host writes a filter-config
+-- word to WireIn 0x01 (fp_clk).  filter_cfg_i is CDC'd into sys_clk with the
+-- same per-bit xpm_cdc_array_single pattern used for cycles/frame below and
+-- exposed to the CPU as the read-only 0x10 register.  The firmware
+-- change-detects this word (with a double-read debounce — the host
+-- UpdateWireIns can momentarily tear the multi-field word) and reprograms the
+-- coeff BRAM.  The firmware then writes a status echo to 0x14, CDC'd back to
+-- fp_clk on WireOut 0x28 so the host knows the applied mode / overflow /
+-- filter-availability.  Both crossings are quasi-static — do NOT replace the
+-- array_single with xpm_cdc_handshake (see the CDC note further down).
 --
 -- Clock domains:
 --   sys_clk  (~100 MHz)    — XBUS slave, sys-side of both async FIFOs
@@ -44,10 +60,11 @@ entity fp_fft_pipe_bridge is
     sys_clk          : in  std_logic;
     sys_rstn         : in  std_logic;
 
-    -- XBUS slave interface from NEORV32 (4-byte address: REG select).
-    -- The parent module decodes the upper address bits (region 0x9000_0000)
-    -- and only forwards xbus_stb when the access targets this region.
-    xbus_addr        : in  std_ulogic_vector(3 downto 0);
+    -- XBUS slave interface from NEORV32 (5-bit register select within a
+    -- 32-byte window).  The parent module decodes the upper address bits
+    -- (region 0x9000_0000, adr[27:5]=0) and only forwards xbus_stb when the
+    -- access targets this region.
+    xbus_addr        : in  std_ulogic_vector(4 downto 0);
     xbus_stb         : in  std_ulogic;
     xbus_we          : in  std_ulogic;
     xbus_wdat        : in  std_ulogic_vector(31 downto 0);
@@ -56,6 +73,11 @@ entity fp_fft_pipe_bridge is
 
     -- FrontPanel clock domain (~100.8 MHz from okHost)
     fp_clk           : in  std_logic;
+
+    -- Filter control (fp_clk): host WireIn 0x01 → CDC → XBUS read register 0x10
+    filter_cfg_i     : in  std_logic_vector(31 downto 0);
+    -- Filter status echo (fp_clk): XBUS write register 0x14 → CDC → WireOut 0x28
+    applied_status_o : out std_logic_vector(31 downto 0);
 
     -- BTPipeIn 0x81 (host → fifo_in)
     pi_data          : in  std_logic_vector(31 downto 0);
@@ -77,11 +99,13 @@ end entity fp_fft_pipe_bridge;
 
 architecture rtl of fp_fft_pipe_bridge is
 
-  -- ── XBUS register offsets (within the 4-bit window) ────────────────────
-  constant REG_FIFO_POP  : std_ulogic_vector(3 downto 0) := x"0";
-  constant REG_FIFO_PUSH : std_ulogic_vector(3 downto 0) := x"4";
-  constant REG_STATUS    : std_ulogic_vector(3 downto 0) := x"8";
-  constant REG_PUBLISH   : std_ulogic_vector(3 downto 0) := x"C";
+  -- ── XBUS register offsets (within the 5-bit / 32-byte window) ──────────
+  constant REG_FIFO_POP   : std_ulogic_vector(4 downto 0) := "0" & x"0";  -- 0x00
+  constant REG_FIFO_PUSH  : std_ulogic_vector(4 downto 0) := "0" & x"4";  -- 0x04
+  constant REG_STATUS     : std_ulogic_vector(4 downto 0) := "0" & x"8";  -- 0x08
+  constant REG_PUBLISH    : std_ulogic_vector(4 downto 0) := "0" & x"C";  -- 0x0C
+  constant REG_FILTER_CFG : std_ulogic_vector(4 downto 0) := "1" & x"0";  -- 0x10 (R)
+  constant REG_APPLIED    : std_ulogic_vector(4 downto 0) := "1" & x"4";  -- 0x14 (W)
 
   -- ── XBUS slave state ──────────────────────────────────────────────────
   signal ack_q  : std_ulogic := '0';
@@ -141,6 +165,18 @@ architecture rtl of fp_fft_pipe_bridge is
   signal cycles_fp      : std_logic_vector(31 downto 0);
   signal frame_count_fp : std_logic_vector(31 downto 0);
 
+  -- ── Filter control / status CDC (same quasi-static array_single pattern) ──
+  -- filter_cfg_i  (fp_clk, host WireIn 0x01) → filter_cfg_sys (sys_clk, CPU reads 0x10)
+  -- applied_status_sys (sys_clk, CPU writes 0x14) → applied_status_o (fp_clk, WireOut 0x28)
+  -- Both words are quasi-static control/status (they change at most once per
+  -- frame and are then held constant), so per-bit array_single is correct here
+  -- for exactly the reasons spelled out above for cycles/frame — and the same
+  -- "do NOT use xpm_cdc_handshake" warning applies.  Word coherence of
+  -- filter_cfg across a host UpdateWireIns is handled by a firmware double-read
+  -- debounce, NOT by an RTL handshake.
+  signal filter_cfg_sys     : std_logic_vector(31 downto 0);
+  signal applied_status_sys : std_logic_vector(31 downto 0) := (others => '0');
+
 begin
 
   ---------------------------------------------------------------------------
@@ -167,10 +203,11 @@ begin
   begin
     if rising_edge(sys_clk) then
       if sys_rstn = '0' then
-        ack_q           <= '0';
-        rdat_q          <= (others => '0');
-        cycles_sys      <= (others => '0');
-        frame_count_sys <= (others => '0');
+        ack_q              <= '0';
+        rdat_q             <= (others => '0');
+        cycles_sys         <= (others => '0');
+        frame_count_sys    <= (others => '0');
+        applied_status_sys <= (others => '0');
       else
         ack_q <= access_pulse;
 
@@ -187,6 +224,15 @@ begin
               if xbus_we = '1' then
                 cycles_sys      <= std_logic_vector(xbus_wdat);
                 frame_count_sys <= frame_count_sys + 1;
+              end if;
+              rdat_q <= (others => '0');
+            when REG_FILTER_CFG =>
+              -- Read-only: the host filter control word, CDC'd from WireIn 0x01.
+              rdat_q <= std_ulogic_vector(filter_cfg_sys);
+            when REG_APPLIED =>
+              -- Write-only: firmware filter status echo, CDC'd out to WireOut 0x28.
+              if xbus_we = '1' then
+                applied_status_sys <= std_logic_vector(xbus_wdat);
               end if;
               rdat_q <= (others => '0');
             when others =>
@@ -411,5 +457,50 @@ begin
 
   hw_cycles_o   <= cycles_fp;
   frame_count_o <= frame_count_fp;
+
+  ---------------------------------------------------------------------------
+  -- Filter control / status CDC (same quasi-static array_single pattern).
+  --
+  -- filter_cfg_i is the host filter control word on WireIn 0x01 (fp_clk).
+  -- It is quasi-static: the host writes it (UpdateWireIns) at most a few
+  -- times per second and then holds it.  Per-bit array_single resolves
+  -- metastability; word coherence across a host UpdateWireIns is closed by
+  -- the firmware double-read debounce (NOT an RTL handshake — see the note
+  -- above; xpm_cdc_handshake was a regression for the cycles path and the
+  -- same hazard applies here).
+  --
+  -- applied_status_sys is the firmware's filter status echo, written on a
+  -- single sys_clk edge (REG_APPLIED) and then held — identical timing
+  -- profile to cycles_sys, so the same crossing is correct.
+  ---------------------------------------------------------------------------
+  cdc_filter_cfg_i : xpm_cdc_array_single
+    generic map (
+      DEST_SYNC_FF   => 2,
+      INIT_SYNC_FF   => 0,
+      SIM_ASSERT_CHK => 0,
+      SRC_INPUT_REG  => 1,
+      WIDTH          => 32
+    )
+    port map (
+      src_clk  => fp_clk,
+      src_in   => filter_cfg_i,
+      dest_clk => sys_clk,
+      dest_out => filter_cfg_sys
+    );
+
+  cdc_applied_i : xpm_cdc_array_single
+    generic map (
+      DEST_SYNC_FF   => 2,
+      INIT_SYNC_FF   => 0,
+      SIM_ASSERT_CHK => 0,
+      SRC_INPUT_REG  => 1,
+      WIDTH          => 32
+    )
+    port map (
+      src_clk  => sys_clk,
+      src_in   => applied_status_sys,
+      dest_clk => fp_clk,
+      dest_out => applied_status_o
+    );
 
 end architecture rtl;
