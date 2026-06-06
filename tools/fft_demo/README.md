@@ -4,23 +4,34 @@ A PyQt6 + pyqtgraph application that drives the on-FPGA Xilinx **xfft**
 pipeline in realtime, overlays the same input's `numpy.fft` spectrum, and
 reports HW / SW timing alongside a numerical-agreement gauge.
 
+It also **programs the fabric spectral filter** (low-/high-/band-pass, notch)
+live: pick a filter, watch its mask `H[k]` shade the spectrum, and see the
+**real FFT → filter → IFFT** output come back in the time domain — the genuine
+fabric datapath, not a host-side numpy filter.
+
 The CPU stays in the loop: the demo firmware reads each input frame from
-the FrontPanel `BTPipeIn 0x81` FIFO into TX BRAM, calls
-`fft_accel_transform()`, and pushes the result back through `BTPipeOut
-0xA1`.  The host transport replaces UART for bulk samples only — the
-existing accelerator driver, HAL, and DMA contract from
-[`ACCEL_ARCH.md`](../../ACCEL_ARCH.md) are untouched.
+the FrontPanel `BTPipeIn 0x81` FIFO into TX BRAM, calls `fft_accel_transform()`
+(bypass → frequency bins) or, when a filter is selected, `fft_accel_transform_filtered()`
+(→ filtered time-domain), and pushes the result back through `BTPipeOut 0xA1`.
+The filter is chosen from the host over `WireIn 0x01`; the firmware echoes the
+applied mode / availability / overflow on `WireOut 0x28`.  The host transport
+replaces UART for bulk samples only — the existing accelerator driver, HAL, and
+DMA contract from [`ACCEL_ARCH.md`](../../ACCEL_ARCH.md) are untouched.
 
 ```
-+--------------+      BTPipe 0x81           +-----------+
-|   PyQt6 GUI  |---- 4096 × 32 b samples -->| fifo_in   |--+
-| (numpy.fft   |                            |           |  |  XBUS
-|  reference)  |<----- 4096 × 32 b samples -| fifo_out  |  |  copy  fft_accel_transform()
-+--------------+      BTPipe 0xA1           +-----------+  +-->  +-----------+
-   WireOut 0x25 (hw_cycles)                      ^             |  AXI DMA  |
-   WireOut 0x26 (frame_n)                        +-------------|   + xfft  |
-                                                                +-----------+
++--------------+   WireIn 0x01 (filter mode/lo/hi) ->  +-----------+
+|   PyQt6 GUI  |      BTPipe 0x81                       | fifo_in   |--+
+| (numpy.fft   |---- 4096 × 32 b samples ------------->|           |  |  XBUS  fft_accel_transform[_filtered]()
+|  reference + |<--- 4096 × 32 b samples -------------| fifo_out  |  |  copy  +-----------------------------+
+|  H[k] mask)  |      BTPipe 0xA1                       +-----------+  +-->    | AXI DMA + xfft_0            |
++--------------+   WireOut 0x28 (applied mode/avail/ovf)     ^                | + spectral_filter + xfft_1 |
+   WireOut 0x25 (hw_cycles)  0x26 (frame_n)                  +----------------+----------------------------+
 ```
+
+When a filter is active the output frame is the **inverse-transformed**
+(÷N-scaled) time-domain signal; in bypass it is the forward-FFT frequency bins,
+exactly as before.  The firmware's `WireOut 0x28` echo tells the host which one
+each frame is, so the GUI never mis-reads a frame.
 
 ## Prerequisites
 
@@ -28,6 +39,13 @@ The bitstream **must include** `fp_fft_pipe_bridge` in
 `fpga/xem7310/xem7310_top.vhd` (merged on `master`).  Older bitstreams
 built before that integration do not respond to `BTPipe 0x81 / 0xA1` or
 `WireOuts 0x24..0x26`.
+
+The **spectral-filter** controls additionally need the host-filter-control
+bitstream: `WireIn 0x01`, `WireOut 0x28`, and the `spectral_filter` + `xfft_1`
+datapath.  On a forward-FFT-only bitstream the demo still runs (source +
+forward-FFT view), but the firmware reports `filter_avail = 0`, the filter
+panel greys out, and `WireIn 0x01` writes are harmless no-ops — so it is safe
+to launch against either bitstream.
 
 1. **Build & program the bitstream** (one-time after clone, or when FPGA RTL changes):
 
@@ -104,22 +122,62 @@ Then in the UI:
 
 1. Click **Open FrontPanel**.  The status line shows the device serial.
 2. Pick a source (Sine / Two sines / Noise / Sine + noise / DC) and
-   tweak amplitude / bin / noise σ.
-3. Click **Start**.
+   tweak amplitude / bin (sliders) / noise σ.
+3. *(Optional)* In **Spectral filter (fabric)** pick a mode (Low-pass /
+   High-pass / Band-pass / Notch) and drag the cutoff (or band lo/hi)
+   sliders.  Leave it on **Off** for the plain forward-FFT view.
+4. Click **Start**.
 
-The top plot shows the input (time-domain Re); the bottom plot overlays
-the HW spectrum (orange) and the numpy reference (dashed green) in dB.
+Three stacked panes:
+
+- **Input signal (time domain)** — the generated input, Re, fixed ±1 axis.
+- **Filtered output (time domain)** — the IFFT result coming back from the
+  fabric when a filter is active.  Because the inverse xfft is ÷N-scaled the
+  round trip is ~1/N of the input, so this pane **autoranges** and labels the
+  scale rather than faking a ×N gain.  On **Off** (or a forward-only bitstream)
+  it shows a "filter off" note.
+- **FFT magnitude (dB) + filter mask** — HW spectrum (orange) vs numpy
+  reference (dashed green) in bypass; the chosen filter's passband `H[k]` is
+  shaded in blue on top.  When a filter is active this pane shows
+  `|FFT(input)|` (what went in) under the same mask.
+
 The stats panel updates every frame:
 
 | Field | Meaning |
 |-------|---------|
 | Frame #              | Firmware's free-running frame counter (WireOut 0x26). |
-| HW FFT cycles        | `t1 - t0` around `fft_accel_transform()` in firmware (WireOut 0x25). |
+| HW FFT cycles        | `t1 - t0` around the transform in firmware (WireOut 0x25). |
 | SW FFT (numpy)       | `time.perf_counter` around `np.fft.fft` on the host. |
 | Host round-trip      | `send_frame` → frame_done → `recv_frame` wall-clock on the host. |
 | End-to-end rate      | Frames per second, averaged over the last ~0.5 s. |
-| Peak bin \|HW − SW\| | dB disagreement at the SW peak bin (and its conjugate alias). |
-| HW SFDR              | Spurious-free dynamic range of the HW spectrum (peak − loudest non-peak bin). |
+| Peak bin \|HW − SW\| | dB disagreement at the SW peak bin (bypass only; — when filtered). |
+| HW SFDR              | Spurious-free dynamic range of the HW spectrum (bypass only). |
+| Filter mode          | Mode the fabric is actually applying (from the WireOut 0x28 echo). |
+| Out peak (FS frac)   | Filtered-output peak as a fraction of full scale (shows the ÷N attenuation honestly). |
+| Overflow             | Red **OVERFLOW** if the last filtered transform saturated (WireOut 0x28 bit 4). |
+
+## Spectral filter
+
+The fabric implements a programmable per-bin complex filter between a forward
+and an inverse xfft (see [`ACCEL_ARCH.md`](../../ACCEL_ARCH.md) §7).  The demo
+drives it entirely from the host:
+
+1. The **Spectral filter** panel packs `{mode, lo, hi}` into the `WireIn 0x01`
+   control word (`filter_mask.pack_filter_cfg`).  Cutoffs are folded-frequency
+   bins `0..N/2`; LP uses `hi` as the cutoff, HP uses `lo`, BP/notch use both
+   (kept `lo ≤ hi`).  Slider drags are **debounced** (~120 ms) so a drag
+   doesn't trigger a coefficient reload per pixel.
+2. The firmware (`fft_demo_main.c`) reads + double-read-debounces that word,
+   synthesises the brick-wall mask, loads it into the coeff BRAM, and switches
+   to `fft_accel_transform_filtered()`.
+3. The mask shaded in pane 3 is computed host-side by
+   `filter_mask.synth_mask()`, which mirrors the firmware/`filter_mask.hpp`
+   synthesis **bit-for-bit** — so the overlay shows exactly the passband the
+   fabric applies.  `test_filter_mask.py` checks that correspondence at the
+   boundary bins.
+
+On a forward-FFT-only bitstream the firmware reports `filter_avail = 0` on the
+echo; the panel greys out and the title says "NOT in this bitstream".
 
 ## What the numbers mean
 
@@ -162,10 +220,19 @@ The stats panel updates every frame:
 
 | File | Purpose |
 |------|---------|
-| [`app.py`](app.py)          | PyQt6 main window, plotting, realtime loop. |
-| [`transport.py`](transport.py)  | FrontPanel `ok.FrontPanel` wrapper (`send_frame`/`recv_frame`). |
+| [`app.py`](app.py)          | PyQt6 main window, 3-pane plotting, filter panel, realtime loop. |
+| [`transport.py`](transport.py)  | FrontPanel `ok.FrontPanel` wrapper (`send_frame`/`recv_frame`/`set_filter`/`applied_status`). |
 | [`sources.py`](sources.py)      | Signal generators + Q1.15 / pipe pack-unpack. |
+| [`filter_mask.py`](filter_mask.py) | Host brick-wall mask synthesis (matches firmware) + cfg/status word packing. |
 | [`requirements.txt`](requirements.txt) | `PyQt6`, `pyqtgraph`, `numpy`. |
+
+Tests (no Qt display / hardware needed unless noted):
+
+| File | Run | Purpose |
+|------|-----|---------|
+| [`test_filter_mask.py`](test_filter_mask.py) | `python -m fft_demo.test_filter_mask` | Mask synth vs reference (boundary bins) + cfg/status round-trip. |
+| [`test_ui_mock.py`](test_ui_mock.py) | `QT_QPA_PLATFORM=offscreen python -m fft_demo.test_ui_mock` | Widget/worker plumbing against a mock transport (freq↔time, overlay, autorange). |
+| [`hil_filter_test.py`](hil_filter_test.py) | `python -m fft_demo.hil_filter_test` | **On hardware**: control-channel + brick-wall response on the real board. |
 
 The matching firmware is
 [`zephyr_app/src/fft_demo_main.c`](../../zephyr_app/src/fft_demo_main.c)
