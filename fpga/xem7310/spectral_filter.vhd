@@ -28,12 +28,15 @@
 -- (ACCEL_ARCH.md §4.4) at the inverse-xfft boundary.
 --
 -- ── Latency (L) ─────────────────────────────────────────────────────────────
---   stage 0 (input reg)  : register X[k] and present coeff address = k
---   stage 1 (coeff read) : Port-B BRAM 1-cycle read returns H[k], aligned with
---                          the registered X[k]; compute the four products
+--   stage 1 : register X[k]; present coeff address = k; Port-B 1-cycle read
+--             returns H[k] aligned with the registered X[k]
+--   stage 2 : register the four 16×16 products (DSP48E1 multiply + MREG)
+--   stage 3 : register the 33-bit sum/difference (DSP48E1 post-adder / CARRY4)
 --   + cmpy_normalizer (NORM_LATENCY, default 1) reduces Q2.30 → Q1.15
--- Total L = 2 + NORM_LATENCY (default 3).  TVALID/TLAST are delayed by the same
--- L via a shift register so they stay bit-aligned with the data they qualify.
+-- Total L = 3 + NORM_LATENCY (default 4).  TVALID/TLAST are pipelined through
+-- the SAME stages so they stay bit-aligned with the data they qualify.  The
+-- multiply is split (products then sum) so no single combinational path runs
+-- BRAM→DSP→adder→normalizer; a one-stage version failed timing at −4.376 ns.
 --
 -- The coefficient read address is presented combinationally from the bin
 -- counter; coeff BRAM Port B has READ_LATENCY 1 (Register_PortB_Output=false),
@@ -87,9 +90,17 @@ architecture rtl of spectral_filter is
   signal x_im_s1   : signed(15 downto 0) := (others => '0');
   signal valid_s1  : std_logic := '0';
 
-  -- ── Products (Q2.30, 33-bit) fed to the normalizer ─────────────────────────
-  signal prod_re : std_logic_vector(32 downto 0);
-  signal prod_im : std_logic_vector(32 downto 0);
+  -- ── Pipelined complex multiply (timing fix — see header) ───────────────────
+  -- Stage 2: four registered 16×16 = 32-bit products (map to DSP48E1 MREG).
+  signal pp_rr, pp_ii, pp_ri, pp_ir : signed(31 downto 0) := (others => '0');
+  signal valid_s2 : std_logic := '0';
+  signal tlast_s2 : std_logic := '0';
+
+  -- Stage 3: registered 33-bit sum/difference (the cmpy outputs, Q2.30).
+  signal prod_re : std_logic_vector(32 downto 0) := (others => '0');
+  signal prod_im : std_logic_vector(32 downto 0) := (others => '0');
+  signal valid_s3 : std_logic := '0';
+  signal tlast_s3 : std_logic := '0';
 
   component cmpy_normalizer is
     generic (
@@ -111,10 +122,10 @@ architecture rtl of spectral_filter is
     );
   end component;
 
-  -- TLAST must travel with the SAME latency as the data.  Stage 0 registers it
-  -- alongside X; the cmpy_normalizer carries it the rest of the way.  We feed
-  -- the normalizer the stage-1 (registered) tlast so it lines up with the
-  -- products computed from the stage-1 X and the coeff read.
+  -- TLAST/TVALID travel with the SAME latency as the data through every
+  -- pipeline stage (s1 multiply-input, s2 products, s3 sum, then the
+  -- normalizer), so the beat the inverse xfft sees as "last" still marks bin
+  -- N-1 — the exactly-N-beats invariant (ACCEL_ARCH §4.4).
   signal tlast_s1 : std_logic := '0';
 
 begin
@@ -150,21 +161,42 @@ begin
     end if;
   end process;
 
-  -- ── Stage 1: complex multiply  Y = H · X  (Q1.15 × Q1.15 → Q2.30) ──────────
-  -- coeff_dout is H[k] aligned with the stage-1 X registers (1-cycle BRAM read).
-  --   re = Xr·Hr − Xi·Hi
-  --   im = Xr·Hi + Xi·Hr
-  -- 16×16 products are 32-bit signed; the difference/sum is 33-bit signed.
-  process (x_re_s1, x_im_s1, coeff_dout)
+  -- ── Pipelined complex multiply  Y = H · X  (Q1.15 × Q1.15 → Q2.30) ─────────
+  -- Split across two registered stages so the BRAM→DSP→adder→normalizer chain
+  -- does not form one long combinational path (a single-stage version failed
+  -- timing at −4.376 ns: 13 logic levels, 2 DSP + 8 CARRY4 in one cycle).
+  --   Stage 2 (regs pp_*): four 16×16 products  Xr·Hr, Xi·Hi, Xr·Hi, Xi·Hr
+  --                        — these map onto the DSP48E1 multiplier+MREG.
+  --   Stage 3 (regs prod_*): the 33-bit combine  re = pp_rr − pp_ii,
+  --                          im = pp_ri + pp_ir  (DSP48E1 post-adder / CARRY4).
+  -- coeff_dout is H[k], aligned with the stage-1 X registers (1-cycle BRAM read).
+  process (aclk)
     variable hr, hi : signed(15 downto 0);
-    variable pr, pi : signed(32 downto 0);
   begin
-    hr := signed(coeff_dout(15 downto 0));
-    hi := signed(coeff_dout(31 downto 16));
-    pr := resize(x_re_s1 * hr, 33) - resize(x_im_s1 * hi, 33);
-    pi := resize(x_re_s1 * hi, 33) + resize(x_im_s1 * hr, 33);
-    prod_re <= std_logic_vector(pr);
-    prod_im <= std_logic_vector(pi);
+    if rising_edge(aclk) then
+      if aresetn = '0' then
+        pp_rr <= (others => '0'); pp_ii <= (others => '0');
+        pp_ri <= (others => '0'); pp_ir <= (others => '0');
+        valid_s2 <= '0'; tlast_s2 <= '0';
+        prod_re <= (others => '0'); prod_im <= (others => '0');
+        valid_s3 <= '0'; tlast_s3 <= '0';
+      else
+        -- Stage 2: register the four products.
+        hr := signed(coeff_dout(15 downto 0));
+        hi := signed(coeff_dout(31 downto 16));
+        pp_rr <= x_re_s1 * hr;
+        pp_ii <= x_im_s1 * hi;
+        pp_ri <= x_re_s1 * hi;
+        pp_ir <= x_im_s1 * hr;
+        valid_s2 <= valid_s1;
+        tlast_s2 <= tlast_s1;
+        -- Stage 3: register the 33-bit sum/difference.
+        prod_re <= std_logic_vector(resize(pp_rr, 33) - resize(pp_ii, 33));
+        prod_im <= std_logic_vector(resize(pp_ri, 33) + resize(pp_ir, 33));
+        valid_s3 <= valid_s2;
+        tlast_s3 <= tlast_s2;
+      end if;
+    end if;
   end process;
 
   -- ── Q2.30 → Q1.15 round/saturate reduction (verified component) ────────────
@@ -177,8 +209,8 @@ begin
     port map (
       aclk       => aclk,
       aresetn    => aresetn,
-      s_tvalid   => valid_s1,
-      s_tlast    => tlast_s1,
+      s_tvalid   => valid_s3,
+      s_tlast    => tlast_s3,
       s_tdata_re => prod_re,
       s_tdata_im => prod_im,
       m_tvalid   => m_tvalid,
