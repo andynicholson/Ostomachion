@@ -277,16 +277,34 @@ forward FFT and the filtered round trip.
 >   (identical to master's pre-existing worst path — zero timing regression),
 >   WHS +0.022, DRC clean, LUT 14.13 %, BRAM 30.14 %, bitstream written. The
 >   −4.376 ns single-stage path was fixed by the multiply pipelining above.
-> - **On-DUT HIL** (`fft filter` shell + the `test_filter_*` ZTESTs, incl. the
->   WireOut 0x27 N-beat check and LP/HP/notch response) — **TODO: run on the
->   XEM7310 board** and append the results here, mirroring the M1 §3a evidence
->   format. Encrypted Xilinx IP (xfft/DMA/SmartConnect) is not GHDL-simulatable,
->   so HIL is the only place the full datapath runs end-to-end.
+> - **On-DUT HIL — CONFIRMED on the XEM7310 (serial 2537001HTD).** Programmed
+>   the filter bitstream and ran the full `make test-accel-hw` ZTEST image:
+>   - `ostomachion_fft` **14/14 PASS** (the 8 forward-FFT tests + the 6 filter
+>     tests), `ostomachion_filter_mask` **7/7 PASS**.
+>   - **N-beat invariant through the filter chain:** WireOut beat counter read
+>     `last_frame = 4096 = N`, **Outcome A (PG109-correct, no phantom beat)** on
+>     every observed frame — so `cmpy`+normalizer+`xfft_1` preserve exactly N
+>     beats to S2MM.
+>   - **Brick-wall response** (time-domain output energy, pass-tone vs stop-tone
+>     — robust to the ÷N round-trip attenuation): lowpass 34499 vs 2163 (**16×**),
+>     highpass 35640 vs 2598 (**14×**), notch 34821 vs 2731 (**13×**).
+>   - **Bypass == plain:** `transform()` on the filter bitstream peaks at the
+>     forward-FFT bin (bin 8), and all-pass round trip is non-zero with no
+>     overflow. **M-finding verdict: fully verified on hardware.**
+>
+> *(Two pre-existing bugs surfaced during bring-up and were fixed here:*
+> *(1) `make test-accel-hw`/`test-hw` never passed `-DCONFIG_ZTEST=y`, so the*
+> *HIL image had no tests at all — added the flag.  (2) the brick-wall ztests*
+> *re-FFT'd the ÷N-attenuated round-trip output, landing in the quantization*
+> *floor (`pass 7 / stop 15`); rewritten to compare time-domain pass/stop tone*
+> *energy.  The `i2c`/`spi` suites still FAIL on this DUT — they need the MC1*
+> *loopback jumper / I2C-slave hardware that is not fitted, unrelated to the*
+> *accelerator.)*
 
 **Enforcing tests:** host `test_filter_mask` (mask math); on-sim
 `ostomachion_filter_mask` (links/runs on NEORV32); HIL `test_filter_allpass_roundtrip`,
 `test_filter_lowpass`/`highpass`/`notch`, `test_filter_beat_count_invariant`,
-`test_filter_bypass_equals_plain`.
+`test_filter_bypass_equals_plain` — **all green on the XEM7310**.
 
 ---
 
