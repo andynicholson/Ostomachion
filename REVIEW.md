@@ -474,8 +474,13 @@ Every gate must be able to **fail**. The following hold today; keep them:
 - The firmware-analysis build uses `prj.conf` (a real production image; ZTEST is
   opt-in, never baked into the base config).
 - Third-party GitHub Actions are SHA-pinned with version comments.
+- **No gate passes on an empty selection.** The clang-tidy step fails if its
+  file list is empty (explicit `n_files == 0` guard, plus `xargs -r`), and the
+  Twister step fails if `twister-out/twister.json` lists zero testsuites — so a
+  future path-filter / layout slip that selects nothing fails loudly instead of
+  passing silently.
 
-> **Known robustness gaps in these gates are tracked in §9.2–§9.3.** They do not
+> **Known robustness gaps in these gates are tracked in §9.2.** They do not
 > make a gate inert *today*, but they would let one pass silently under a future
 > layout change.
 
@@ -516,17 +521,7 @@ contract a compile cannot catch, and the Kconfig defaults off.
 
 ### CI robustness gaps (latent, not inert today)
 
-#### 9.2 — ADVISED — clang-tidy / Twister can pass on an empty selection
-[`ci.yml`](.github/workflows/ci.yml): the clang-tidy step pipes the
-selected-file list into `xargs` **without `-r`/`--no-run-if-empty`**, and GNU
-`xargs` runs the command once on empty input (verified: exit 0). If the path
-filter ever selects zero files, clang-tidy processes nothing and the gate passes
-silently. Likewise Twister exits 0 if `--integration` narrows the selection to
-zero testcases.
-> **Fix:** assert the file list is non-empty before `xargs` (and/or add `-r`);
-> after Twister, assert ≥1 testcase actually built/ran.
-
-#### 9.3 — ADVISED — accelerator/WDT drivers are never linted; no ZTEST covers overflow
+#### 9.2 — ADVISED — accelerator/WDT drivers are never linted; no ZTEST covers overflow
 The firmware-analysis build uses `prj.conf`, so `drivers/accel/fft_accel.c`
 (gated `CONFIG_FFT_ACCEL`) and `drivers/wdt/wdt_neorv32.c`
 (gated `CONFIG_WDT_NEORV32`) are absent from `compile_commands.json` and never
@@ -539,14 +534,7 @@ the M1 chain.
 > `overflow == false` for an in-range frame (the positive-assertion case needs
 > the deliberately under-scaled bitstream and stays HIL-only).
 
-#### 9.4 — ADVISED — `test_y_n_minus_1` is a weak guard for the under-length-S2MM mode
-[`test_fft_accel.cpp`](zephyr_app/tests/test_fft_accel.cpp) asserts only
-`mag_sq(g_out[4095]) > 0`. Because the file-scope buffer is reused, a stale value
-left in `BRAM[4095]` by a prior frame would also pass. **Fix:** clear
-`g_out[N-1]` to a sentinel before the transform, or assert it is comparable to
-the symmetric peak `g_out[1]`.
-
-#### 9.5 — NICE — the host filter control path has no automated regression gate
+#### 9.3 — NICE — the host filter control path has no automated regression gate
 The §5b firmware double-read debounce and the `tools/fft_demo` PyQt client are
 exercised only by the §5a HIL brick-wall tests and host-side unit tests run
 by hand; neither the debounce nor the GUI has a CI gate. Not RC1-blocking (the
@@ -579,3 +567,7 @@ are correct. They are the implicit acceptance set for any future change.
   strict `test-zephyr` PASS check, SHA-pinned actions) (§8).
 - The eight `ostomachion_fft` ZTESTs map name-for-name to ACCEL_ARCH §6 failure
   modes; the off-by-one and stale-IRQ guards use zero/tight tolerances.
+  `test_y_n_minus_1` poisons `g_out[N-1]` with a sentinel before the transform
+  and asserts the captured bin mirrors the symmetric peak `g_out[1]` (Hermitian
+  for a real input) — so it cannot pass on a stale buffer or a non-zero-but-wrong
+  final beat.

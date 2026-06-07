@@ -234,22 +234,45 @@ ZTEST_F(ostomachion_fft, test_y_n_minus_1)
 {
     /* Y[N-1] (= Y[4095]) is the final output sample of the frame.  Under-
      * length S2MM transfers drop it; this test guards the symmetric
-     * `byte_len = N*4` rule (ACCEL_ARCH.md §4.4) by asserting that a real
-     * cosine at bin 1 lights up the mirror peak at bin 4095 non-zero. */
+     * `byte_len = N*4` rule (ACCEL_ARCH.md §4.4).  A real cosine at bin 1 is
+     * Hermitian, so |Y[4095]| must equal |Y[1]| — we assert that equality, not
+     * merely "non-zero", because a non-zero value could be a stale leftover in
+     * the reused file-scope buffer rather than a freshly captured beat. */
     fill_cosine(1);
+
+    /* Sentinel: poison g_out[N-1] so a dropped final beat cannot read back as a
+     * plausible value left by a previous frame. */
+    g_out[FFT_N - 1].re = (int16_t)0x7FFF;
+    g_out[FFT_N - 1].im = (int16_t)0x7FFF;
+    const int64_t sentinel = mag_sq(0x7FFF, 0x7FFF);
 
     ostomachion::FftAccel accel(fixture->dev);
     int rc = accel.transform(g_in, g_out, FFT_N);
     zassert_equal(rc, 0, "transform failed: %d", rc);
 
+    int64_t bin_1         = mag_sq(g_out[1].re, g_out[1].im);
     int64_t bin_n_minus_1 = mag_sq(g_out[FFT_N - 1].re, g_out[FFT_N - 1].im);
-    zassert_true(bin_n_minus_1 > 0,
-                 "Y[N-1] (bin %d) mag_sq=%lld — bin not captured by DMA "
-                 "(check byte_len handling and N+1 transfer)",
-                 FFT_N - 1, (long long)bin_n_minus_1);
-    LOG_INF("Y[N-1] capture: g_out[%d] re=%d im=%d mag_sq=%lld",
+
+    /* The DMA must have overwritten the sentinel (i.e. the beat was captured). */
+    zassert_not_equal(bin_n_minus_1, sentinel,
+                 "Y[N-1] (bin %d) still holds the pre-transform sentinel — the "
+                 "final beat was not written (check byte_len / N+1 transfer)",
+                 FFT_N - 1);
+
+    /* And it must mirror the bin-1 peak (Hermitian symmetry of a real input),
+     * within a few LSB of Q1.15 quantisation — proving a *correct* capture,
+     * not just a non-zero one. */
+    int64_t diff = bin_n_minus_1 - bin_1;
+    if (diff < 0) {
+        diff = -diff;
+    }
+    zassert_true(bin_1 > 0 && diff <= (bin_1 / 16 + 64),
+                 "Y[N-1] (bin %d) mag_sq=%lld disagrees with the symmetric "
+                 "peak Y[1] mag_sq=%lld — final beat captured but corrupt",
+                 FFT_N - 1, (long long)bin_n_minus_1, (long long)bin_1);
+    LOG_INF("Y[N-1] capture: g_out[%d] re=%d im=%d mag_sq=%lld (Y[1] mag_sq=%lld)",
             FFT_N - 1, g_out[FFT_N - 1].re, g_out[FFT_N - 1].im,
-            (long long)bin_n_minus_1);
+            (long long)bin_n_minus_1, (long long)bin_1);
 }
 
 ZTEST_F(ostomachion_fft, test_roundtrip_latency)

@@ -196,6 +196,21 @@ jobs:
             --inline-logs \
             -v \
             2>&1 | tee twister.log
+          # Guard against an empty selection: Twister exits 0 if --integration
+          # narrows the set to zero testcases, so a tagging/layout slip could
+          # make this gate pass without building anything.  Require the JSON
+          # report to list at least one testcase.
+          report="twister-out/twister.json"
+          if [ ! -f "$report" ]; then
+            echo "ERROR: Twister produced no report ($report) — nothing ran." >&2
+            exit 1
+          fi
+          n_cases=$(python3 -c "import json,sys; print(len(json.load(open('$report')).get('testsuites', [])))")
+          echo "Twister ran ${n_cases} testsuite(s)"
+          if [ "${n_cases}" -eq 0 ]; then
+            echo "ERROR: Twister selected zero testcases — refusing to pass silently." >&2
+            exit 1
+          fi
 
       - name: Upload Twister results
         if: always()
@@ -334,7 +349,16 @@ jobs:
               if any(r in e['file'] for r in roots):
                   print(e['file'])
           PY
-          echo "clang-tidy will check $(wc -l < /tmp/clang_tidy_files.txt) files"
+          n_files=$(wc -l < /tmp/clang_tidy_files.txt)
+          echo "clang-tidy will check ${n_files} files"
+          # Guard against an empty selection: if the path filter ever matches
+          # zero files (layout change, renamed dirs, broken compile_commands),
+          # clang-tidy with no inputs exits 0 and the gate would pass silently.
+          # Fail loudly instead — this step must always tidy something.
+          if [ "${n_files}" -eq 0 ]; then
+            echo "ERROR: clang-tidy file selection is empty — refusing to pass silently." >&2
+            exit 1
+          fi
           # Strip gcc-only flags from compile_commands.json that clang-tidy
           # rejects as "unknown argument" / "argument unused during compilation".
           # These appear because Zephyr builds with riscv64-zephyr-elf-gcc.
@@ -351,7 +375,7 @@ jobs:
           # --warnings-as-errors='*' makes clang-tidy exit non-zero on any
           # finding so this is a real gate; pipefail propagates that exit code
           # through tee.  Triage findings rather than re-muting the gate.
-          xargs -a /tmp/clang_tidy_files.txt clang-tidy \
+          xargs -r -a /tmp/clang_tidy_files.txt clang-tidy \
             --config-file=../zephyr_app/.clang-tidy \
             --warnings-as-errors='*' \
             --quiet \
