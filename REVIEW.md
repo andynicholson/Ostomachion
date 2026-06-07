@@ -20,15 +20,22 @@ the gate that would catch them.
 >    same commit.
 > 3. New defects, drift, and robustness gaps go in §9 with a file:line anchor.
 
-**Verification basis for the current ledger.** The §9 items below were produced
-by a top-to-bottom review (RTL, block design, Zephyr firmware, host tooling,
-CI, docs) and cross-checked against source — including the NEORV32 v1.11.6
-submodule RTL (`neorv32/rtl/core/*.vhd`) for every register-bitfield and
-hardware-behaviour claim. The platform was exercised on the remote build host
-(Vivado 2025.1, `xc7a200tfbg484-1`): a full `make fpga-synth` **passed** the
-quality gates (WNS **+0.042 ns**, WHS **+0.023 ns**, 0 failing endpoints, DRC
-clean, bitstream + MCS written), and the GHDL + Zephyr co-simulation runs the
-ZTEST suite with no failures.
+**Verification basis (RC1 — `master` @ the host-filter-control gateware).** This
+ledger was produced by a top-to-bottom review (RTL, block design, Zephyr
+firmware, host tooling, CI, docs) cross-checked against source — including the
+NEORV32 v1.11.6 submodule RTL (`neorv32/rtl/core/*.vhd`) for every
+register-bitfield and hardware-behaviour claim. Synthesis evidence is current
+for the gateware: the staged Vivado 2025.1 (`xc7a200tfbg484-1`) build
+(`build_id` = `43ab2d0`, **which is the merged host-filter-control RTL** — WireIn
+0x01 / WireOut 0x28 / the widened XBUS decode / the two filter CDCs) **passed**
+the quality gates — **WNS +0.042 ns, WHS +0.015 ns, 0 failing endpoints, DRC
+clean**, bitstream + MCS written. The only `master` commits after it (the PyQt
+demo and the docs pass) touch **no `fpga/` files**, so the bitstream represents
+`master`'s gateware; `git log 43ab2d0..HEAD -- fpga/` is empty. The
+filter datapath is **HW-verified on the XEM7310** (§5a). The **GHDL + Zephyr
+co-simulation gate** (§8) was re-run on the RC commit and **passed** —
+`PROJECT EXECUTION SUCCESSFUL`, 4 testsuites, 62 `PASS -`, 0 `FAIL -` / 0
+Assertion / 0 FATAL — so the single CI gate that gated tagging is green.
 
 ---
 
@@ -44,14 +51,20 @@ the CDC structures gate correctly on XPM reset-busy; the data-memory fences in
 the FFT driver are correctly placed; and the timing constraints close with a
 structural clock-group exception rather than fragile name-matched globs.
 
-The residual risk does **not** live in the datapath. It is concentrated in two
-places, both tracked in §9:
+The residual risk does **not** live in the datapath. The two functional defects
+the earlier review found — the WDT lock that never engaged and the I2C
+zero-length dereference — are **fixed and merged** (collapsed into §6); the
+comment/docstring drift is reconciled. What remains for RC1 is **verification
+coverage, not correctness**: a handful of gaps where a real behaviour is proven
+by hand (HIL / interactive shell) but has no automated CI gate, so a future
+change could regress it silently. These are enumerated in §9 with an RC1
+disposition (BLOCKER / ADVISED / NICE); none is a datapath defect.
 
-> **One real defect hides behind a default-off Kconfig**
-> (the WDT lock never engages — §9.1), and **a cluster of comments/docstrings
-> assert mechanisms the code does not implement** (overflow-via-interrupt, the
-> obsolete xlconcat IRQ topology, the M3 CDC rationale). The code is correct in
-> those cases; the prose is stale and will mislead the next maintainer.
+> **RC1 go/no-go in one line:** gateware and datapath are GO (synthesis current
+> and HW-verified — see the verification-basis header and §5a) and the one hard
+> gate, the GHDL+Zephyr co-sim, is **green on the RC commit**. Everything left in
+> §9 is ADVISED/NICE coverage hardening, to be accepted or scheduled explicitly
+> — never muted.
 
 The single highest-leverage discipline remains **treat docs as code**: every
 guarantee a comment states must be one a test or constraint enforces, and every
@@ -134,24 +147,38 @@ are consumed in their own clock domain, so this adds no new CDC.
 > (`cdc_busy=1`), the publish was silently dropped, `frame_count_fp` fell behind
 > `frame_count_sys` by one, and the host waited forever. **Do NOT switch this
 > CDC back to a handshake.** Synthesis success masked the bug; only on-board USB
-> load surfaced it. (The in-code comment's specific *justification* is being
-> corrected — see §9.6 — but the design decision stands.)
+> load surfaced it. (The in-code comment now states the correct
+> same-edge-publish rationale and carries a "do NOT reintroduce a handshake"
+> warning.)
 
 ### 3.3 The beat-counter status words are staged into `okClk` before sampling
-The three `fft_beat_counter` outputs cross `aclk → okClk` through
-`xpm_cdc_array_single` before `okWireOut` (0x22/0x23) samples them. They are
-quasi-static (change only on `tlast`/`aresetn`), so per-bit synchronisers are
-sufficient and the host reads them between frames.
+There are **two** `fft_beat_counter` instances — one on the `xfft_0` (forward)
+output, exposed on `okWireOut` **0x22/0x23**, and one on the `xfft_1` (inverse)
+output, exposed on **0x27** (the filtered-path analogue; proves the N-beat /
+TLAST-on-`N−1` invariant survives `cmpy`+normalizer+IFFT — §5a). All cross
+`aclk → okClk` through `xpm_cdc_array_single` before the WireOut samples them.
+They are quasi-static (change only on `tlast`/`aresetn`), so per-bit
+synchronisers are sufficient and the host reads them between frames. `okWireOut`
+0x28 carries the firmware filter-status echo (§5b). `FP_EP_COUNT` is **13**
+([`xem7310_top.vhd:262`](fpga/xem7310/xem7310_top.vhd#L262)); WireIns (0x00 UART
+cfg, 0x01 filter cfg) produce no `okEH` output and are not counted.
 
 ### 3.4 The XBUS FFT-pipe region decodes the full in-region offset
 The demux selects `fp_fft_pipe_bridge` only when
-`adr[31:28]=0x9 AND adr[27:4]=0`, so exactly `0x9000_000{0,4,8,C}` hit the four
-bridge registers.
+`adr[31:28]=0x9 AND adr[27:5]=0` ([`xem7310_top.vhd:681-682`](fpga/xem7310/xem7310_top.vhd#L681-L682)),
+so exactly `0x9000_00{00..1F}` — a **32-byte, six-register** window — hit the
+bridge: `0x00` POP, `0x04` PUSH, `0x08` STATUS, `0x0C` PUBLISH, `0x10`
+FILTER_CFG (R), `0x14` APPLIED (W). The host-filter-control work widened this
+from the original four-register / `adr[27:4]` window when it added the filter
+cfg + status-echo registers ([`fp_fft_pipe_bridge.vhd:103-108`](fpga/xem7310/fp_fft_pipe_bridge.vhd#L103-L108);
+bridge `xbus_addr` is `std_ulogic_vector(4 downto 0)`).
 
-> **Failure mode if only the nibble is decoded:** every 16-byte-aligned address
-> in the 256 MB `0x9xxx_xxxx` region aliases onto the FIFO registers, so a stray
-> access silently pops/pushes a sample. Any other in-region address now falls
-> through to the BD bridge (unmapped there → `xbus_err`).
+> **Failure mode if the offset is under-decoded:** every 32-byte-aligned address
+> in the 256 MB `0x9xxx_xxxx` region aliases onto the bridge registers, so a
+> stray access silently pops/pushes a sample (or rewrites the filter cfg). Any
+> other in-region address falls through to the BD bridge (unmapped there →
+> `xbus_err`). The in-window gap offsets (`0x18`/`0x1C`) read 0 via the
+> bridge's `others` arm.
 
 ### 3.5 Single-bit BD ports sourced from a vector are `std_logic_vector(0 downto 0)`
 `fft_status_overflow` and `xfft_aresetn` are declared as `(0 downto 0)` and
@@ -161,6 +188,24 @@ sliced from a vector.
 > **Why:** declaring them scalar `std_logic` is a type error that fails
 > `synth_design` elaboration — and is invisible to GHDL, so it only appears in
 > Vivado. (This bit the M1 overflow work once already.)
+
+### 3.6 The host-filter-control words cross with `xpm_cdc_array_single`, like cycles/frame
+Two further crossings were added with the host filter control path
+([`fp_fft_pipe_bridge.vhd:476,491`](fpga/xem7310/fp_fft_pipe_bridge.vhd#L476-L491)):
+`cdc_filter_cfg_i` carries the host filter control word (WireIn 0x01) `fp_clk →
+sys_clk`, and `cdc_applied_i` carries the firmware status echo `sys_clk →
+fp_clk` (WireOut 0x28). Both are per-bit `xpm_cdc_array_single`, for the same
+reason as §3.2: each word is quasi-static (the host updates the cfg a few times
+per second and then holds it; the firmware writes the echo on one `sys_clk` edge
+and holds it).
+
+> **Why a handshake is wrong here too, and how word-coherence is handled:** the
+> §3.2 "do NOT reintroduce a handshake" rule applies identically. The one extra
+> hazard — a host `UpdateWireIns` can momentarily *tear* the multi-field cfg word
+> (mode/lo/hi) mid-update — is closed in **firmware**, not RTL: the demo reads
+> the cfg twice and acts only when two reads agree (the double-read debounce,
+> §5b). Do not add an RTL handshake to "fix" tearing; it would re-create the
+> dropped-publish defect §3.2 documents.
 
 ---
 
@@ -308,6 +353,42 @@ forward FFT and the filtered round trip.
 
 ---
 
+## 5b. Host-driven filter control contract (FrontPanel → firmware)
+
+Source: [`xem7310_top.vhd`](fpga/xem7310/xem7310_top.vhd),
+[`fp_fft_pipe_bridge.vhd`](fpga/xem7310/fp_fft_pipe_bridge.vhd),
+[`fft_demo_main.c`](zephyr_app/src/fft_demo_main.c),
+[`tools/fft_demo/`](tools/fft_demo/). The PyQt demo programs the fabric filter
+live: the host picks a mode and the firmware loads the coeff BRAM and runs the
+filtered round trip. The control path the host crosses into is:
+
+- **WireIn 0x01 → XBUS `0x10` (filter cfg), WireOut 0x28 ← XBUS `0x14` (status
+  echo).** Both CDC'd `array_single` (§3.6). The cfg word packs `{mode, lo, hi}`;
+  the echo packs `{applied_mode, filter_avail, last_overflow, last_failed}`.
+- **Double-read debounce closes the multi-field tear window.** Firmware reads
+  the cfg word twice (straddling the frame-pop) and reprograms coefficients only
+  when two reads agree **and** the value differs from the last applied
+  ([`fft_demo_main.c`](zephyr_app/src/fft_demo_main.c)).
+  > **Failure mode without it:** a host `UpdateWireIns` mid-update is sampled
+  > torn (new `mode` with old `hi`), triggering a one-frame nonsense mask or a
+  > spurious reload. This is the §3.6 hazard, closed in firmware (never with an
+  > RTL handshake — see §3.2/§3.6).
+- **Status echo is publish-before-the-host-sees-it, and the host never
+  misreads freq-vs-time.** The echo reports the mode actually applied, so the
+  host knows whether a returned frame is forward-FFT bins (bypass) or the
+  filtered ÷N time-domain signal. At most one transitional frame at a mode change.
+- **Graceful degrade on a forward-only bitstream.** `fft_accel_load_coeffs`
+  returns `-ENOTSUP` when no coeff BRAM is present; the firmware falls back to
+  the plain forward FFT and reports `filter_avail = 0`, so the same host tool is
+  safe against either bitstream (the WireIn write is a harmless no-op there).
+
+> **Enforcing tests:** exercised indirectly on the XEM7310 by the §5a brick-wall
+> HIL tests (which drive this exact path) and the host `tools/fft_demo`
+> mask-replica + offscreen-UI unit tests. **Coverage gap (open):** the debounce
+> itself and the PyQt client have no automated regression gate — see §9.
+
+---
+
 ## 6. Peripheral-driver contract
 
 Source: [`i2c_neorv32.c`](zephyr_app/drivers/i2c/i2c_neorv32.c),
@@ -329,10 +410,27 @@ are re-confirmed against NEORV32 v1.11.6 RTL.
   one-past-the-end read on the final message). A bounded `TWI_XFER_TIMEOUT`
   (1 s) backstops a lost FIRQ so a dropped interrupt cannot hang the caller
   forever.
-- **WDT honours STRICT; tamper-resistance requires the LOCK bit.** STRICT alone
-  does not prevent a plain `CTRL = 0` disable — only the LOCK bit does. The
-  `CONFIG_WDT_NEORV32_LOCK` opt-in is meant to deliver that. **⚠ The lock does
-  not currently engage — see §9.1.**
+- **The I2C interrupt path skips zero-length messages, like the polling path.**
+  The IRQ state machine skips leading zero-length messages at transfer start and
+  trailing ones at each `next_msg` advance
+  ([`i2c_neorv32.c:421-457`](zephyr_app/drivers/i2c/i2c_neorv32.c#L421-L457)).
+  > **Failure mode without the skip:** a zero-length message (I2C bus scan /
+  > SMBus quick command) dereferences `buf[0]` of an empty buffer and clocks one
+  > stray byte. HW-only path (`CONFIG_I2C_NEORV32_INTERRUPT`); the GHDL sim uses
+  > the polling path, so this is verified by construction against the polling
+  > path it now mirrors.
+- **WDT lock requires a *two-step* enable-then-lock write.** STRICT alone does
+  not prevent a plain `CTRL = 0` disable — only the LOCK bit does — and
+  [`neorv32_wdt.vhd:95`](neorv32/rtl/core/neorv32_wdt.vhd#L95) latches LOCK only
+  if EN is *already* set (`ctrl.lock <= data(lock) and ctrl.enable`). So
+  `wdt_setup()` writes `EN|STRICT|TIMEOUT` first, then a second write OR-ing in
+  `LOCK` ([`wdt_neorv32.c:68-72`](zephyr_app/drivers/wdt/wdt_neorv32.c#L68-L72)),
+  so EN is high when LOCK latches. A single combined write silently no-ops the
+  lock.
+  > **Lesson (paid for in hardware semantics):** synthesis and compile cannot
+  > catch a combined-write lock no-op — it is a register-behaviour contract.
+  > **Coverage gap (open):** no automated test asserts `disable()` returns
+  > `-EPERM` under `CONFIG_WDT_NEORV32_LOCK=y` — see §9.1.
 
 ---
 
@@ -377,7 +475,7 @@ Every gate must be able to **fail**. The following hold today; keep them:
   opt-in, never baked into the base config).
 - Third-party GitHub Actions are SHA-pinned with version comments.
 
-> **Known robustness gaps in these gates are tracked in §9.7–§9.9.** They do not
+> **Known robustness gaps in these gates are tracked in §9.2–§9.3.** They do not
 > make a gate inert *today*, but they would let one pass silently under a future
 > layout change.
 
@@ -390,63 +488,45 @@ Close an item by fixing it and deleting its row. Items resolved on a branch stay
 recorded under §9.0 (with the durable lesson) until the PR merges, then collapse
 into the relevant §2–§8 clause.
 
-### 9.0 — Resolved in branch `fix/review-2-findings`
+### 9.0 — Resolved & collapsed (PR #6, merged `fc3b354`)
 
-The following were fixed in this branch and **build-verified** on the remote
-(Vivado 2025.1 host): `west twister -T zephyr_app --integration --exclude-tag hw`
-builds all four configurations (`baseline`, `shell.compile`, `wdt.compile`,
-`fft.compile`) clean under `-Werror`, 0 failed / 0 errored. The two functional
-fixes live in HW-only code paths (see notes) and are additionally **verified by
-construction against the NEORV32 v1.11.6 RTL**; full runtime confirmation needs
-the `xem7310` HIL runner.
+The "Review pass 2" findings are **merged on `master`** and their durable rules
+now live in the §2–§8 clauses — per this file's own rule, the rows are collapsed
+rather than carried:
 
-- **9.1 CRITICAL — WDT LOCK now engages** ([`wdt_neorv32.c`](zephyr_app/drivers/wdt/wdt_neorv32.c)).
-  `wdt_setup()` was writing `EN|STRICT|LOCK|TIMEOUT` in one CTRL write, but
-  [`neorv32_wdt.vhd:95`](neorv32/rtl/core/neorv32_wdt.vhd#L95) only latches LOCK
-  if EN was *already* set (`ctrl.lock <= data(lock) and ctrl.enable`), so with
-  `CONFIG_WDT_NEORV32_LOCK=y` the lock never engaged and `disable()` still
-  succeeded — the tamper-resistance did not exist (masked because the Kconfig
-  defaults off). **Fix:** the lock is now a *second* CTRL write (`EN|STRICT|
-  TIMEOUT`, then `… |LOCK`) so EN is already 1 when LOCK latches.
-  *HW-only path (lock defaults off); needs a HIL test that asserts `disable()`
-  returns `-EPERM` under lock.*
-  > **Lesson:** the NEORV32 WDT requires a two-step enable-then-lock; a combined
-  > write silently no-ops the lock. Synthesis/compile cannot catch this — it is
-  > a hardware-semantics contract.
+- **WDT LOCK two-step write** (was 9.1) → §6 "WDT lock requires a two-step
+  enable-then-lock write". *Code fixed; the `-EPERM`-under-lock test gap is the
+  one piece that remains open — re-filed as §9.1 below.*
+- **I2C interrupt-path zero-length skip** (was 9.2) → §6 "The I2C interrupt path
+  skips zero-length messages".
+- **Doc/comment drift** (was 9.3–9.7) → corrected in the relevant clauses
+  (overflow GPIO-latch readback in §5; AXI-INTC topology; the `fp_fft_pipe_bridge`
+  same-edge-publish rationale folded into §3.2/§3.6).
 
-- **9.2 MAJOR — I2C interrupt path now skips zero-length messages**
-  ([`i2c_neorv32.c`](zephyr_app/drivers/i2c/i2c_neorv32.c)). The IRQ state
-  machine lacked the polling path's `len==0` skip, so a zero-length message
-  (bus scan / SMBus quick command) dereferenced `buf[0]` of an empty buffer and
-  clocked one stray byte. **Fix:** skip leading zero-length messages at transfer
-  start and trailing ones at each `next_msg` advance, matching the polling path.
-  *HW-only path (`CONFIG_I2C_NEORV32_INTERRUPT`); the GHDL sim uses the polling
-  path.*
+### Open for RC1
 
-- **9.3–9.7 — confirmed drift corrected** (code was already right; prose was
-  stale): the three overflow docstrings now describe the GPIO-latch readback
-  (not an interrupt); `app_accel.overlay` header now describes the v1.1 AXI INTC
-  topology (not the obsolete xlconcat/IRQ-0); the `fft_accel.c` overflow-stability
-  comment is re-anchored on the latch/aresetn argument; both `fp_fft_pipe_bridge`
-  M3 comments now give the correct same-edge-publish rationale (and a "do NOT
-  reintroduce a handshake" warning); the I2C FIRQ comment now states the real
-  level condition + spurious-entry guard; `prj_accel.conf`, `DEVELOPER.md` tree,
-  `main.cpp` suite list, and the binding-YAML `dma` aperture (now `0x80`) are
-  reconciled.
+Each item is a confirmed gap with a source anchor and an RC1 disposition
+(**BLOCKER** / **ADVISED** / **NICE**). Close by fixing and deleting the row.
+
+#### 9.1 — ADVISED — no automated test that WDT LOCK blocks `disable()`
+The two-step lock is fixed in code (§6), but no ZTEST asserts `wdt_disable()`
+returns `-EPERM` under `CONFIG_WDT_NEORV32_LOCK=y` — it is a HW-semantics
+contract a compile cannot catch, and the Kconfig defaults off.
+> **Fix:** a HIL ZTEST that enables the lock and asserts `disable()` → `-EPERM`.
 
 ### CI robustness gaps (latent, not inert today)
 
-#### 9.8 — clang-tidy / Twister can pass on an empty selection
-[`ci.yml:295-325`](.github/workflows/ci.yml#L295-L325): the clang-tidy step pipes
-the selected-file list into `xargs` **without `-r`/`--no-run-if-empty`**, and
-GNU `xargs` runs the command once on empty input (verified: exit 0). If the path
+#### 9.2 — ADVISED — clang-tidy / Twister can pass on an empty selection
+[`ci.yml`](.github/workflows/ci.yml): the clang-tidy step pipes the
+selected-file list into `xargs` **without `-r`/`--no-run-if-empty`**, and GNU
+`xargs` runs the command once on empty input (verified: exit 0). If the path
 filter ever selects zero files, clang-tidy processes nothing and the gate passes
-silently. Likewise [`ci.yml:158-164`](.github/workflows/ci.yml#L158-L164):
-Twister exits 0 if `--integration` narrows the selection to zero testcases.
+silently. Likewise Twister exits 0 if `--integration` narrows the selection to
+zero testcases.
 > **Fix:** assert the file list is non-empty before `xargs` (and/or add `-r`);
 > after Twister, assert ≥1 testcase actually built/ran.
 
-#### 9.9 — Accelerator and WDT drivers are never linted, and no ZTEST covers overflow
+#### 9.3 — ADVISED — accelerator/WDT drivers are never linted; no ZTEST covers overflow
 The firmware-analysis build uses `prj.conf`, so `drivers/accel/fft_accel.c`
 (gated `CONFIG_FFT_ACCEL`) and `drivers/wdt/wdt_neorv32.c`
 (gated `CONFIG_WDT_NEORV32`) are absent from `compile_commands.json` and never
@@ -459,12 +539,21 @@ the M1 chain.
 > `overflow == false` for an in-range frame (the positive-assertion case needs
 > the deliberately under-scaled bitstream and stays HIL-only).
 
-#### 9.10 — `test_y_n_minus_1` is a weak guard for the under-length-S2MM mode
-[`test_fft_accel.cpp:222-242`](zephyr_app/tests/test_fft_accel.cpp#L222-L242)
-asserts only `mag_sq(g_out[4095]) > 0`. Because the file-scope buffer is reused,
-a stale value left in `BRAM[4095]` by a prior frame would also pass. **Fix:**
-clear `g_out[N-1]` to a sentinel before the transform, or assert it is
-comparable to the symmetric peak `g_out[1]`.
+#### 9.4 — ADVISED — `test_y_n_minus_1` is a weak guard for the under-length-S2MM mode
+[`test_fft_accel.cpp`](zephyr_app/tests/test_fft_accel.cpp) asserts only
+`mag_sq(g_out[4095]) > 0`. Because the file-scope buffer is reused, a stale value
+left in `BRAM[4095]` by a prior frame would also pass. **Fix:** clear
+`g_out[N-1]` to a sentinel before the transform, or assert it is comparable to
+the symmetric peak `g_out[1]`.
+
+#### 9.5 — NICE — the host filter control path has no automated regression gate
+The §5b firmware double-read debounce and the `tools/fft_demo` PyQt client are
+exercised only by the §5a HIL brick-wall tests and host-side unit tests run
+by hand; neither the debounce nor the GUI has a CI gate. Not RC1-blocking (the
+datapath they drive is HIL-verified), but a future change could silently break
+the freq-vs-time interpretation or the tear-window guard.
+> **Fix:** add the `tools/fft_demo` mask-replica + offscreen-UI tests to CI
+> (`host-tests`-style), and a sim/HIL assertion on the applied-status echo.
 
 ---
 
