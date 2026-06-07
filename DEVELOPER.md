@@ -431,6 +431,92 @@ Load the `.bit` via JTAG and open `.ltx` in Vivado Hardware Manager.
 
 ---
 
+## Boot and firmware loading
+
+The SoC boots through the **upstream NEORV32 BROM bootloader**, selected by the
+`BOOT_MODE_SELECT` generic on `neorv32_top`. Ostomachion uses two modes — one per
+target — so the same firmware ELF reaches the core by a different path in
+simulation and on hardware.
+
+| | Simulation (`neorv32_wrapper.vhd`) | FPGA (`xem7310_top.vhd`) |
+|---|---|---|
+| `BOOT_MODE_SELECT` | **2** — IMEM-as-ROM | **0** — internal BROM bootloader |
+| Firmware enters core via | IMEM pre-initialised at elaboration | UART upload (or SPI-flash auto-boot) |
+| First-contact UART baud | n/a (no negotiation) | **19200**, fixed in the BROM |
+| Why | skips the multi-second UART negotiation on every GHDL run | re-flash firmware without re-synthesising the bitstream |
+
+### Image artifacts
+
+Zephyr's post-build step runs the NEORV32 `image_gen` tool (located via
+`-DCMAKE_PROGRAM_PATH=$(IMAGE_GEN_DIR)`, [`neorv32/sw/image_gen/`](neorv32/sw/image_gen/))
+to emit three forms of the same firmware — pick the one the boot path needs:
+
+| Artifact | Format | Consumed by |
+|----------|--------|-------------|
+| `zephyr.bin` | raw binary, no header | input to `image_gen` (not booted directly) |
+| `zephyr_exe.bin` | **12-byte NEORV32 header** + binary | UART/SPI bootloader upload (hardware) |
+| `zephyr.vhd` | VHDL package initialising IMEM | GHDL simulation (IMEM-as-ROM) |
+
+The executable header is a 12-byte preamble — signature `0x4788CAFE`, byte
+count, and a two's-complement checksum — that the bootloader validates before
+copying the image to IMEM `0x0000_0000` and jumping to it. A signature or
+checksum mismatch is rejected (no partial image runs).
+
+### Simulation boot path
+
+`make zephyr` builds the app and copies `zephyr.vhd` to `zephyr_imem_image.vhd`;
+`make test-zephyr` analyses that package so IMEM is **pre-loaded at elaboration**.
+With `BOOT_MODE_SELECT=2` the core executes from `0x0000_0000` immediately — no
+bootloader, no UART handshake. (See [Testing → GHDL simulation](#ghdl-simulation).)
+
+### Hardware boot path
+
+On power-up (`BOOT_MODE_SELECT=0`) the BROM prints a banner and starts a ~10 s
+auto-boot countdown at 19200 baud:
+
+1. **Any received byte aborts** the countdown and drops to the interactive
+   bootloader console (`u` upload, `s` store-to-SPI-flash, `l` load-from-flash,
+   `e` execute).
+2. **On timeout** the BROM attempts to load a valid executable from SPI flash
+   (`0x0040_0000`); if found it copies it to IMEM and runs it, otherwise it
+   falls through to the console and waits.
+
+`make fpga-fw` (and `test-hw` / `test-accel-hw` / `shell-hw` / `demo-hw`) drive
+this with [`scripts/uart_upload.py`](scripts/uart_upload.py): send a space to
+abort the countdown, `u`, wait for `Awaiting neorv32_exe.bin`, stream
+`zephyr_exe.bin` in 256-byte chunks, then `e` to execute. All of it runs at the
+fixed 19200 baud.
+
+### The UART bridge and the 19200 → 115200 switch
+
+Without an external USB-UART adapter, the bootloader UART is tunnelled over
+FrontPanel by [`fp_uart_bridge.vhd`](fpga/xem7310/fp_uart_bridge.vhd) (BTPipe
+`0x80`/`0xA0`), and `make uart-bridge` exposes it as a host PTY. The bridge's
+baud divisor is driven from **WireIn `0x00`** (`baud_div = round(100 MHz /
+baud) − 1`: `0x1457` = 19200, `0x0363` = 115200), defaulting to 19200 for
+bootloader contact. After `uart_upload.py` finishes, the make targets signal the
+bridge with **`SIGUSR1`** to switch the divisor to 115200 — because the
+application console runs at 115200 while the BROM is locked to 19200. Connect a
+terminal (`minicom -b 115200`) to the PTY to see the application after upload.
+
+### Persistent boot (SPI flash) — two independent images
+
+The XEM7310 SPI flash holds **two unrelated images** at different offsets; do not
+conflate them:
+
+- **`make fpga-flash`** writes the **FPGA bitstream** (`*.bit`) to flash via the
+  FrontPanel `FlashLoader`, so the FPGA self-configures the SoC on every
+  power-up. It does **not** write firmware.
+- The bootloader's **`s` console command** writes the **firmware executable**
+  (`zephyr_exe.bin`, header included) to flash at `0x0040_0000`, so the BROM's
+  auto-boot loads it after the 10 s timeout. There is **no execute-in-place**:
+  the bootloader always copies the image into IMEM before running it.
+
+A fully persistent board therefore needs **both** — `fpga-flash` for the
+gateware and a one-time bootloader `s` for the firmware.
+
+---
+
 ## Design decisions
 
 **Two targets, one codebase.**  Target-specific differences are isolated to a
@@ -444,12 +530,14 @@ The polling fallback avoids FIRQ timing dependencies in the GHDL testbench.
 Both paths compile from the same source, gated by `#ifdef`.
 
 **`BOOT_MODE_SELECT = 2` for simulation, `0` for FPGA.**  Mode 2 skips the
-UART bootloader (a multi-second negotiation on every GHDL run).  Mode 0 on
-hardware lets `make fpga-fw` upload new firmware without re-synthesising.
+UART bootloader (a multi-second negotiation on every GHDL run); mode 0 on
+hardware lets `make fpga-fw` upload new firmware without re-synthesising.  Full
+boot flow in [Boot and firmware loading](#boot-and-firmware-loading).
 
 **115200 baud everywhere except the bootloader.**  The NEORV32 BROM always
 runs at 19200 baud — fixed, cannot change without recompiling the bootloader.
-Application firmware switches to 115200 immediately on boot.
+Application firmware switches to 115200 immediately on boot (the UART bridge
+follows via the `SIGUSR1` divisor switch).
 
 **No heap.**  `CONFIG_HEAP_MEM_POOL_SIZE = 0`.  See [Memory model](#memory-model).
 
