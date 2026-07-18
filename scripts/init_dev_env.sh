@@ -18,6 +18,9 @@
 #   FRONTPANEL_DIR                default: auto-detected from ~/OpalKelly/FrontPanel-*
 #                                           (required for make fpga-synth, make uart-bridge)
 #
+# Also adds FRONTPANEL_DIR/API/Python to PYTHONPATH so the host scripts can
+# `import ok` (the FrontPanel API); the SDK does not install it into any venv.
+#
 # shellcheck shell=bash
 
 if [[ "${BASH_SOURCE[0]:-}" == "${0}" ]]; then
@@ -97,6 +100,26 @@ fi
 # Non-fatal: Zephyr firmware builds do not need the SDK; only fpga-synth and uart-bridge do.
 if [[ -n "${FRONTPANEL_DIR:-}" && -d "${FRONTPANEL_DIR}" ]]; then
 	export FRONTPANEL_DIR
+
+	# Put the FrontPanel Python API (the `ok` module) on PYTHONPATH so the host
+	# scripts (fpga_program.py, uart_bridge.py, uart_upload.py) can `import ok`.
+	# The SDK ships ok.py + a stable-ABI _ok.so under API/Python; it is NOT
+	# installed into any venv/site-packages, so nothing finds it by default —
+	# and after a Python/OS upgrade (e.g. 3.13 → 3.14) any prior site-packages
+	# copy is off the new interpreter's path.  Exporting it here keeps the repo
+	# self-contained and upgrade-proof.  Skip silently if the dir is absent
+	# (older SDK layouts) and avoid duplicate entries on re-source.
+	_FP_PYAPI="${FRONTPANEL_DIR}/API/Python"
+	if [[ -d "${_FP_PYAPI}" ]]; then
+		case ":${PYTHONPATH:-}:" in
+			*":${_FP_PYAPI}:"*) : ;;                    # already present
+			*) export PYTHONPATH="${_FP_PYAPI}${PYTHONPATH:+:${PYTHONPATH}}" ;;
+		esac
+	else
+		echo "WARN: FrontPanel Python API not found: ${_FP_PYAPI}" >&2
+		echo "      'import ok' will fail — fpga-program, uart-bridge, and HIL targets need it." >&2
+	fi
+	unset _FP_PYAPI
 else
 	echo "WARN: FrontPanel SDK not found (FRONTPANEL_DIR=${FRONTPANEL_DIR:-<unset>})" >&2
 	echo "      Install from opalkelly.com and set FRONTPANEL_DIR to the SDK root." >&2
