@@ -243,3 +243,32 @@ returned but may be clipped for the overflowed bins.
 : Download the FrontPanel SDK from opalkelly.com, install it, then either
 let auto-detection find `~/OpalKelly/FrontPanel-*` or set `FRONTPANEL_DIR`
 explicitly before sourcing the script.
+
+**`No module named 'west'` (or `'ok'`, `'elftools'`, …) after a system upgrade**
+: A Python virtual environment is tied to the exact minor version it was
+created with (`~/.zephyr-venv/pyvenv.cfg` records e.g. `version = 3.13.7`).
+When the OS upgrades the system interpreter — for example Ubuntu 24.04 → 26.04
+moving `/usr/bin/python3` from 3.13 to 3.14 — the venv's `bin/python` now runs
+the new interpreter, which only searches `lib/python3.14/site-packages` while
+every package sits under `lib/python3.13/site-packages`. Result: `west` and all
+its dependencies vanish even though sourcing succeeds. **Rebuild the venv on the
+new interpreter:**
+
+```bash
+python3 -m pip freeze > /tmp/venv-freeze.txt        # capture the installed set (optional)
+mv ~/.zephyr-venv ~/.zephyr-venv.bak                # keep a rollback
+python3 -m venv ~/.zephyr-venv                       # fresh venv on the current python3
+source ~/.zephyr-venv/bin/activate
+pip install --upgrade pip setuptools wheel
+pip install west
+west update                                          # if the workspace also needs refreshing
+pip install -r ~/src/zephyrproject/zephyr/scripts/requirements.txt
+```
+
+The FrontPanel `ok` binding fails the same way for the same reason — it lives in
+`$FRONTPANEL_DIR/API/Python` (stable-ABI `_ok.so`, works across Python versions)
+and is put on `PYTHONPATH` by `init_dev_env.sh`, so once the venv is rebuilt and
+the SDK is present, `import ok` resolves without any per-version reinstall. The
+pyocd/pylink/spsdk debug-probe packages need the system `libusb-1.0` headers
+(`sudo apt install libusb-1.0-0-dev`) to build; they are not required for
+firmware builds, the UART bridge, or FrontPanel-based hardware-in-the-loop.
