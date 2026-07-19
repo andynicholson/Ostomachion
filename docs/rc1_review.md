@@ -31,7 +31,7 @@ correctness risk.
 |------|-------|----------|
 | Architecture / boundary model | ✅ sound | SmartConnect MM2S/S2MM exclusions; coeff BRAM CPU-only (REVIEW §5/§5a) |
 | Timing closure (current RTL) | ✅ **WNS +0.042 / WHS +0.015, 0 failing, DRC clean** | staged build `43ab2d0` = merged host-control RTL; `git log 43ab2d0..HEAD -- fpga/` empty |
-| Filter datapath | ✅ HW-verified | XEM7310 sn 2537001HTD: 14/14 fft, 7/7 filter_mask, brick-wall 16×/14×/13×, N-beat Outcome A (REVIEW §5a) |
+| Filter datapath | ✅ HW-verified | XEM7310: 14/14 fft, 7/7 filter_mask, brick-wall 16×/14×/13×, N-beat Outcome A (REVIEW §5a) |
 | §2 driver ordering contract | ✅ intact post-refactor | fences / `k_sem_reset` / W1C→IAR / S2MM-first all present in merged `fft_accel.c` |
 | Prior functional defects (WDT lock, I2C zero-len) | ✅ fixed & merged (#6) | collapsed into REVIEW §6 |
 | GHDL+Zephyr CI gate on RC commit | ✅ **green** | `make test-zephyr` on the RC commit: PROJECT EXECUTION SUCCESSFUL, 4 suites, 62 PASS, 0 FAIL/FATAL |
