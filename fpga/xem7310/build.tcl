@@ -270,14 +270,23 @@ puts "INFO: DRC clean — no error-severity violations found."
 # ---------------------------------------------------------------------------
 set git_hash    "unknown"
 set git_version "unknown"
+set git_commit  ""
 catch {
     set git_hash    [string trim [exec git -C $proj_root describe --always --dirty --abbrev=8]]
     set git_version [string trim [exec git -C $proj_root describe --tags --always --dirty --abbrev=8]]
+    # Raw commit hash for the USERID — always hex, unlike `describe`, which
+    # returns a tag-decorated string (e.g. "v1.0.0-rc1-4-gDEADBEEF") whenever a
+    # tag is reachable.  Deriving USERID from `describe` produced non-hex like
+    # "0xv1.0.0rc" and failed write_bitstream (BITSTREAM.CONFIG.USERID must be
+    # hex).  Use rev-parse so the USERID is well-formed at any tag/describe state.
+    set git_commit  [string trim [exec git -C $proj_root rev-parse --short=8 HEAD]]
 }
 set build_ts  [clock format [clock seconds] -format {%Y%m%d_%H%M%S}]
 set build_id  "${git_version} (git: ${git_hash}, built: ${build_ts})"
 
-set id_clean [string map {- "" g ""} $git_hash]
+# Keep only hex digits from the commit hash (defensive: a dirty tree can append
+# "-dirty" via other paths), then pad/truncate to the 8-nibble USERID field.
+set id_clean [regsub -all {[^0-9a-fA-F]} $git_commit ""]
 set id_clean [string range "${id_clean}00000000" 0 7]
 set_property BITSTREAM.CONFIG.USERID "0x${id_clean}" [current_design]
 
