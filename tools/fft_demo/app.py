@@ -409,15 +409,18 @@ class _PlotPanel(QtWidgets.QWidget):
     """Three stacked pyqtgraph panes:
 
       1. input time-domain (Re),
-      2. filtered output time-domain (Re) — autoranged; the ÷N inverse-xfft
-         scaling makes this ~1/N of the input, so a fixed full-scale axis would
-         render it invisible.  We autorange and label the scale honestly rather
-         than apply a hidden ×N display gain.
+      2. filtered output time-domain (Re).  With a re-normalised bitstream
+         (fabric FILTER_GAIN_SHIFT recovers the 1/N round-trip loss) the output
+         is input-referred, so pane 2 shares pane 1's FIXED [-1,1] axis and the
+         pass band fills it while a stop band sits near zero on the SAME scale —
+         directly comparable.  On a legacy ÷N-attenuated bitstream, pass
+         input_referred=False to autorange pane 2 instead (else it looks flat).
       3. FFT magnitude (dB) with the chosen filter mask H[k] passband shaded.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, input_referred: bool = True) -> None:
         super().__init__()
+        self._input_referred = input_referred
         pg.setConfigOption("antialias", True)
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -436,9 +439,12 @@ class _PlotPanel(QtWidgets.QWidget):
         self.time_curve = self.time_plot.plot(pen=pg.mkPen("#4af", width=1))
         layout.addWidget(self.time_plot, 1)
 
-        # ── Pane 2: filtered output time-domain (autoranged Y) ────────────
-        self.out_plot = pg.PlotWidget(
-            title="Filtered output (time domain, Re) — HW ÷N inverse, autoranged")
+        # ── Pane 2: filtered output time-domain ───────────────────────────
+        _out_title = (
+            "Filtered output (time domain, Re) — input-referred, same scale as input"
+            if input_referred else
+            "Filtered output (time domain, Re) — HW ÷N inverse, autoranged")
+        self.out_plot = pg.PlotWidget(title=_out_title)
         self.out_plot.setLabel("bottom", "Sample")
         self.out_plot.setLabel("left", "Q1.15 value")
         self.out_plot.enableAutoRange(x=False, y=False)
@@ -504,12 +510,18 @@ class _PlotPanel(QtWidgets.QWidget):
         self.hw_curve.setData(bins, hw_mag_db)
         self.sw_curve.setData(bins, sw_mag_db)
 
-        # Pane 2: filtered output (autoranged around its own peak).
+        # Pane 2: filtered output.  Input-referred (re-normalised bitstream) →
+        # share the fixed [-1.05, 1.05] axis so pass vs stop band amplitude is
+        # directly comparable against pane 1.  Legacy attenuated bitstream →
+        # autorange around the pane's own peak (else it renders flat).
         if filtered and out_re is not None:
             self.out_curve.setData(np.arange(out_re.size), out_re)
-            peak = float(np.max(np.abs(out_re))) if out_re.size else 0.0
-            span = max(peak * 1.05, 1e-6)        # floor avoids a zero-height axis
-            self.out_plot.setYRange(-span, span, padding=0)
+            if self._input_referred:
+                self.out_plot.setYRange(-1.05, 1.05, padding=0)
+            else:
+                peak = float(np.max(np.abs(out_re))) if out_re.size else 0.0
+                span = max(peak * 1.05, 1e-6)    # floor avoids a zero-height axis
+                self.out_plot.setYRange(-span, span, padding=0)
             self._set_out_note("")
         else:
             self.out_curve.setData([], [])
@@ -775,8 +787,9 @@ class FftDemoWindow(QtWidgets.QMainWindow):
     _push_input = QtCore.pyqtSignal(object)
     _request_set_filter = QtCore.pyqtSignal(int, int, int)   # mode, lo, hi
 
-    def __init__(self, serial: str | None) -> None:
+    def __init__(self, serial: str | None, input_referred: bool = True) -> None:
         super().__init__()
+        self._input_referred = input_referred
         self.setWindowTitle("Ostomachion FFT accelerator demo")
         self.resize(1200, 800)
 
@@ -811,7 +824,7 @@ class FftDemoWindow(QtWidgets.QMainWindow):
         left.addStretch(1)
 
         main_lo.addLayout(left, 0)
-        self.plots = _PlotPanel()
+        self.plots = _PlotPanel(input_referred=self._input_referred)
         main_lo.addWidget(self.plots, 1)
         self.setCentralWidget(central)
 
@@ -970,10 +983,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--serial", type=str, default=None,
                         help="Opal Kelly device serial number "
                              "(default: first available)")
+    parser.add_argument("--attenuated-output", action="store_true",
+                        help="Autorange pane 2 for a legacy 1/N-attenuated "
+                             "bitstream (default: input-referred fixed axis, "
+                             "matching a re-normalised FILTER_GAIN_SHIFT build)")
     args = parser.parse_args(argv)
 
     app = QtWidgets.QApplication(sys.argv)
-    win = FftDemoWindow(serial=args.serial)
+    win = FftDemoWindow(serial=args.serial,
+                        input_referred=not args.attenuated_output)
     win.show()
     return app.exec()
 
