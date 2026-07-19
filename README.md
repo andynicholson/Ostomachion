@@ -20,7 +20,7 @@ philosophy: a small set of composable, interlocking parts that assemble into a c
 
 ## What is Ostomachion?
 
-[NEORV32 RISC-V](https://github.com/stnolting/neorv32) SoC running [Zephyr RTOS](https://www.zephyrproject.org/) on FPGA bare metal - with an extensible accelerator pipeline architecture, including an DMA-enabled programmable spectral filter pipeline - wrapped in C++20 HAL from fabric to std::span.
+[NEORV32 RISC-V](https://github.com/stnolting/neorv32) SoC running [Zephyr RTOS](https://www.zephyrproject.org/) on FPGA bare metal - with an extensible accelerator pipeline architecture, including a DMA-enabled programmable spectral filter pipeline - wrapped in C++20 HAL from fabric to std::span.
 
 The entire FPGA build is programmatic — a single Tcl script regenerates the full Vivado block design (IP configuration, clock tree, AXI address map, interconnect, and optional ILA debug probes) under headless `vivado -mode batch`, so every bitstream is reproducible from version-controlled text alone with no hand-edited checkpoints or saved GUI state anywhere in the tree.
 
@@ -58,6 +58,84 @@ Every layer is a thin, replaceable wrapper over the one below it — from a
 Fabric RTL is split between **hand-written board VHDL** and a **Tcl-built Vivado block design**. `fpga/xem7310/xem7310_top.vhd` is the top: it brings in the 200 MHz LVDS clock (`IBUFDS`), pads and primitives for SPI, UART, TWI (`IOBUF`), JTAG and LEDs, **FrontPanel** (`okHost`, wires, pipes), **`fp_uart_bridge`** and **`fp_fft_pipe_bridge`** (NEORV32 UART / FFT samples ↔ host pipes), the **`spectral_filter`** and bypass mux, **`neorv32_top`**, and **`xbus2axi4_bridge`**, which terminates in the AXI4-Lite master port **`s_axi_cpu`** on the block design. The SoC external interrupt **`mext_irq`** is driven from the BD. Vivado generates **`ostomachion_bd_wrapper`** from `fpga/xem7310/ostomachion_bd.tcl` (`make_wrapper`); that wrapper contains **only Xilinx IP** — application logic (the filter, the mux, the beat counters) lives in the board RTL, never inside the canvas.
 
 ![FPGA fabric hierarchy](docs/diagrams/fabric_hierarchy.svg)
+
+## Live spectral-filter demo
+
+The clearest way to *see* the platform working is the **PyQt6 desktop demo**
+([`tools/fft_demo/`](tools/fft_demo/)): it streams frames to the real FPGA,
+runs them through the genuine **FFT → per-bin filter → IFFT** fabric datapath,
+and plots what comes back — in real time, over the FrontPanel USB link.
+
+<!-- Replace with the recorded session (screen capture of `python -m fft_demo`
+     driving the live filter).  Drop the file at docs/img/fft_demo.gif (or .mp4)
+     and it renders here. -->
+<p align="center">
+  <img src="docs/img/fft_demo.gif" alt="Ostomachion live spectral-filter demo: input, filtered output, and FFT magnitude with the filter mask overlaid" width="820"/>
+</p>
+
+> **Recording:** the clip above shows a host-generated signal being filtered
+> *in fabric* — as the cutoff sliders move, the shaded pass-band on the
+> spectrum tracks them and the filtered time-domain output changes live, with
+> no re-synthesis and no host-side DSP.
+
+### What the recording shows
+
+Everything in the window is driven by the FPGA, not simulated on the host. The
+demo firmware ([`fft_demo_main.c`](zephyr_app/src/fft_demo_main.c)) reads each
+input frame from a FrontPanel pipe into TX BRAM, runs `fft_accel_transform()`
+(bypass → frequency bins) or `fft_accel_transform_filtered()` (→ filtered
+time-domain) through the accelerator driver, and streams the result back — the
+same DMA/xfft/INTC contract used everywhere else, only with FrontPanel pipes
+substituted for UART on the bulk-sample path.
+
+**Left panel — you drive the inputs live:**
+
+- **Signal source** — Sine, Two sines, Noise, Sine + noise, or DC, with
+  amplitude, per-tone bin, and noise-σ controls. Each frame is generated on the
+  host as 4096 Q1.15 complex samples and pushed to the fabric.
+- **Spectral filter (fabric)** — pick **Low-pass**, **High-pass**,
+  **Band-pass**, or **Notch** (or **Off** for the plain forward FFT) and drag
+  the cutoff / band-edge sliders. The selection is packed into a control word
+  and sent over `WireIn 0x01`; the firmware synthesises the brick-wall mask
+  `H[k]`, loads it into the coefficient BRAM, and switches the datapath to the
+  filtered round trip. Slider drags are debounced so a sweep doesn't reload the
+  mask every pixel.
+
+**Three stacked plots — what the fabric returns:**
+
+1. **Input signal (time domain)** — the generated frame, on a fixed ±1 axis.
+2. **Filtered output (time domain)** — the IFFT result coming back from the
+   fabric. With the v1.0.0 **unity round trip** (unscaled inverse FFT, see
+   [ACCEL_ARCH.md §7.1](ACCEL_ARCH.md)) this pane shares the input's fixed ±1
+   axis, so a passed signal returns at ~input amplitude and a stopped one sits
+   near zero **on the same scale** — pass vs stop bands are directly comparable
+   by eye. (A `--attenuated-output` flag restores the old autoranged view for a
+   legacy ÷N-scaled bitstream.)
+3. **FFT magnitude (dB) + filter mask** — the hardware spectrum with the chosen
+   filter's pass-band `H[k]` shaded on top, so you can watch the mask move with
+   the sliders and see which bins survive. In bypass it also overlays the
+   host `numpy.fft` reference (dashed) as a correctness check.
+
+**Live stats (updated every frame)** report the hardware compute time
+(`HW FFT cycles`), the host `numpy` time for comparison, the end-to-end frame
+rate, the numerical agreement at the peak bin and HW SFDR (in bypass), the
+filter mode the fabric is actually applying (read back from `WireOut 0x28`),
+and an **OVERFLOW** flag if a transform saturated.
+
+### Running it yourself
+
+```bash
+source scripts/init_dev_env.sh
+make fpga-synth && make fpga-program        # one-time: build + load the bitstream
+make demo-hw UART_DEVICE=/dev/pts/N         # build + upload the demo firmware (via the UART bridge)
+pip install -r tools/fft_demo/requirements.txt
+python3 -m fft_demo                          # launch the GUI, then click "Open FrontPanel" → "Start"
+```
+
+A headless smoke test (`python3 -m fft_demo.smoke_test`) and an on-hardware
+control-channel test (`python3 -m fft_demo.hil_filter_test`) verify the same
+path without a display. Full walkthrough and protocol details in
+[`tools/fft_demo/README.md`](tools/fft_demo/README.md).
 
 ## Repository layout
 
@@ -103,6 +181,7 @@ See [GETTING_STARTED.md](GETTING_STARTED.md) for the full setup walkthrough.
 | `make uart-bridge` | Start FrontPanel UART bridge (PTY) |
 | `make test-accel-hw` | Upload and run FFT accelerator ZTEST suite |
 | `make shell-hw` | Upload interactive shell firmware |
+| `make demo-hw` | Upload the live spectral-filter demo firmware (pairs with the PyQt6 GUI) |
 
 ## License
 
