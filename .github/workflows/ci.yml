@@ -49,7 +49,14 @@ jobs:
   sim:
     name: GHDL + Zephyr simulation
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    # The 1200 ms GHDL co-sim runs the CPU cycle-accurately; on the current
+    # GitHub-hosted runner it needs ~205 min of wall time to reach the closing
+    # "PROJECT EXECUTION SUCCESSFUL" banner (measured: ~702 ms sim-time in
+    # ~120 min).  All test suites PASS well before the end — the tail is the
+    # slow simulated UART transmitting the per-test summary + banner.  The old
+    # 120 min ceiling cancelled the job at the banner, so it never reported
+    # green despite passing.  300 min gives headroom over the ~205 min runtime.
+    timeout-minutes: 300
 
     steps:
       - name: Checkout
