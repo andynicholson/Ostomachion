@@ -36,11 +36,24 @@ LO_TONE = 64       # low tone bin
 HI_TONE = 600      # high tone bin
 CUT = 256          # cutoff between them (folded bin)
 MIN_RATIO = 8.0    # required pass/stop magnitude ratio
+# Unity round-trip band: an all-pass / in-passband tone must return at input
+# level (the unscaled-inverse gain budget, ACCEL_ARCH §7.1).  A doubly-scaled
+# (÷N) inverse would return ~1/4096 of input and fail this — the regression
+# guard for the scaling word.  Wide band absorbs Q1.15 quantisation + 1-LSB
+# rounding on a full round trip.
+UNITY_LO, UNITY_HI = 0.80, 1.20
 
 
 def _peak_bin(frame_q15) -> int:
     c = (frame_q15[:, 0].astype(np.float64) + 1j * frame_q15[:, 1].astype(np.float64))
     return int(np.argmax(np.abs(c)))
+
+
+def _peak_frac(frame_q15) -> float:
+    """Peak |sample| (either rail) as a fraction of Q1.15 full scale."""
+    import numpy as _np
+    m = _np.maximum(_np.abs(frame_q15[:, 0]), _np.abs(frame_q15[:, 1]))
+    return float(m.max()) / float(Q15_UNIT) if frame_q15.size else 0.0
 
 
 def _tone_mag(out_q15, bin_idx) -> float:
@@ -124,6 +137,30 @@ def main() -> int:
                   file=sys.stderr); fails += 1
     else:
         print("SKIP: filter unavailable — cannot judge brick-wall ratio")
+
+    # ── 4. Unity round trip — absolute level, not just ratio ──────────────
+    # A single tone INSIDE a low-pass passband must return at ~input amplitude
+    # (unscaled inverse => y[n] = x[n]).  Guards against a regression to a
+    # scaled (÷N) inverse word, which would return ~1/4096 of input.
+    AMP = 0.5
+    in_tone = make_sine(AMP, LO_TONE, FFT_N)
+    in_frac = _peak_frac(in_tone)
+    st_u, out_u = run(pack_q15_frame(in_tone), fm.MODE_LP, 0, CUT, "unity")
+    out_frac = _peak_frac(out_u)
+    if st_u["avail"]:
+        gain = out_frac / in_frac if in_frac else 0.0
+        print(f"  [unity]    in={in_frac:.4f}FS out={out_frac:.4f}FS "
+              f"out/in={gain:.3f} (want {UNITY_LO}-{UNITY_HI})")
+        if not (UNITY_LO <= gain <= UNITY_HI):
+            print(f"FAIL: round-trip gain {gain:.3f} outside "
+                  f"[{UNITY_LO}, {UNITY_HI}] — inverse xfft scaling word wrong? "
+                  f"(a ÷N inverse gives ~1/4096)", file=sys.stderr)
+            fails += 1
+        if st_u["overflow"]:
+            print("FAIL: overflow on an in-passband unity tone", file=sys.stderr)
+            fails += 1
+    else:
+        print("SKIP: filter unavailable — cannot judge unity round trip")
 
     if st_lp["overflow"] or st_hp["overflow"]:
         print("NOTE: overflow flagged on a filtered frame", file=sys.stderr)
