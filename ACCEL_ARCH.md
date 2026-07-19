@@ -349,20 +349,37 @@ RX BRAM.
 
 ### 7.1. Inverse-FFT scaling — the factor-of-N trap
 
-The forward word `0x1555` already applies `1/N` (six ÷4 radix-4 stages).  A true
-inverse needs a TOTAL `1/N`, so stacking a second ÷N inverse would give `1/N²`.
-Two inverse config words exist:
+The forward word `0x1555` already applies `1/N` (six ÷4 radix-4 stages).  A
+DFT/IDFT pair needs a TOTAL `1/N` applied **once** — and the forward has already
+spent it — so the inverse must run **unscaled** for a unity round trip.  Two
+inverse config words exist:
 
 | `xfft_1` word | Inverse scaling | Net round-trip gain | Use |
 |---------------|-----------------|---------------------|-----|
-| **`0x1554`** (production) | ÷N (six ÷4) | `1/N` (attenuated) | Overflow-safe default — internal magnitudes never grow |
-| `0x0000` (demo only) | unscaled | `1` (exact identity ×filter) | Low-amplitude all-pass round-trip demonstration only; can overflow at scale |
+| **`0x0000`** (production) | unscaled (no ÷4) | `1` (unity round trip) | Output returns at input level — pass/stop bands comparable on an absolute amplitude axis |
+| `0x1554` (legacy) | ÷N (six ÷4) | `1/N` (attenuated ~72 dB) | Overflow-safe but the round trip is `1/4096` of input; only RELATIVE (pass ≫ stop) behaviour is meaningful |
 
-The production transform is therefore an **attenuated** round trip
-`y[n] = (1/N)·inverse(filtered_spectrum)`.  Tests check RELATIVE behaviour
-(pass-band ≫ stop-band energy), not absolute amplitude.  Masks should be
-Hermitian-symmetric (`H[N−k] = conj(H[k])`) so a real input yields a real
-output.
+The production transform is therefore a **unity** round trip
+`y[n] = inverse(filtered_spectrum) = filtered(x)[n]` (identity on an all-pass
+mask).  HW-verified on the XEM7310: a 0.5-full-scale input tone through a
+low-pass that passes it returns at **0.4999 FS** (`output/input = 1.000`), no
+overflow.  Masks should be Hermitian-symmetric (`H[N−k] = conj(H[k])`) so a real
+input yields a real output.
+
+> **Overflow trade-off.** An unscaled inverse lets internal IFFT magnitudes grow
+> up to `~N`, so a full-scale *broadband* spectrum can overflow.  This datapath
+> targets *band-limited, filtered* signals at modest amplitude, where the
+> reconstruction stays bounded; any excursion saturates and is flagged on the
+> aggregated overflow readback (GPIO2 bit1).  If loud broadband inputs are
+> expected, move toward a **partial**-scaling word (÷4 on some inverse stages, a
+> ~`1/√N` split) to trade a little attenuation for headroom.
+>
+> **Why not compensate earlier?** The visible attenuation is the inverse xFFT's
+> own ÷N, applied to the *reconstructed time signal*, which is downstream of the
+> per-bin mask.  A concentrated tone bin is already large after the forward FFT
+> (~0.25 FS measured in bypass), so adding gain before the IFFT only saturates
+> the spectrum while the IFFT's ÷N still divides the time output by `N`.  The
+> fix therefore belongs at the inverse scaling word, not in the filter/normalizer.
 
 ### 7.2. Filter design rules (extend §4)
 

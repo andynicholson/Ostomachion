@@ -197,7 +197,7 @@ GitHub-hosted GHDL).  CI sets `ZEPHYR_SIM_TIME=800ms`.
 - **INTC channel assignment** — Zephyr driver demuxes by channel index
 - **Pin constraints** in [`fpga/xem7310/xem7310.xdc`](fpga/xem7310/xem7310.xdc) — board-specific, timing-critical
 - **Filter datapath latency / pipelining** in [`fpga/xem7310/spectral_filter.vhd`](fpga/xem7310/spectral_filter.vhd) — the complex multiply is pipelined to close timing AND latency-matched so TLAST still marks beat N-1; changing stage count without re-matching TVALID/TLAST breaks the exactly-N-beats invariant (verify WireOut 0x27)
-- **xfft_1 scaling word** (`const_ifft_cfg` in `ostomachion_bd.tcl`) — `0x1554` (÷N, overflow-safe) is the production default; see ACCEL_ARCH §3 for the factor-of-N gain budget
+- **xfft_1 scaling word** (`const_ifft_cfg` in `ostomachion_bd.tcl`) — `0x0000` (unscaled) is the production default: the forward FFT already applies the pair's single ÷N, so an unscaled inverse gives a **unity** round trip. The legacy `0x1554` (÷N) attenuated the output by 1/N (~72 dB). Changing it shifts the whole gain budget — see ACCEL_ARCH §7.1
 - **coeff BRAM read latency** — `spectral_filter` assumes Port B `READ_LATENCY=1`; an extra register would mis-align H[k] vs X[k] (a 1-bin coefficient shift)
 
 ---

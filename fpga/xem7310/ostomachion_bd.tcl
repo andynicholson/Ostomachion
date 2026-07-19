@@ -92,16 +92,25 @@ set_property -dict {CONFIG.CONST_WIDTH {16} CONFIG.CONST_VAL {5461}} \
 ## Word = 0b 0001 0101 0101 0100 = 0x1554 = 5460.
 ##
 ## Scaling rationale (the factor-of-N trap):  the forward stage (0x1555) already
-## applies 1/N, computing X[k] = (1/N)·Σ x[n]·e^{-j2πnk/N}.  A true inverse needs
-## a TOTAL 1/N, but stacking another ÷N inverse would give 1/N².  We deliberately
-## ship the ÷N-scaled inverse (0x1554) as the OVERFLOW-SAFE production default:
-## the transform is then an attenuated round trip y[n] = (1/N)·inverse(filtered),
-## matching the conservative forward-stage philosophy.  (An UNSCALED inverse word
-## 0x0000 gives an exact-identity round trip but lets internal magnitudes grow
-## ~N and can overflow; it is used only for the low-amplitude all-pass HW demo.)
-## See REVIEW.md and ACCEL_ARCH.md §3 for the full gain budget.
+## applies 1/N, computing X[k] = (1/N)·Σ x[n]·e^{-j2πnk/N}.  A true inverse DFT
+## needs a TOTAL 1/N across the pair, and the forward has already spent it — so
+## the inverse must run UNSCALED (0x0000, no per-stage ÷4) for a unity round trip
+## y[n] = x[n] on an all-pass mask.  The previous ÷N-scaled inverse (0x1554) gave
+## y[n] = (1/N)·x[n] — attenuated by 1/4096 (~72 dB), which made the filtered
+## output ~0.0005 FS and pass/stop bands incomparable on the host demo's
+## amplitude axes.  HIL confirmed the attenuation is the inverse xfft's own ÷N
+## (downstream of the mask), so it must be removed HERE, not compensated earlier.
+##
+## Overflow note: an unscaled inverse lets internal IFFT magnitudes grow up to
+## ~N, so a full-scale broadband spectrum can overflow.  For the filtered
+## (band-limited) and modest-amplitude signals this datapath targets, the
+## reconstructed magnitude stays bounded; any excursion saturates and is flagged
+## on the aggregated overflow readback (GPIO2 bit1 / WireOut).  Reduce toward a
+## partial-scaling word if loud broadband inputs are expected.
+## Word = 0b 0000 0000 0000 0000 = 0x0000 = 0 (FWD_INV=0, all stages unscaled).
+## See REVIEW.md and ACCEL_ARCH.md §3 / §7.1 for the full gain budget.
 create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 const_ifft_cfg
-set_property -dict {CONFIG.CONST_WIDTH {16} CONFIG.CONST_VAL {5460}} \
+set_property -dict {CONFIG.CONST_WIDTH {16} CONFIG.CONST_VAL {0}} \
     [get_bd_cells const_ifft_cfg]
 
 ## ── 3. Reset: Processor System Reset ───────────────────────────────────────
@@ -163,7 +172,7 @@ set_property -dict {
 
 ## ── 6b. Inverse FFT (xfft_1) — IFFT stage of FFT → filter → IFFT ────────────
 ## Identical configuration to xfft_0 except the transform direction is set per
-## frame by the inverse config word (const_ifft_cfg = 0x1554, FWD_INV=0) driven
+## frame by the inverse config word (const_ifft_cfg = 0x0000, FWD_INV=0, unscaled) driven
 ## on s_axis_config below.  natural_order output means xfft_1 emits y[n] in
 ## sequential time order so it lands in RX BRAM 1:1 (out[i] = BRAM[i]) exactly
 ## like the forward path does today — the driver read loop is unchanged.  Shares
@@ -536,8 +545,10 @@ connect_bd_net [get_bd_ports s2mm_tlast]  [get_bd_pins axi_dma_0/S_AXIS_S2MM_TLA
 connect_bd_net [get_bd_ports s2mm_tdata]  [get_bd_pins axi_dma_0/S_AXIS_S2MM_TDATA]
 connect_bd_net [get_bd_pins axi_dma_0/S_AXIS_S2MM_TREADY] [get_bd_ports s2mm_tready]
 
-## xfft config words: forward (const_fft_cfg=0x1555) on xfft_0, inverse
-## (const_ifft_cfg=0x1554) on xfft_1.  Same const_one tvalid/tlast handshake.
+## xfft config words: forward (const_fft_cfg=0x1555, ÷N) on xfft_0, inverse
+## (const_ifft_cfg=0x0000, unscaled) on xfft_1 — the forward already applied the
+## total 1/N, so an unscaled inverse yields a unity round trip.  Same const_one
+## tvalid/tlast handshake.
 proc connect_fft_config {cell cfg_const} {
     set tdata  [get_bd_pins -quiet $cell/s_axis_config_tdata]
     set tvalid [get_bd_pins -quiet $cell/s_axis_config_tvalid]

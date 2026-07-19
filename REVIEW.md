@@ -305,10 +305,17 @@ forward FFT and the filtered round trip.
   Port B during a transform; the two never touch the same address. Port B keeps
   `READ_LATENCY=1` (no output register) and is latency-compensated against `X`,
   so `H[k]` aligns with `X[k]` — an added register shifts the mask one bin.
-- **Inverse scaling word `0x1554` (÷N) is the production default.** Forward +
-  inverse both ÷N gives a `1/N` round-trip (attenuated, overflow-safe). The
-  unscaled `0x0000` (exact-identity ×filter, but can overflow) is for the
-  low-amplitude all-pass demo ONLY. See ACCEL_ARCH §7.1 for the gain budget.
+- **Inverse scaling word `0x0000` (unscaled) is the production default.** A
+  DFT/IDFT pair applies its single `1/N` once; the forward (`0x1555`) already
+  spends it, so an unscaled inverse yields a **unity** round trip `y[n] = x[n]`
+  (HW-verified: 0.5 FS tone → 0.4999 FS out, `output/input = 1.000`, no
+  overflow). The legacy `0x1554` (÷N) doubly-scaled the pair to `1/N` and
+  attenuated the output ~72 dB, so the host demo could only compare RELATIVE
+  pass/stop energy, not absolute amplitude. The attenuation is the inverse
+  xFFT's own ÷N (downstream of the mask), so it is removed AT the inverse word,
+  not compensated earlier. Trade-off: an unscaled inverse can overflow on a
+  full-scale broadband spectrum; band-limited filtered signals stay bounded and
+  any excursion saturates + flags the overflow readback. See ACCEL_ARCH §7.1.
 - **Channel map preserved.** INTC Ch2 frame-done is re-sourced from `xfft_1`
   (IFFT done); `NUM_PORTS`, `C_KIND_OF_INTR`, IER, and the ISR are UNCHANGED.
   GPIO widened to 2 bits each way (ch1 bit1 = bypass, ch2 bit1 = aggregated
