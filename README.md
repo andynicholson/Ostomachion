@@ -66,9 +66,6 @@ The clearest way to *see* the platform working is the **PyQt6 desktop demo**
 runs them through the genuine **FFT → per-bin filter → IFFT** fabric datapath,
 and plots what comes back — in real time, over the FrontPanel USB link.
 
-<!-- Replace with the recorded session (screen capture of `python -m fft_demo`
-     driving the live filter).  Drop the file at docs/img/fft_demo.gif (or .mp4)
-     and it renders here. -->
 <p align="center">
   <img src="docs/img/fft_demo.gif" alt="Ostomachion live spectral-filter demo: input, filtered output, and FFT magnitude with the filter mask overlaid" width="820"/>
 </p>
