@@ -92,7 +92,7 @@ and prints HW cycles per frame.  Exit code is 0 on success.
 Typical good run with a current `master` bitstream and `demo-hw` firmware:
 
 ```
-Device : Opal Kelly XEM7310 sn=2537001HTD fw=1.60
+Device : Opal Kelly XEM7310 sn=<redacted> fw=1.60
 FIFOs  : in=0 out=0
   DC (amp=0.5)          peak bin=   0  expected=[0]          PASS
   Cosine bin 1          peak bin=   1  expected=[1, 4095]    PASS

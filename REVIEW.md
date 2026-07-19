@@ -329,7 +329,7 @@ forward FFT and the filtered round trip.
 >   (identical to master's pre-existing worst path — zero timing regression),
 >   WHS +0.022, DRC clean, LUT 14.13 %, BRAM 30.14 %, bitstream written. The
 >   −4.376 ns single-stage path was fixed by the multiply pipelining above.
-> - **On-DUT HIL — CONFIRMED on the XEM7310 (serial 2537001HTD).** Programmed
+> - **On-DUT HIL — CONFIRMED on the XEM7310.** Programmed
 >   the filter bitstream and ran the full `make test-accel-hw` ZTEST image:
 >   - `ostomachion_fft` **14/14 PASS** (the 8 forward-FFT tests + the 6 filter
 >     tests), `ostomachion_filter_mask` **7/7 PASS**.
